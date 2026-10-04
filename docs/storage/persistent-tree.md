@@ -30,7 +30,7 @@ Leaf                                   Branch
   Object[] values                        Ref[]  children
   int      size                          int    size, height (leaf = 0)
   int      keyBytes  (exact varint size) long   count       (cached sum of child counts)
-  int      valueBytes(codec.maxSize sum)
+  int      valueBytes(codec.maxSize sum; bytes() adds codec.leafOverhead(size))
   Object   owner     (WriteScope token, null when frozen)
   Summary  summary   (volatile, recomputed lazily after mutation)
 ```
