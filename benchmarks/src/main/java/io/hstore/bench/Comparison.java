@@ -27,6 +27,11 @@ public final class Comparison {
             this(workload, description, operations, millis, checksum, Map.of());
         }
 
+        Result using(JvmUsage usage) {
+            return with("gcCount", number(usage.collections())).with("gcMillis", number(usage.pauseMillis()))
+                    .with("allocated", number(usage.allocated()));
+        }
+
         Result with(String key, Json value) {
             Map<String, Json> fields = new LinkedHashMap<>(extra);
             fields.put(key, value);
@@ -94,7 +99,8 @@ public final class Comparison {
         Path directory = Files.createTempDirectory("hstore-bench-" + storeName);
         Dataset dataset = Dataset.generate(scale, SEED);
         List<Result> results = new ArrayList<>();
-        long written = 0;
+        Map<String, Json> totals = new LinkedHashMap<>();
+        long baselineHeap = JvmUsage.retainedHeap();
         Store store = switch (storeName) {
             case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")));
             case "hypergraphdb" -> new HyperGraphDbStore(directory, sync);
@@ -112,6 +118,7 @@ public final class Comparison {
                 store.ingestEdges(dataset, BATCH);
                 return dataset.incidences();
             })));
+            totals.put("retainedHeap", number(JvmUsage.retainedHeap() - baselineHeap));
             int[] nodes = dataset.probeNodes();
             results.add(read("read.incidence", "enumerate the incidence set of a node", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), true));
@@ -154,21 +161,26 @@ public final class Comparison {
             results.add(read("read.incidence.cold", "incidence sets immediately after reopening", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), false));
             store.flush();
-            written = store.bytesWritten();
+            totals.put("bytesWritten", number(store.bytesWritten()));
         } finally {
             store.close();
         }
         long disk = store.diskBytes();
         results.add(new Result("disk", "bytes on disk after a clean shutdown", disk, 1000.0, disk));
-        write(out, store, scale, sync, threads, dataset, written, results);
+        write(out, store, scale, sync, threads, dataset, totals, results);
         results.forEach(result -> IO.println("  %-22s %,14.0f ops/s  %,10.1f ms  checksum %d"
                 .formatted(result.workload(), result.rate(), result.millis(), result.checksum())));
     }
 
+    private static Json number(long value) {
+        return new Json.Number(BigDecimal.valueOf(value));
+    }
+
     private static Result measure(String workload, String description, long operations, LongSupplier work) {
+        JvmUsage usage = JvmUsage.now();
         long started = System.nanoTime();
         long checksum = work.getAsLong();
-        return new Result(workload, description, operations, (System.nanoTime() - started) / 1e6, checksum);
+        return new Result(workload, description, operations, (System.nanoTime() - started) / 1e6, checksum).using(JvmUsage.now().since(usage));
     }
 
     private static long batched(int length, Slice slice) {
@@ -201,6 +213,7 @@ public final class Comparison {
         }
         long[] nanos = new long[operations];
         long checksum = 0;
+        JvmUsage usage = JvmUsage.now();
         long started = System.nanoTime();
         for (int i = 0; i < operations; i++) {
             long begin = System.nanoTime();
@@ -208,12 +221,13 @@ public final class Comparison {
             nanos[i] = System.nanoTime() - begin;
         }
         return new Result(workload, description, operations, (System.nanoTime() - started) / 1e6, checksum)
-                .with("latency", Latency.of(nanos).json());
+                .using(JvmUsage.now().since(usage)).with("latency", Latency.of(nanos).json());
     }
 
     private static Result concurrent(Store store, Dataset dataset, int threads) throws Exception {
         int[] probes = dataset.probeNodes();
         try (ExecutorService pool = Executors.newFixedThreadPool(threads)) {
+            JvmUsage usage = JvmUsage.now();
             long started = System.nanoTime();
             List<Future<Long>> futures = new ArrayList<>();
             for (int t = 0; t < threads; t++) {
@@ -230,11 +244,11 @@ public final class Comparison {
             }
             double millis = (System.nanoTime() - started) / 1e6;
             return new Result("read.incidence.parallel", "incidence sets from %d threads, %,d probes each".formatted(threads, probes.length),
-                    (long) threads * probes.length, millis, checksum);
+                    (long) threads * probes.length, millis, checksum).using(JvmUsage.now().since(usage));
         }
     }
 
-    private static void write(Path out, Store store, int scale, boolean sync, int threads, Dataset dataset, long written, List<Result> results) {
+    private static void write(Path out, Store store, int scale, boolean sync, int threads, Dataset dataset, Map<String, Json> totals, List<Result> results) {
         Map<String, Json> fields = new LinkedHashMap<>();
         fields.put("store", new Json.Str(store.name()));
         fields.put("version", new Json.Str(store.version()));
@@ -249,7 +263,7 @@ public final class Comparison {
         fields.put("os", new Json.Str(System.getProperty("os.name") + " " + System.getProperty("os.version") + " " + System.getProperty("os.arch")));
         fields.put("processors", new Json.Number(BigDecimal.valueOf(Runtime.getRuntime().availableProcessors())));
         fields.put("maxHeap", new Json.Number(BigDecimal.valueOf(Runtime.getRuntime().maxMemory())));
-        fields.put("bytesWritten", new Json.Number(BigDecimal.valueOf(written)));
+        fields.putAll(totals);
         fields.put("results", new Json.Array(results.stream().map(Result::json).toList()));
         try {
             Files.createDirectories(out.toAbsolutePath().getParent());
