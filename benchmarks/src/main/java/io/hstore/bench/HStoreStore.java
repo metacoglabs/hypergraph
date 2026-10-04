@@ -1,0 +1,193 @@
+package io.hstore.bench;
+
+import io.hstore.db.DatabaseOptions;
+import io.hstore.db.HypergraphDatabase;
+import io.hstore.db.Member;
+import io.hstore.db.MemberSpec;
+import io.hstore.db.schema.AtomKind;
+import io.hstore.db.schema.TypeDef.PropertyDef;
+import io.hstore.db.value.TypeTag;
+import io.hstore.db.value.Value;
+import io.hstore.engine.EngineOptions;
+import io.hstore.engine.tree.TreeAlgebra;
+import io.hstore.engine.txn.Durability;
+
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+final class HStoreStore implements Store {
+
+    private static final String NODE = "Entity";
+    private static final String EDGE = "Relation";
+
+    private final Path directory;
+    private final DatabaseOptions options;
+    private HypergraphDatabase database;
+    private long[] nodes;
+    private long[] edges;
+    private long large;
+
+    static final int CACHED_NODES = 1 << 20;
+
+    private final int history;
+
+    HStoreStore(Path directory, boolean sync, int history) {
+        this.directory = directory;
+        this.history = history;
+        this.options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults()
+                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withCachedNodes(CACHED_NODES).withHistoryLimit(history));
+        this.database = HypergraphDatabase.open(directory, options);
+        database.write(writer -> {
+            writer.defineNode(NODE, List.of(new PropertyDef("name", TypeTag.STRING, false, false)));
+            writer.defineEdge(EDGE, AtomKind.SET_EDGE, List.of(), List.of());
+            return null;
+        });
+    }
+
+    @Override
+    public String name() {
+        return "HStore";
+    }
+
+    @Override
+    public String version() {
+        return "0.1.0";
+    }
+
+    @Override
+    public String cache() {
+        return "node cache of %,d decoded nodes and retains %d generations of history".formatted(CACHED_NODES, history);
+    }
+
+    @Override
+    public Path directory() {
+        return directory;
+    }
+
+    @Override
+    public void ingestNodes(Dataset dataset, int batch) {
+        nodes = new long[dataset.nodes()];
+        for (int start = 0; start < nodes.length; start += batch) {
+            int from = start;
+            int to = Math.min(nodes.length, start + batch);
+            database.write(writer -> {
+                for (int i = from; i < to; i++) {
+                    nodes[i] = writer.node(NODE, "n" + i, Map.of("name", "node-" + i));
+                }
+                return null;
+            });
+        }
+    }
+
+    @Override
+    public void ingestEdges(Dataset dataset, int batch) {
+        int[][] source = dataset.edges();
+        edges = new long[source.length];
+        for (int start = 0; start < source.length; start += batch) {
+            int from = start;
+            int to = Math.min(source.length, start + batch);
+            database.write(writer -> {
+                for (int e = from; e < to; e++) {
+                    long edge = writer.edge(EDGE);
+                    writer.load(edge, members(source[e]), MemberSpec.PLAIN);
+                    edges[e] = edge;
+                }
+                return null;
+            });
+        }
+    }
+
+    private List<Long> members(int[] indexes) {
+        List<Long> members = new ArrayList<>(indexes.length);
+        for (int index : indexes) {
+            members.add(nodes[index]);
+        }
+        return members;
+    }
+
+    @Override
+    public long incidence(int[] probes, int from, int to) {
+        return database.read(reader -> {
+            long total = 0;
+            for (int i = from; i < to; i++) {
+                total += reader.incident(nodes[probes[i]]).filter(incident -> incident.edge() != 0).count();
+            }
+            return total;
+        });
+    }
+
+    @Override
+    public long members(int[] probes, int from, int to) {
+        return database.read(reader -> {
+            long total = 0;
+            for (int i = from; i < to; i++) {
+                total += reader.members(edges[probes[i]]).mapToLong(Member::atom).filter(atom -> atom != 0).count();
+            }
+            return total;
+        });
+    }
+
+    @Override
+    public long coMembership(int[][] pairs, int from, int to) {
+        return database.read(reader -> {
+            long total = 0;
+            for (int i = from; i < to; i++) {
+                total += TreeAlgebra.intersectKeys(reader.view().incidentTree(nodes[pairs[i][0]]),
+                        reader.view().incidentTree(nodes[pairs[i][1]])).count();
+            }
+            return total;
+        });
+    }
+
+    @Override
+    public void update(int[] probes, int from, int to, int round) {
+        database.write(writer -> {
+            for (int i = from; i < to; i++) {
+                writer.set(nodes[probes[i]], "name", new Value.Text("updated-" + round + "-" + i));
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void largeEdge(int count) {
+        large = database.write(writer -> {
+            long edge = writer.edge(EDGE);
+            List<Long> members = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                members.add(nodes[i]);
+            }
+            writer.load(edge, members, MemberSpec.PLAIN);
+            return edge;
+        });
+    }
+
+    @Override
+    public long scanLargeEdge() {
+        return database.read(reader -> reader.members(large).mapToLong(Member::atom).filter(atom -> atom != 0).count());
+    }
+
+    @Override
+    public long probeLargeEdge(int[] probes, int from, int to) {
+        return database.read(reader -> {
+            long found = 0;
+            for (int i = from; i < to; i++) {
+                found += reader.view().incidence(large, nodes[probes[i]]).isPresent() ? 1 : 0;
+            }
+            return found;
+        });
+    }
+
+    @Override
+    public void reopen() {
+        database.close();
+        database = HypergraphDatabase.open(directory, options);
+    }
+
+    @Override
+    public void close() {
+        database.close();
+    }
+}
