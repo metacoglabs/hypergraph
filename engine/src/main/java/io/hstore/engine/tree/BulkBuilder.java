@@ -50,7 +50,7 @@ public final class BulkBuilder<V> {
             return this;
         }
         int entryBytes = schema.entryBytes(value);
-        if (size > 0 && bytes + entryBytes + ByteCursor.varLongSize(key - keys[size - 1]) > layout.leafBudget()) {
+        if (size > 0 && bytes + entryBytes + ByteCursor.varLongSize(key - keys[size - 1]) + schema.leafOverhead(size + 1) > layout.leafBudget()) {
             sealLeaf();
         }
         entryBytes += size == 0 ? ByteCursor.signedVarLongSize(key) : ByteCursor.varLongSize(key - keys[size - 1]);

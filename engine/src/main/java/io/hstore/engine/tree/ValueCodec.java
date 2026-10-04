@@ -15,6 +15,10 @@ public interface ValueCodec<V> {
 
     void decode(ByteCursor in, long[] keys, Object[] into);
 
+    default int leafOverhead(int entries) {
+        return 0;
+    }
+
     default boolean holdsRefs() {
         return false;
     }

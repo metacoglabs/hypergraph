@@ -66,7 +66,7 @@ public final class Leaf extends Node {
     }
 
     int bytes() {
-        return keyBytes + valueBytes;
+        return keyBytes + valueBytes + schema.leafOverhead(size);
     }
 
     long firstKey() {
