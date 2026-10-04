@@ -112,6 +112,36 @@ filter, `SIMILAR TO … TOP k` is evaluated by computing the global top-`k` once
 `d SIMILAR TO 'x' TOP 3 AND d.class = 'statin'` means *"among the 3 nearest atoms, those that are statins"*, not
 *"the 3 nearest statins"*.
 
+### Intersections and unions
+
+**`AND`: intersection.** Conjuncts whose access path is exact for them (property and JSON index ranges,
+`CONTAINS`, `IN`, an atom equality) are sorted by estimated rows. For every prefix of two to four of them the
+planner adds an `Intersection` candidate.
+
+* **Execution:** each part is scanned into a sorted, distinct id array, starting from the smallest, and the
+  arrays are merge-intersected.
+* **Estimated rows:** `rows₁ · Π (rowsᵢ / population)`, which assumes independence. `population` is the type's
+  atom count, or the catalog size when there is no type.
+* **Cost:** the sum of the part scans plus verification of the conjuncts nobody consumed.
+
+An intersection only wins when verifying the first part's rows would cost more than scanning the next index
+(roughly when both ranges are large and similar in size).
+
+```text
+EXPLAIN MATCH NODE i:Item WHERE i.color = 'red' AND i.shape = 'round';
+Intersect[IndexRange(Item.color ['red', 'red']), IndexRange(Item.shape ['round', 'round'])]  rows≈1000  cost≈189
+```
+
+**`OR`: union.** When every operand of a disjunction has an access path of its own, the planner adds a `Union`
+candidate that scans each part and merges the ids, sorted and deduplicated. Its estimate is the sum of the
+parts, capped at the population. If every part is exact for its operand, the whole `OR` conjunct is consumed and
+not verified again.
+
+```text
+EXPLAIN MATCH NODE i:Item WHERE i.size = 1 OR i.size = 2;
+Union[IndexRange(Item.size [1, 1]), IndexRange(Item.size [2, 2])]  rows≈80  cost≈27
+```
+
 ## Cost model
 
 For each candidate the planner computes an estimated row count, corrects it with feedback, and prices it
@@ -267,5 +297,7 @@ elapsedMicros`), which is how [HStore Studio](../operations/studio.md) renders i
 
 ## Limitations
 
-- Disjunctions (`OR`) and negations never drive an access path; their operands are evaluated as residual filters.
-- Only one access path is used per `MATCH`; index intersection across two indexed conjuncts is not performed.
+- Negations never drive an access path; they are evaluated as residual filters.
+- A disjunction drives a `Union` only when each of its operands has an access path by itself; an operand that is
+  itself an `AND` does not.
+- Intersections consider at most four parts, chosen in order of estimated rows.
