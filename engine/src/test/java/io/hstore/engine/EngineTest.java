@@ -1,13 +1,19 @@
 package io.hstore.engine;
 
 import io.hstore.engine.catalog.Branch;
+import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.CommitEvent;
+import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Hyperedge;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.topology.MemberChange;
+import io.hstore.engine.tree.FingerprintMode;
+import io.hstore.engine.tree.Hashing;
 import io.hstore.engine.tree.TreeAlgebra;
+import io.hstore.engine.tree.TreeSchema;
+import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.txn.CommitResult;
 import io.hstore.engine.txn.IncidentEdge;
 import io.hstore.engine.txn.Isolation;
@@ -25,6 +31,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -47,6 +54,46 @@ class EngineTest {
 
     static EngineOptions small() {
         return EngineOptions.defaults().withPageSize(1024).withPagesPerSegment(256).withHistoryLimit(1000);
+    }
+
+    @Test
+    void readOnlySlotsKeepTheFastCommitPath() {
+        Slot<Long> observed = Slot.primary(120, "observed", counters(240));
+        Slot<Long> written = Slot.primary(121, "written", counters(241));
+        EngineOptions options = small().withExtensions(List.of(observed, written), List.of());
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            engine.write(txn -> {
+                txn.put(observed, 1, 10L);
+                return null;
+            });
+            Transaction reader = engine.begin();
+            assertEquals(Optional.of(10L), reader.get(observed, 1));
+            reader.put(written, 1, 1L);
+            engine.write(txn -> {
+                txn.put(observed, 1, 20L);
+                return null;
+            });
+            assertEquals(CommitResult.Outcome.COMMITTED, reader.commit().outcome());
+            engine.read(snapshot -> {
+                assertEquals(Optional.of(20L), snapshot.get(observed, 1));
+                assertEquals(Optional.of(1L), snapshot.get(written, 1));
+                return null;
+            });
+            Transaction strict = engine.begin(TxnOptions.defaults().withIsolation(Isolation.SERIALIZABLE));
+            assertEquals(Optional.of(20L), strict.get(observed, 1));
+            strict.put(written, 2, 2L);
+            engine.write(txn -> {
+                txn.put(observed, 1, 30L);
+                return null;
+            });
+            assertThrows(HStoreException.Conflict.class, strict::commit);
+        }
+    }
+
+    private static TreeSchema<Long> counters(int id) {
+        return new TreeSchema<>(id, "counters-" + id, FingerprintMode.SET,
+                ValueCodec.rows(ByteCursor::signedVarLongSize, ByteCursor::putSignedVarLong, ByteCursor::getSignedVarLong),
+                (key, value, into) -> into.entry(key, Hashing.of(key, value)));
     }
 
     @Test
