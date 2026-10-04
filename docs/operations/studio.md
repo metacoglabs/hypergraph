@@ -135,7 +135,7 @@ Errors use one JSON shape:
 |---|---|---|
 | `GET /` and static files | no | `index.html`, `studio.css`, `favicon.svg`, `js/**.js`. Paths must match `([a-z0-9-]+/){0,3}[a-z0-9-]+\.(html|css|js|svg)`. Everything else returns `404`, which rules out path traversal. |
 | `GET /api/info` | no | Product, version, current generation, `authenticationRequired`, `startedAt`, and `session` (or `null`). |
-| `POST /api/login` | no | Body `{"user","password"}`. With authentication off, an empty body `{}` opens a `system` session. `401` on failure. |
+| `POST /api/login` | no | Body `{"user","password"}`. With authentication off, an empty body `{}` opens a `system` session. `401` on failure. After 5 failed attempts from one client address within 15 minutes, further attempts get `429` until the window ends; a successful login resets the count. |
 | `POST /api/logout` | no | Closes the session and expires the cookie. |
 | `POST /api/query` | yes | Body `{"script": "<HQL>"}`. Executes in the session; see below. |
 | `GET /api/graph` | yes | Hypergraph neighbourhood for visualisation; see below. |
