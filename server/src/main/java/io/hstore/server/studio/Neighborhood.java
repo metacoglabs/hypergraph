@@ -90,7 +90,7 @@ final class Neighborhood {
                 if (atoms.containsKey(edge) || reader.cardinality(edge) > CONNECT_CARDINALITY) {
                     return;
                 }
-                long shared = reader.members(edge).filter(member -> seeds.contains(member.atom())).limit(2).count();
+                long shared = reader.memberIds(edge).filter(seeds::contains).limit(2).count();
                 if (shared >= 2) {
                     include(edge);
                 }

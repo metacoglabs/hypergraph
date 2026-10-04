@@ -2,7 +2,6 @@ package io.hstore.bench;
 
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
-import io.hstore.db.Member;
 import io.hstore.db.MemberSpec;
 import io.hstore.db.schema.AtomKind;
 import io.hstore.db.schema.TypeDef.PropertyDef;
@@ -123,7 +122,7 @@ final class HStoreStore implements Store {
         return database.read(reader -> {
             long total = 0;
             for (int i = from; i < to; i++) {
-                total += reader.members(edges[probes[i]]).mapToLong(Member::atom).filter(atom -> atom != 0).count();
+                total += reader.memberIds(edges[probes[i]]).filter(atom -> atom != 0).count();
             }
             return total;
         });
@@ -166,7 +165,7 @@ final class HStoreStore implements Store {
 
     @Override
     public long scanLargeEdge() {
-        return database.read(reader -> reader.members(large).mapToLong(Member::atom).filter(atom -> atom != 0).count());
+        return database.read(reader -> reader.memberIds(large).filter(atom -> atom != 0).count());
     }
 
     @Override

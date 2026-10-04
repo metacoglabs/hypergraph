@@ -2,6 +2,7 @@ package io.hstore.db.query;
 
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
+import io.hstore.db.Member;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
 
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -81,6 +83,20 @@ class QueryLanguageTest {
         assertEquals(List.of("Alice"), column(session.execute("MATCH NODE p:Person WHERE json(p, '$.address.zip') = 94110 RETURN p.name"), 0));
         assertEquals(List.of("Bob"), column(session.execute("MATCH NODE p:Person WHERE json(p, '$.address.zip') < 50000 RETURN p.name"), 0));
         assertEquals(List.of("10001"), column(session.execute("MATCH NODE p:Person WHERE p.name = 'Bob' RETURN json(p, '$.address.zip')"), 0));
+    }
+
+    @Test
+    void memberIdsFollowMembershipOrder() {
+        session.execute("INSERT EDGE Pathway MEMBERS ($carol, $alice, $bob) AS $reverse");
+        Map<String, Long> bound = session.variables();
+        List<Long> expected = List.of(bound.get("carol"), bound.get("alice"), bound.get("bob"));
+        database.read(reader -> {
+            assertEquals(expected, reader.memberIds(bound.get("reverse")).boxed().toList());
+            for (String edge : List.of("reverse", "path", "c1", "c2")) {
+                assertEquals(reader.members(bound.get(edge)).map(Member::atom).toList(), reader.memberIds(bound.get(edge)).boxed().toList());
+            }
+            return null;
+        });
     }
 
     @Test
