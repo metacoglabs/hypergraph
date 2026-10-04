@@ -183,6 +183,10 @@ public sealed class Reader permits Writer {
         return hyperedge.stream().map(incidence -> member(incidence, hyperedge.kind() == EdgeKind.ORDERED ? position[0]++ : -1));
     }
 
+    public LongStream memberIds(long edge) {
+        return edge(edge).memberIds();
+    }
+
     public Stream<Member> members(long edge, long validAt) {
         return edge(edge).validAt(validAt).map(incidence -> member(incidence, -1));
     }
