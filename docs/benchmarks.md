@@ -64,6 +64,18 @@ maximum, taking the median of each percentile across runs. Throughput hides occa
 group commit, checkpoints, compaction or GC; these percentiles show them. Under `sync` durability,
 `latency.commit` is effectively the cost of one durable commit.
 
+**Bytes written.** For every write workload the report also shows the bytes each engine wrote per operation, in a
+*Resources* table, plus the total for the whole run. Both engines count the bytes they write themselves:
+
+| HStore | HyperGraphDB |
+|---|---|
+| WAL bytes plus page bytes (`EngineStats.walBytes + dataBytesWritten`), including pages moved by compaction | sequential plus random write bytes from JE's `EnvironmentStats`, including the log cleaner |
+
+Each write workload ends with a flush (an HStore checkpoint, `Environment.sync()` for JE) after its timed section,
+so bytes still sitting in buffers are counted against the workload that produced them. The counters restart
+when a store reopens, so the adapters carry the total across `reopen`. Bytes written during the final close
+aren't counted.
+
 ## Results
 
 Ratios above 1 favour HStore. Throughput ratios divide HStore by HyperGraphDB; latency and size ratios divide
