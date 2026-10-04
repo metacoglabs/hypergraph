@@ -211,7 +211,7 @@ SCALE=1 DURABILITY=sync  benchmarks/run.sh
 `core/src/java` and `storage/bdb-je/src/java` with `javac --release 11` against Berkeley DB JE 5.0.73, and
 installs `org.hypergraphdb:hgdb` and `org.hypergraphdb:hgbdbje` version `1.4-99485a1`.
 
-`run.sh` builds with `-Pbenchmarks`, runs each store in its own JVM on the same deterministic dataset (seeded
+`run.sh` builds with `-Pbenchmarks`, runs each store `RUNS` times (default 3) in its own JVM on the same deterministic dataset (seeded
 generator, `SCALE` × 50,000 nodes and × 100,000 hyperedges), writes `benchmarks/results/scale-N-durability/*.json`
 and prints a Markdown report whose *Results agree* column cross-checks every query checksum between the two
 engines. Methodology and published numbers: [benchmarks.md](benchmarks.md).

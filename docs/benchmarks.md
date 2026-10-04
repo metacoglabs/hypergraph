@@ -176,7 +176,10 @@ SCALE=4 DURABILITY=async benchmarks/run.sh
 SCALE=4 DURABILITY=async HISTORY=1 benchmarks/run.sh
 ```
 
-`run.sh` builds the `benchmarks` module (`-Pbenchmarks`) and runs each store in its own JVM. It writes
-`benchmarks/results/scale-<s>-<durability>-history-<h>/{hstore,hypergraphdb}.json` and the Markdown report
-`report.md` in the same directory. `THREADS` and `HEAP` override the thread count and heap size. Close other
+`run.sh` builds the `benchmarks` module (`-Pbenchmarks`) and runs each store in its own JVM, `RUNS` times
+(default 3), alternating the two stores so slow periods hit both. It writes
+`benchmarks/results/scale-<s>-<durability>-history-<h>/{hstore,hypergraphdb}-<run>.json`, plus a Markdown report
+`report.md` in the same directory. Each cell in the report is the median over the runs, with the fastest and slowest
+run in brackets, and "Results agree" requires every run of both stores to return the same checksum. `THREADS`
+and `HEAP` override the thread count and heap size. Close other
 workloads first: the numbers are only meaningful on an otherwise idle machine.
