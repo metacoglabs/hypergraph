@@ -157,7 +157,7 @@ postings:        key = edge atom id    →  Incident(roleSet, locator)
 
 `index/PostingIndex.java` stores each posting set in one of two forms:
 
-* **`Inline(long[] keys, List<P> values)`** while it has at most `inlineLimit` entries *and* its encoded size is at most `maxValueBytes / 2`. It is stored inside the directory leaf: `u8 0 | varint count | zigzag-varint first key | varint deltas | values`.
+* **`Inline(long[] keys, List<P> values, long fingerprint, int bytes)`** while it has at most `inlineLimit` entries *and* its encoded size is at most `maxValueBytes / 2`. It is stored inside the directory leaf: `u8 0 | varint count | zigzag-varint first key | varint deltas | values`. The fingerprint and encoded size are worked out once when the list is built or decoded (`PostingsCodec.inline`), and are not stored on disk. Leaf summaries and size accounting read them in O(1) instead of re-hashing every posting each time a directory leaf is copied or frozen.
 * **`Promoted(Ref root)`**: once either limit is exceeded, the set is bulk-built into its own postings tree, and the directory stores `u8 1 | Ref`. On removal it is demoted back to inline when it shrinks to `inlineLimit / 2` entries. The gap between the two thresholds prevents thrashing.
 
 The directory's entry measure sets `weight = postings.size()`, so `countRange(lo, hi)` sums posting counts over a key range from summaries alone. The fingerprint of a posting set is identical in both forms: the inline form sums `combine(mix(edge), hash(incident))`, which is exactly the SET fingerprint of the promoted tree.

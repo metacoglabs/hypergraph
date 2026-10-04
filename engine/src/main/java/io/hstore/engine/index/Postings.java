@@ -9,7 +9,7 @@ public sealed interface Postings<P> {
 
     long size();
 
-    record Inline<P>(long[] keys, List<P> values) implements Postings<P> {
+    record Inline<P>(long[] keys, List<P> values, long fingerprint, int bytes) implements Postings<P> {
 
         public Inline {
             if (keys.length != values.size()) {
@@ -29,7 +29,7 @@ public sealed interface Postings<P> {
 
         @Override
         public boolean equals(Object other) {
-            return other instanceof Inline<?>(long[] otherKeys, List<?> otherValues)
+            return other instanceof Inline<?>(long[] otherKeys, List<?> otherValues, long _, int _)
                     && Arrays.equals(keys, otherKeys) && values.equals(otherValues);
         }
 
