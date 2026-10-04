@@ -58,6 +58,46 @@ class SecurityTest {
     }
 
     @Test
+    void materializedViewsStayInsideTheirTenant() throws InterruptedException {
+        admin.executeAll("""
+                CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin;
+                INSERT NODE Patient 'home' {mrn: 'H-1'} AS $h;
+                INSERT EDGE Encounter MEMBERS ($h AS patient);
+                """);
+        long home = admin.variables().get("h");
+        try (Session carol = login("carol", "c4rol"); Session alice = login("alice", "s3cret")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient);");
+            long acmePatient = alice.variables().get("p");
+            carol.execute("CREATE VIEW acme_degrees AS DEGREE");
+            admin.execute("CREATE VIEW home_degrees AS DEGREE");
+            assertEquals(List.of(String.valueOf(acmePatient)), keys(carol.execute("VIEW acme_degrees")));
+            assertEquals(List.of(String.valueOf(home)), keys(admin.execute("VIEW home_degrees")));
+            assertEquals(List.of("acme_degrees"), carol.execute("SHOW VIEWS").rows().stream().map(row -> row.get(1).render()).toList());
+            assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("VIEW home_degrees"));
+            alice.execute("INSERT EDGE Encounter MEMBERS (@" + acmePatient + " AS patient)");
+            admin.execute("INSERT EDGE Encounter MEMBERS (@" + home + " AS patient)");
+            carol.execute("REFRESH VIEW acme_degrees");
+            assertEquals("2", carol.execute("VIEW acme_degrees").rows().getFirst().get(1).render());
+            assertEquals(List.of(String.valueOf(acmePatient)), keys(carol.execute("VIEW acme_degrees")));
+            carol.execute("CREATE VIEW acme_live AS CARDINALITY CONTINUOUS");
+            alice.execute("INSERT EDGE Encounter MEMBERS (@" + acmePatient + " AS patient) AS $latest");
+            admin.execute("INSERT EDGE Encounter MEMBERS (@" + home + " AS patient)");
+            String latest = String.valueOf(alice.variables().get("latest"));
+            long deadline = System.currentTimeMillis() + 5000;
+            while (!keys(carol.execute("VIEW acme_live")).contains(latest) && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20);
+            }
+            List<String> live = keys(carol.execute("VIEW acme_live"));
+            assertTrue(live.contains(latest));
+            assertEquals(3, live.size());
+        }
+    }
+
+    private static List<String> keys(QueryResult result) {
+        return result.rows().stream().map(row -> row.getFirst().render()).toList();
+    }
+
+    @Test
     void tenantsAreIsolatedIncludingCanonicalKeys() {
         try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
