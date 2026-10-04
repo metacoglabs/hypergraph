@@ -150,6 +150,19 @@ final class HStoreStore implements Store {
     }
 
     @Override
+    public long twoHop(int[] probes, int from, int to) {
+        return database.read(reader -> {
+            long total = 0;
+            for (int i = from; i < to; i++) {
+                long start = nodes[probes[i]];
+                total += reader.incident(start).flatMapToLong(incident -> reader.memberIds(incident.edge()))
+                        .filter(atom -> atom != start).sorted().distinct().count();
+            }
+            return total;
+        });
+    }
+
+    @Override
     public void update(int[] probes, int from, int to, int round) {
         database.write(writer -> {
             for (int i = from; i < to; i++) {

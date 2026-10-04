@@ -4,7 +4,7 @@ import java.util.Arrays;
 import java.util.SplittableRandom;
 
 record Dataset(int nodes, int[][] edges, int[] probeNodes, int[] probeEdges, int[][] probePairs, int[] updates, int[] deletions,
-               int[][] removals) {
+               int[][] removals, int[] probeTwoHop) {
 
     private static final int NODES_PER_SCALE = 50_000;
     private static final int EDGES_PER_SCALE = 100_000;
@@ -14,6 +14,7 @@ record Dataset(int nodes, int[][] edges, int[] probeNodes, int[] probeEdges, int
     private static final int MAX_CARDINALITY = 32;
     private static final double DELETED_FRACTION = 0.2;
     private static final int REMOVALS = 20_000;
+    private static final int TWO_HOP_PROBES = 10_000;
 
     static Dataset generate(int scale, long seed) {
         SplittableRandom random = new SplittableRandom(seed);
@@ -43,7 +44,8 @@ record Dataset(int nodes, int[][] edges, int[] probeNodes, int[] probeEdges, int
                 .limit(REMOVALS)
                 .mapToObj(edge -> new int[]{edge, edges[edge][random.nextInt(edges[edge].length)]})
                 .toArray(int[][]::new);
-        return new Dataset(nodes, edges, probeNodes, probeEdges, pairs, updates, deletions, removals);
+        int[] probeTwoHop = random.ints(TWO_HOP_PROBES, 0, nodes).toArray();
+        return new Dataset(nodes, edges, probeNodes, probeEdges, pairs, updates, deletions, removals, probeTwoHop);
     }
 
     private static int[] shuffled(SplittableRandom random, int length) {
