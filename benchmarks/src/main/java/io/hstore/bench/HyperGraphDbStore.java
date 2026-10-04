@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.function.IntConsumer;
 
 final class HyperGraphDbStore implements Store {
 
@@ -78,7 +79,7 @@ final class HyperGraphDbStore implements Store {
     }
 
     @Override
-    public void ingestNodes(Dataset dataset, int batch) {
+    public void ingestNodes(Dataset dataset, int batch, IntConsumer committed) {
         nodes = new HGPersistentHandle[dataset.nodes()];
         for (int start = 0; start < nodes.length; start += batch) {
             int from = start;
@@ -89,7 +90,13 @@ final class HyperGraphDbStore implements Store {
                 }
                 return null;
             });
+            committed.accept(to);
         }
+    }
+
+    @Override
+    public long countNodes() {
+        return read(() -> hg.count(graph, hg.type(String.class)));
     }
 
     @Override
