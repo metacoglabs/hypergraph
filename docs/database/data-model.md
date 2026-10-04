@@ -460,6 +460,7 @@ Optional.empty
 | `atoms(type)`, `atomsOfType`, `count`, `countOfType`, `allAtoms(edges)` | type index / catalog scans |
 | `property(atom, name[, validAt])`, `properties`, `text(value)`, `document` | property access; `text` dereferences payloads |
 | `edge`, `members`, `members(edge, validAt)`, `membersWithRole`, `membersWeighted` | membership access with summary pruning |
+| `memberIds(edge)` | member ids only, as a `LongStream` in membership order, without building `Member` records |
 | `cardinality`, `degree`, `incident`, `position` | topology statistics and reverse lookup |
 | `lookup`, `range` | property and JSON index access with exact re-check |
 | `similar(text, k, consistency)`, `similar(model, vector, k, consistency)`, `embedding` | [semantic](semantic.md) |
