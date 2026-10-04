@@ -57,6 +57,7 @@ re-verifies the record's tenant.
 | catalog records | `AtomRecord.tenant()` | `Reader.visible(atom)` ⇔ the record exists and `record.tenant() == principal.tenant()` |
 | assertions, evidence | `Qualifier.tenant`, `Evidence.tenant` stamped on write | `Provenance.qualifier/evidence` filter by tenant |
 | usage counters (slot 46) | tenant id | per-tenant accounting |
+| materialized views (slot 42) | `Descriptor.tenant`, set from the creating admin | builds and deltas cover only that tenant; names and listings are per tenant |
 
 Every `Reader` method that accepts an atom id calls `visible` (or filters by tenant): `atom`, `require`,
 `property`, `properties`, `document`, `edge`, `members`, `cardinality`, `degree`, `incident`, `embedding`,
@@ -73,7 +74,6 @@ Shared, non-tenant-scoped structures:
 | schema (types, roles, property keys) | one catalog of type definitions | DDL requires ADMIN; type names are visible to all tenants |
 | dictionary | interned strings | ids only |
 | HNSW indexes | one per model | results filtered by `Reader.visible` ([semantic](semantic.md#tenant-visibility)) |
-| materialized views | computed over the whole database | ADMIN only |
 | payload store | append-only byte store | payloads are reachable only through tenant-checked properties and embeddings |
 | branches, history, statistics | engine-level | ADMIN only (`STATS`, `HISTORY`, `DIFF`) |
 
