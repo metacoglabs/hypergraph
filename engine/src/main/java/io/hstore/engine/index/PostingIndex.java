@@ -23,13 +23,13 @@ public final class PostingIndex<P> {
 
     private final TreeSchema<Postings<P>> directory;
     private final TreeSchema<P> postings;
-    private final ToLongFunction<P> hash;
+    private final PostingsCodec<P> codec;
     private final int inlineLimit;
 
-    private PostingIndex(TreeSchema<Postings<P>> directory, TreeSchema<P> postings, ToLongFunction<P> hash, int inlineLimit) {
+    private PostingIndex(TreeSchema<Postings<P>> directory, TreeSchema<P> postings, PostingsCodec<P> codec, int inlineLimit) {
         this.directory = directory;
         this.postings = postings;
-        this.hash = hash;
+        this.codec = codec;
         this.inlineLimit = inlineLimit;
     }
 
@@ -37,16 +37,15 @@ public final class PostingIndex<P> {
                                          ToLongFunction<P> hash, int inlineLimit) {
         TreeSchema<P> inner = new TreeSchema<>(postingsId, name + "-postings", FingerprintMode.SET, codec, EntryMeasure.keyed(hash));
         EntryMeasure<Postings<P>> outerMeasure = (key, value, into) ->
-                into.entry(key, Hashing.combine(Hashing.mix(key), fingerprint(value, hash))).weight(value.size());
-        TreeSchema<Postings<P>> outer = new TreeSchema<>(directoryId, name, FingerprintMode.SET, new PostingsCodec<>(inner), outerMeasure);
-        return new PostingIndex<>(outer, inner, hash, inlineLimit);
+                into.entry(key, Hashing.combine(Hashing.mix(key), fingerprint(value))).weight(value.size());
+        PostingsCodec<P> postingsCodec = new PostingsCodec<>(inner, hash);
+        TreeSchema<Postings<P>> outer = new TreeSchema<>(directoryId, name, FingerprintMode.SET, postingsCodec, outerMeasure);
+        return new PostingIndex<>(outer, inner, postingsCodec, inlineLimit);
     }
 
-    private static <P> long fingerprint(Postings<P> value, ToLongFunction<P> hash) {
+    private static <P> long fingerprint(Postings<P> value) {
         return switch (value) {
-            case Postings.Inline<P>(long[] keys, List<P> values) -> IntStream.range(0, keys.length)
-                    .mapToLong(i -> Hashing.combine(Hashing.mix(keys[i]), hash.applyAsLong(values.get(i))))
-                    .sum();
+            case Postings.Inline<P> inline -> inline.fingerprint();
             case Postings.Promoted<P>(Ref root) -> root.summary().fingerprint();
         };
     }
@@ -61,7 +60,7 @@ public final class PostingIndex<P> {
 
     public Tree<Postings<P>> add(Tree<Postings<P>> index, WriteScope scope, long key, long posting, P value) {
         return index.update(scope, key, current -> Optional.of(switch (current.orElse(null)) {
-            case null -> new Postings.Inline<>(new long[]{posting}, List.of(value));
+            case null -> codec.inline(new long[]{posting}, List.of(value));
             case Postings.Inline<P> inline -> insertInline(index, scope, inline, posting, value);
             case Postings.Promoted<P>(Ref root) -> new Postings.Promoted<>(subtree(index, root).put(scope, posting, value).root());
         }));
@@ -102,7 +101,7 @@ public final class PostingIndex<P> {
 
     public Stream<Entry<P>> stream(Tree<Postings<P>> index, long key) {
         return index.get(key).map(value -> switch (value) {
-            case Postings.Inline<P>(long[] keys, List<P> values) ->
+            case Postings.Inline<P>(long[] keys, List<P> values, long _, int _) ->
                     IntStream.range(0, keys.length).mapToObj(i -> new Entry<>(keys[i], values.get(i)));
             case Postings.Promoted<P>(Ref root) -> subtree(index, root).stream();
         }).orElseGet(Stream::empty);
@@ -110,7 +109,7 @@ public final class PostingIndex<P> {
 
     public Tree<P> tree(Tree<Postings<P>> index, long key) {
         return index.get(key).map(value -> switch (value) {
-            case Postings.Inline<P>(long[] keys, List<P> values) -> {
+            case Postings.Inline<P>(long[] keys, List<P> values, long _, int _) -> {
                 BulkBuilder<P> builder = Tree.empty(postings, index.source()).builder(new WriteScope());
                 for (int i = 0; i < keys.length; i++) {
                     builder.add(keys[i], values.get(i));
@@ -140,7 +139,7 @@ public final class PostingIndex<P> {
             keys[at] = posting;
             values.add(at, value);
         }
-        Postings.Inline<P> grown = new Postings.Inline<>(keys, values);
+        Postings.Inline<P> grown = codec.inline(keys, values);
         if (keys.length <= inlineLimit && directory.codec().maxSize(grown) <= index.source().layout().maxValueBytes() / 2) {
             return grown;
         }
@@ -164,13 +163,13 @@ public final class PostingIndex<P> {
         System.arraycopy(inline.keys(), found + 1, keys, found, keys.length - found);
         List<P> values = new ArrayList<>(inline.values());
         values.remove(found);
-        return Optional.of(new Postings.Inline<>(keys, values));
+        return Optional.of(codec.inline(keys, values));
     }
 
     private Postings<P> demote(Tree<P> remaining) {
         List<Entry<P>> entries = remaining.stream().toList();
         long[] keys = entries.stream().mapToLong(Entry::key).toArray();
-        return new Postings.Inline<>(keys, entries.stream().map(Entry::value).toList());
+        return codec.inline(keys, entries.stream().map(Entry::value).toList());
     }
 
     @Override
