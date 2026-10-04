@@ -37,7 +37,7 @@ public final class Materializer {
         PageHeader.assign(image, pageId);
         sink.accept(pageId, image, frozen);
         pages++;
-        return new Ref.Stored(pageId, frozen.summary());
+        return new Ref.Stored(pageId, PageId.unitsFor(image.byteSize()), frozen.summary());
     }
 
     public long pagesWritten() {

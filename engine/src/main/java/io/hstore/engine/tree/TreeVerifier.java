@@ -43,7 +43,7 @@ public final class TreeVerifier {
         if (expectedHeight >= 0 && node.height() != expectedHeight) {
             throw fault(ref, "unbalanced tree in " + schema + ": height " + node.height() + " where " + expectedHeight + " was expected");
         }
-        boolean first = !(ref instanceof Ref.Stored(long pageId, Summary _)) || verified.add(pageId);
+        boolean first = !(ref instanceof Ref.Stored(long pageId, int _, Summary _)) || verified.add(pageId);
         Summary.Builder builder = Summary.builder(schema.fingerprint());
         Report report = new Report(first && ref instanceof Ref.Stored ? 1 : 0, 0, 0, node.height() + 1);
         switch (node) {
@@ -102,6 +102,6 @@ public final class TreeVerifier {
     }
 
     private static RuntimeException fault(Ref ref, String message) {
-        return ref instanceof Ref.Stored(long pageId, Summary _) ? HStoreException.corrupt(pageId, message) : new IllegalStateException(message);
+        return ref instanceof Ref.Stored(long pageId, int _, Summary _) ? HStoreException.corrupt(pageId, message) : new IllegalStateException(message);
     }
 }

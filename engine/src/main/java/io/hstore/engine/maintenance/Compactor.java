@@ -11,7 +11,8 @@ import io.hstore.engine.tree.TreeWalker;
 import io.hstore.engine.tree.WriteScope;
 import io.hstore.engine.txn.TransactionManager;
 
-import java.util.HashSet;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -23,7 +24,7 @@ import java.util.stream.Stream;
 
 public final class Compactor {
 
-    public record Report(Map<Integer, Long> livePages, List<Integer> compacted, long generation) {
+    public record Report(Map<Integer, Long> liveBytes, List<Integer> compacted, long generation) {
     }
 
     private final TransactionManager transactions;
@@ -37,21 +38,28 @@ public final class Compactor {
     }
 
     public Map<Integer, Long> liveness() {
-        Set<Long> visited = new HashSet<>();
+        Map<Long, Integer> visited = new HashMap<>();
         TreeWalker walker = new TreeWalker(transactions.source());
         Stream.concat(transactions.history().stream(), Stream.of(transactions.current()))
                 .flatMap(generation -> generation.branches().values().stream())
                 .forEach(branch -> branch.roots().roots().forEach((slot, ref) ->
                         walker.visit(ref, slots.slot(slot).schema(), visited)));
-        return visited.stream().collect(Collectors.groupingBy(PageId::segmentOf, TreeMap::new, Collectors.counting()));
+        return visited.entrySet().stream().collect(Collectors.groupingBy(entry -> PageId.segmentOf(entry.getKey()), TreeMap::new,
+                Collectors.summingLong(entry -> (long) entry.getValue() * PageId.UNIT_BYTES)));
     }
 
     public Report compact(double liveThreshold) {
+        return compact(liveThreshold, Integer.MAX_VALUE);
+    }
+
+    public Report compact(double liveThreshold, int maxVictims) {
         Map<Integer, Long> live = liveness();
         int active = pages.activeSegment();
         List<Integer> victims = pages.segments().stream()
                 .filter(segment -> segment.state() == SegmentState.SEALED && segment.id() != active)
-                .filter(segment -> live.getOrDefault(segment.id(), 0L) < segment.pages() * liveThreshold)
+                .filter(segment -> live.getOrDefault(segment.id(), 0L) < segment.bytes() * liveThreshold)
+                .sorted(Comparator.comparingDouble(segment -> (double) live.getOrDefault(segment.id(), 0L) / Math.max(1, segment.bytes())))
+                .limit(maxVictims)
                 .map(SegmentInfo::id)
                 .toList();
         long generation = transactions.current().id();
