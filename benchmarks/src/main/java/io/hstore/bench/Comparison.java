@@ -133,6 +133,9 @@ public final class Comparison {
                     (from, to) -> store.members(dataset.probeEdges(), from, to), true));
             results.add(read("read.comembership", "count hyperedges containing both atoms of a pair", dataset.probePairs().length,
                     (from, to) -> store.coMembership(dataset.probePairs(), from, to), true));
+            int[] twoHop = dataset.probeTwoHop();
+            results.add(read("read.twohop", "count the distinct nodes that share a hyperedge with a node", twoHop.length,
+                    (from, to) -> store.twoHop(twoHop, from, to), true));
             results.add(concurrent(store, dataset, threads));
             results.add(latency("latency.read", "one incidence lookup per read transaction", nodes.length,
                     i -> store.incidence(nodes, i, i + 1), true));
