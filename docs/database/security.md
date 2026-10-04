@@ -60,7 +60,9 @@ re-verifies the record's tenant.
 
 Every `Reader` method that accepts an atom id calls `visible` (or filters by tenant): `atom`, `require`,
 `property`, `properties`, `document`, `edge`, `members`, `cardinality`, `degree`, `incident`, `embedding`,
-`StateBindings.state`, `Signals.of`, `Temporal.activeEdges`. Writes call `require`, so a principal cannot modify
+`StateBindings.state`, `Signals.of`, `Temporal.activeEdges`. The one shortcut is `incident`: when the reader's
+principal is in the default tenant and no other tenant exists, every atom is visible and a missing atom has no
+incidence entries anyway, so the extra catalog lookup is skipped. The reader checks this once per snapshot. Writes call `require`, so a principal cannot modify
 an atom it cannot see. A hyperedge may only gain members that are visible to the writer (`Writer.incidence`), so a
 tenant cannot reference another tenant's atoms.
 

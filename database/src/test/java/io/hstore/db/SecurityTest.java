@@ -70,6 +70,9 @@ class SecurityTest {
             assertThrows(HStoreException.InvalidSchema.class, () -> bob.execute("MEMBERS OF @" + acmeEdge));
             long acmePatient = alice.variables().get("p");
             assertThrows(HStoreException.InvalidSchema.class, () -> bob.execute("ADD @" + acmePatient + " TO @" + acmeEdge));
+            assertEquals(1, alice.execute("INCIDENT TO @" + acmePatient).rows().size());
+            assertTrue(bob.execute("INCIDENT TO @" + acmePatient).rows().isEmpty());
+            assertTrue(admin.execute("INCIDENT TO @" + acmePatient).rows().isEmpty());
         }
     }
 
