@@ -151,7 +151,8 @@ The slot list is empty: membership changes update the edge's `EdgeRecord` roots 
 | `hold(LongSupplier)` | Registers a retention hold (section 6); returns a `Hold` whose `close()` removes it. |
 | `retain(keepAfter)` | Deletes whole leading segments no longer needed (section 6); returns the bytes released. |
 | `replay(after)` | Lazy `Stream<CommitEvent>` of every event with `generation > after`, in order, bounded by the `end` observed when the stream was created. |
-| `subscribe(after, consumer)` | Starts a virtual thread (`feed-subscriber`) that delivers every event with `generation > after`, then every future event, to `consumer`, in order. Returns a `Subscription`. |
+| `subscribe(after, consumer)` | Starts a virtual thread (`feed-subscriber`) that delivers every event with `generation > after`, then every future event, to `consumer`, in order. Returns a `Subscription`. A retention gap is logged as a warning. |
+| `subscribe(after, consumer, gap)` | Same, but calls `gap.missed(acknowledged, firstRetained)` when retention has released events the subscriber has not seen yet, then resumes at the first retained event. |
 | `truncateAfter(g)` | Recovery only: cut the feed before the first frame with `generation > g` (later segments are deleted). |
 
 A subscription is a loop:
@@ -170,7 +171,7 @@ Properties:
 * **Ordered, gap-free relative to the feed, single-threaded per subscription.** The consumer is called from one thread in generation order; each event is delivered after the previous `accept` returned.
 * **At-most-once per subscription instance.** `acknowledged` advances after `accept` returns. If `accept` throws, the subscriber logs `change feed subscriber stopped at generation g` at `WARNING` and stops; the event is not redelivered by that subscription.
 * **Restartable.** A consumer that persists `acknowledged` (or an equivalent watermark) can resubscribe from it after a restart and receive exactly the events after it, provided `covers(watermark)` is true. A consumer that needs this guarantee across retention must register a hold at its watermark.
-* **Retention is silent to a lagging subscriber without a hold.** `replay(after)` starts no earlier than the first retained segment, so a subscriber whose `acknowledged` falls behind the retained range simply continues from the oldest retained event; it should compare `acknowledged` with `firstGeneration()` (or check `covers`) if gaps matter.
+* **Retention gaps are reported, never silent.** Before delivering, the subscription positions its reader and then checks `covers(acknowledged)`. If retention has already released events after `acknowledged`, the `Gap` callback runs with the last acknowledged generation and the first retained one, and delivery resumes at the first retained event. Checking after positioning the reader closes the race with a concurrent `retain`: a segment released after the check makes the read stop rather than skip, and the next iteration reports the gap. `Statistics` refreshes its catalog on a gap, and `SemanticPlane` clears and rebuilds its index from the embeddings slot.
 * `Subscription.close()` sets a flag; the thread exits after the current event or within 250 ms. `ChangeFeed.close()` wakes and stops all subscribers.
 
 ```mermaid
