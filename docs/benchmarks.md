@@ -76,6 +76,13 @@ so bytes still sitting in buffers are counted against the workload that produced
 when a store reopens, so the adapters carry the total across `reopen`. Bytes written during the final close
 aren't counted.
 
+**Memory.** Every workload also records, from the JVM's own MXBeans, the bytes the whole process allocated
+(`getTotalThreadAllocatedBytes`) and the GC pause time (`GarbageCollectorMXBean.getCollectionTime`, which is
+stop-the-world time with ParallelGC). Rows where both stores paused for 0 ms are left out. After ingest, the run
+forces a full GC and records how much heap the loaded store keeps. A baseline taken before the store opens is
+subtracted, so the shared dataset arrays don't count. This number mostly reflects how each engine's cache is
+configured (see *Setup*).
+
 ## Results
 
 Ratios above 1 favour HStore. Throughput ratios divide HStore by HyperGraphDB; latency and size ratios divide
