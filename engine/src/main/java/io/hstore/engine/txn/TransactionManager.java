@@ -377,15 +377,18 @@ public final class TransactionManager {
 
     private Appended append(Generation latest, Branch changed, long txnId, List<MemberChange> members,
                             List<SlotChange<?>> slotChanges, List<WalRecord> meta, long pageBudget) {
+        long pendingPages = changed.roots().roots().entrySet().stream()
+                .mapToLong(entry -> Materializer.pendingNodes(entry.getValue(), storage.slots().slot(entry.getKey()).schema()))
+                .sum();
+        if (pendingPages > pageBudget) {
+            throw HStoreException.limit("transaction " + txnId + " would write " + pendingPages + " pages, over its quota");
+        }
         long generationId = latest.id() + 1;
         List<WalRecord> records = new ArrayList<>();
         List<PageWrite> writes = new ArrayList<>();
         records.add(new WalRecord.Begin(txnId, changed.id(), latest.id()));
         Materializer materializer = materializer(generationId, txnId, records, writes);
         RootVector stored = changed.roots().map((slot, ref) -> materializer.materialize(ref, storage.slots().slot(slot).schema()));
-        if (materializer.pagesWritten() > pageBudget) {
-            throw HStoreException.limit("transaction " + txnId + " would write " + materializer.pagesWritten() + " pages, over its quota");
-        }
         storage.faults().reach(CrashPoint.PAGE);
         Branch previous = latest.branches().get(changed.id());
         RootVector before = previous == null ? RootVector.EMPTY : previous.roots();
