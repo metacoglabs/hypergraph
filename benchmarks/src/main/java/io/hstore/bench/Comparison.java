@@ -15,11 +15,22 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.function.IntToLongFunction;
 import java.util.function.LongSupplier;
 
 public final class Comparison {
 
-    record Result(String workload, String description, long operations, double millis, long checksum) {
+    record Result(String workload, String description, long operations, double millis, long checksum, Map<String, Json> extra) {
+
+        Result(String workload, String description, long operations, double millis, long checksum) {
+            this(workload, description, operations, millis, checksum, Map.of());
+        }
+
+        Result with(String key, Json value) {
+            Map<String, Json> fields = new LinkedHashMap<>(extra);
+            fields.put(key, value);
+            return new Result(workload, description, operations, millis, checksum, fields);
+        }
 
         double rate() {
             return operations / (millis / 1000.0);
@@ -32,6 +43,7 @@ public final class Comparison {
             fields.put("operations", new Json.Number(BigDecimal.valueOf(operations)));
             fields.put("millis", new Json.Number(BigDecimal.valueOf(millis)));
             fields.put("checksum", new Json.Number(BigDecimal.valueOf(checksum)));
+            fields.putAll(extra);
             return new Json.Obj(fields);
         }
     }
@@ -42,6 +54,7 @@ public final class Comparison {
     }
 
     private static final int BATCH = 1_000;
+    private static final int COMMITS = 5_000;
     private static final long SEED = 20_260_904L;
 
     private Comparison() {
@@ -105,12 +118,18 @@ public final class Comparison {
             results.add(read("read.comembership", "count hyperedges containing both atoms of a pair", dataset.probePairs().length,
                     (from, to) -> store.coMembership(dataset.probePairs(), from, to), true));
             results.add(concurrent(store, dataset, threads));
+            results.add(latency("latency.read", "one incidence lookup per read transaction", nodes.length,
+                    i -> store.incidence(nodes, i, i + 1), true));
             int[] round = {0};
             results.add(measure("write.update", "replace a node value in transactions of 1,000", dataset.updates().length,
                     () -> batched(dataset.updates().length, (from, to) -> {
                         store.update(dataset.updates(), from, to, round[0]++);
                         return to - from;
                     })));
+            results.add(latency("latency.commit", "one node update per write transaction", COMMITS, i -> {
+                store.update(dataset.updates(), i, i + 1, round[0]++);
+                return 1;
+            }, false));
             int largeSize = dataset.nodes();
             results.add(measure("large.ingest", "create one hyperedge with %,d members".formatted(largeSize), largeSize, () -> {
                 store.largeEdge(largeSize);
@@ -161,6 +180,24 @@ public final class Comparison {
             batched(Math.max(BATCH, operations / 10), slice);
         }
         return measure(workload, description, operations, () -> batched(operations, slice));
+    }
+
+    private static Result latency(String workload, String description, int operations, IntToLongFunction operation, boolean warm) {
+        if (warm) {
+            for (int i = 0; i < operations / 10; i++) {
+                operation.applyAsLong(i);
+            }
+        }
+        long[] nanos = new long[operations];
+        long checksum = 0;
+        long started = System.nanoTime();
+        for (int i = 0; i < operations; i++) {
+            long begin = System.nanoTime();
+            checksum += operation.applyAsLong(i);
+            nanos[i] = System.nanoTime() - begin;
+        }
+        return new Result(workload, description, operations, (System.nanoTime() - started) / 1e6, checksum)
+                .with("latency", Latency.of(nanos).json());
     }
 
     private static Result concurrent(Store store, Dataset dataset, int threads) throws Exception {
