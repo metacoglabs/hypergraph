@@ -144,6 +144,10 @@ and prints the server's `error [AUTHENTICATION_FAILED]: authentication failed`.
 | user | `--user`, then `$HSTORE_USER` |
 | password | `--password`, then `$HSTORE_PASSWORD`, then an interactive no-echo prompt on the console |
 
+With `--tls on` (or `HSTORE_TLS=on`) the connection uses TLS and verifies the server's certificate and host
+name against `--tls_ca_file`, then `--tls_certificate_file`, then the system trust store:
+`hstore connect db.example.com:7432 --tls on --tls_ca_file ca.pem --user admin`.
+
 ```
 $ hstore connect 127.0.0.1:7432 --user admin
 password for admin:
@@ -160,7 +164,8 @@ hstore> WHOAMI;
 
 Opens a connection, reads the banner and closes it without sending a request. It needs no credentials and,
 because the connection sends no request, produces no LOG-level connection log lines. The Docker
-`HEALTHCHECK` uses it.
+`HEALTHCHECK` uses it. With `tls = on` it connects over TLS with the same trust rules as `connect`, but skips
+the host-name check.
 
 ```
 $ hstore ping 127.0.0.1:7432; echo $?

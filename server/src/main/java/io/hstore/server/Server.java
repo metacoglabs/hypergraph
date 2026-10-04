@@ -27,18 +27,26 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLSocket;
 
 final class Server implements AutoCloseable {
 
-    record Policy(String authentication, int maxConnections, int idleTimeoutSeconds, StatementLogger statements, boolean logConnections) {
+    record Policy(String authentication, int maxConnections, int idleTimeoutSeconds, StatementLogger statements, boolean logConnections,
+                  Optional<SSLContext> tls) {
 
         static Policy permissive() {
-            return new Policy("auto", 200, 0, StatementLogger.silent(), false);
+            return new Policy("auto", 200, 0, StatementLogger.silent(), false, Optional.empty());
         }
 
-        static Policy from(ServerConfig config) {
+        static Policy from(ServerConfig config, Optional<SSLContext> tls) {
             return new Policy(config.string(Setting.AUTHENTICATION).toLowerCase(), config.integer(Setting.MAX_CONNECTIONS),
-                    config.integer(Setting.IDLE_TIMEOUT_SECONDS), StatementLogger.from(config), config.flag(Setting.LOG_CONNECTIONS));
+                    config.integer(Setting.IDLE_TIMEOUT_SECONDS), StatementLogger.from(config), config.flag(Setting.LOG_CONNECTIONS), tls);
+        }
+
+        Policy withTls(SSLContext context) {
+            return new Policy(authentication, maxConnections, idleTimeoutSeconds, statements, logConnections, Optional.of(context));
         }
 
         boolean authenticationRequired(HypergraphDatabase database) {
@@ -52,6 +60,7 @@ final class Server implements AutoCloseable {
 
     private static final System.Logger LOG = System.getLogger("hstore.server");
     private static final int MAX_AUTHENTICATION_ATTEMPTS = 5;
+    private static final int HANDSHAKE_TIMEOUT_MILLIS = 10_000;
 
     private final HypergraphDatabase database;
     private final Policy policy;
@@ -69,7 +78,7 @@ final class Server implements AutoCloseable {
         this.database = database;
         this.policy = policy;
         try {
-            this.listener = new ServerSocket();
+            this.listener = policy.tls().isPresent() ? policy.tls().get().getServerSocketFactory().createServerSocket() : new ServerSocket();
             listener.setReuseAddress(true);
             listener.bind(address);
         } catch (IOException e) {
@@ -82,7 +91,8 @@ final class Server implements AutoCloseable {
     }
 
     void serve() {
-        LOG.log(System.Logger.Level.INFO, "listening on {0}:{1}", listener.getInetAddress().getHostAddress(), String.valueOf(port()));
+        LOG.log(System.Logger.Level.INFO, "listening on {0}:{1}{2}", listener.getInetAddress().getHostAddress(), String.valueOf(port()),
+                policy.tls().isPresent() ? " with TLS" : "");
         while (running) {
             try {
                 Socket socket = listener.accept();
@@ -118,9 +128,11 @@ final class Server implements AutoCloseable {
         String peer = String.valueOf(socket.getRemoteSocketAddress());
         boolean active = false;
         try (socket; Session session = new Session(database)) {
-            if (policy.idleTimeoutSeconds() > 0) {
-                socket.setSoTimeout(policy.idleTimeoutSeconds() * 1000);
+            if (socket instanceof SSLSocket secure) {
+                secure.setSoTimeout(HANDSHAKE_TIMEOUT_MILLIS);
+                secure.startHandshake();
             }
+            socket.setSoTimeout(Math.max(0, policy.idleTimeoutSeconds()) * 1000);
             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
             Writer out = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
             boolean authenticated = !policy.authenticationRequired(database);
@@ -143,7 +155,13 @@ final class Server implements AutoCloseable {
                 }
                 WireProtocol.send(out, execute(session, request.get(), connection));
             }
+        } catch (SSLException handshake) {
+            LOG.log(System.Logger.Level.INFO, "connection {0} from {1} failed the TLS handshake: {2}", connection, peer, handshake.getMessage());
         } catch (SocketTimeoutException idle) {
+            if (!active && socket instanceof SSLSocket) {
+                LOG.log(System.Logger.Level.INFO, "connection {0} from {1} did not complete the TLS handshake in time", connection, peer);
+                return;
+            }
             LOG.log(System.Logger.Level.INFO, "connection {0} closed after {1}s idle", connection, policy.idleTimeoutSeconds());
         } catch (IOException e) {
             LOG.log(System.Logger.Level.DEBUG, "connection " + connection + " ended", e);

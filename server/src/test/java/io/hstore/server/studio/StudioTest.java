@@ -5,6 +5,7 @@ import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.query.Session;
 import io.hstore.db.value.Json;
 import io.hstore.engine.EngineOptions;
+import io.hstore.server.Tls;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,7 +51,7 @@ class StudioTest {
                     """);
         }
         studio = new Studio(database, new Studio.Options(new InetSocketAddress("127.0.0.1", 0), database::requiresAuthentication,
-                (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty()));
+                (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty(), Optional.empty()));
         studio.start();
     }
 
@@ -118,6 +119,29 @@ class StudioTest {
         HttpResponse<String> blocked = post("/api/login", "{\"user\":\"admin\",\"password\":\"secret\"}", Optional.empty(), true);
         assertEquals(429, blocked.statusCode());
         assertTrue(blocked.body().contains("too many failed sign-in attempts"));
+    }
+
+    @Test
+    void studioServesHttpsWithSecureCookies() throws Exception {
+        Path certificate = Path.of(StudioTest.class.getResource("/tls/certificate.pem").toURI());
+        Path key = Path.of(StudioTest.class.getResource("/tls/key.pem").toURI());
+        Studio secure = new Studio(database, new Studio.Options(new InetSocketAddress("127.0.0.1", 0), database::requiresAuthentication,
+                (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty(),
+                Optional.of(Tls.server(certificate, key))));
+        secure.start();
+        try {
+            HttpClient client = HttpClient.newBuilder().sslContext(Tls.trusting(certificate)).build();
+            URI base = URI.create("https://localhost:" + secure.port());
+            assertEquals(200, client.send(HttpRequest.newBuilder(base).build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+            HttpResponse<String> login = client.send(HttpRequest.newBuilder(base.resolve("/api/login"))
+                    .header("Content-Type", "application/json").header("X-HStore-Studio", "1")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"user\":\"admin\",\"password\":\"secret\"}")).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, login.statusCode());
+            assertTrue(login.headers().firstValue("Set-Cookie").orElseThrow().contains("; Secure"));
+        } finally {
+            secure.close();
+        }
     }
 
     @Test

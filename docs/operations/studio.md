@@ -111,8 +111,8 @@ Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'
 * `POST /api/login` creates a server-side session holding one HQL `Session`, the same object a wire connection
   uses, and returns the cookie
   `hstore_studio=<43-char base64url token>; Path=/; HttpOnly; SameSite=Strict`. The token is 256 bits from
-  `SecureRandom`. When the login request carries `X-Forwarded-Proto: https`, set by a TLS-terminating
-  proxy, the cookie also gets `; Secure`.
+  `SecureRandom`. The cookie also gets `; Secure` when Studio itself serves HTTPS (`tls = on`) or when the
+  login request carries `X-Forwarded-Proto: https` from a TLS-terminating proxy.
 * Sessions expire after `studio_session_minutes` without a request. Expiry aborts the session's open
   transaction.
 * Every `POST` must carry the header `X-HStore-Studio` (any value) and is rejected with `403` otherwise.
@@ -208,7 +208,8 @@ neighbourhood short.
 
 * Studio binds to [`listen_address`](configuration.md), the same address as the wire protocol. The default is
   loopback; the Docker image binds `0.0.0.0`.
-* It speaks plain HTTP. For anything beyond localhost, put it behind a TLS-terminating reverse proxy (nginx,
+* With `tls = on` it serves HTTPS using `tls_certificate_file` and `tls_key_file`. Otherwise it speaks plain
+  HTTP; for anything beyond localhost either enable TLS or put it behind a TLS-terminating reverse proxy (nginx,
   Caddy, Traefik) and expose only the proxy. Configure the proxy to send `X-Forwarded-Proto: https` (nginx:
   `proxy_set_header X-Forwarded-Proto $scheme;`) so session cookies are marked `Secure`. The header is
   trusted as given, so do not expose the plain-HTTP port to clients who could forge it.

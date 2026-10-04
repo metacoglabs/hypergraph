@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.logging.Level;
+import javax.net.ssl.SSLContext;
 
 public final class Main {
 
@@ -209,13 +210,13 @@ public final class Main {
                 }
             }
             case Command.Connect(InetSocketAddress address, Optional<RemoteEndpoint.Credentials> credentials) -> {
-                try (Endpoint endpoint = new RemoteEndpoint(address, credentials)) {
+                try (Endpoint endpoint = new RemoteEndpoint(address, credentials, config(Optional.empty(), arguments).clientTls(true))) {
                     new Shell(endpoint).run();
                 }
                 yield 0;
             }
             case Command.Ping(InetSocketAddress address) -> {
-                try (RemoteEndpoint endpoint = new RemoteEndpoint(address, Optional.empty())) {
+                try (RemoteEndpoint endpoint = new RemoteEndpoint(address, Optional.empty(), config(Optional.empty(), arguments).clientTls(false))) {
                     IO.println(address.getHostString() + ":" + address.getPort() + " - accepting connections (" + endpoint.describe() + ")");
                     yield 0;
                 } catch (RuntimeException unreachable) {
@@ -285,14 +286,15 @@ public final class Main {
         if (!overrides.isEmpty()) {
             log.log(System.Logger.Level.INFO, "configuration: {0}", overrides);
         }
+        Optional<SSLContext> tls = config.serverTls();
         HypergraphDatabase database = HypergraphDatabase.open(directory, config.databaseOptions());
-        Server.Policy policy = Server.Policy.from(config);
+        Server.Policy policy = Server.Policy.from(config, tls);
         Server server = new Server(database, config.address(), policy);
         Optional<Studio> studio = config.flag(Setting.STUDIO) ? Optional.of(new Studio(database, new Studio.Options(
                 new InetSocketAddress(config.string(Setting.LISTEN_ADDRESS), config.integer(Setting.STUDIO_PORT)),
                 () -> policy.authenticationRequired(database), policy.statements()::executed, VERSION,
                 Duration.ofMinutes(config.integer(Setting.STUDIO_SESSION_MINUTES)),
-                Optional.of(config.string(Setting.STUDIO_ASSETS)).filter(value -> !value.isBlank()).map(Path::of)))) : Optional.empty();
+                Optional.of(config.string(Setting.STUDIO_ASSETS)).filter(value -> !value.isBlank()).map(Path::of), tls))) : Optional.empty();
         studio.ifPresent(Studio::start);
         Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(() -> {
             log.log(System.Logger.Level.INFO, "received shutdown request; closing connections and checkpointing");

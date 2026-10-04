@@ -11,9 +11,11 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.BufferedReader;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,9 +24,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.IntStream;
+import javax.net.ssl.SSLContext;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ServerTest {
@@ -77,6 +81,40 @@ class ServerTest {
             }
             acceptor.join();
         }
+    }
+
+    static Path fixture(String name) throws Exception {
+        return Path.of(ServerTest.class.getResource("/tls/" + name).toURI());
+    }
+
+    @Test
+    void wireProtocolRunsOverTls() throws Exception {
+        DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
+        SSLContext server = Tls.server(fixture("certificate.pem"), fixture("key.pem"));
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
+            Thread acceptor;
+            try (Server tls = new Server(database, new InetSocketAddress("127.0.0.1", 0), Server.Policy.permissive().withTls(server))) {
+                acceptor = Thread.ofVirtual().start(tls::serve);
+                InetSocketAddress address = new InetSocketAddress("127.0.0.1", tls.port());
+                Tls.Client trusting = new Tls.Client(Tls.trusting(fixture("certificate.pem")), true);
+                try (Endpoint endpoint = new RemoteEndpoint(address, Optional.empty(), Optional.of(trusting))) {
+                    assertTrue(endpoint.describe().startsWith("hstore connection"));
+                    assertTrue(endpoint.execute("CREATE NODE TYPE Person (name STRING); SHOW TYPES;").contains("Person"));
+                }
+                assertThrows(UncheckedIOException.class,
+                        () -> new RemoteEndpoint(address, Optional.empty(), Optional.of(new Tls.Client(Tls.system(), true))));
+                assertTimeoutPreemptively(Duration.ofSeconds(20),
+                        () -> assertThrows(UncheckedIOException.class, () -> new RemoteEndpoint(address, Optional.empty())));
+            }
+            acceptor.join();
+        }
+    }
+
+    @Test
+    void tlsWithoutACertificateIsRejectedAtStartup() {
+        ServerConfig config = ServerConfig.load(Optional.empty(), Map.of(), Map.of("tls", "on"));
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, config::serverTls);
+        assertTrue(failure.getMessage().contains("tls_certificate_file"));
     }
 
     @Test
