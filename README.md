@@ -40,14 +40,18 @@ It is written in Java 25 and ships as one GraalVM native executable, `hstore`.
 
 ## Quick start with Docker
 
+Images for linux/amd64 and linux/arm64 are published to the GitHub Container Registry with every release:
+
 ```
-docker build -t hstore .
 docker run -d --name hstore \
   -e HSTORE_USER=admin -e HSTORE_PASSWORD=change-me \
   -v "$PWD/examples/clinical-claims.hql:/docker-entrypoint-initdb.d/01-clinical-claims.hql:ro" \
   -p 7432:7432 -p 7480:7480 \
-  hstore
+  ghcr.io/metacoglabs/hypergraph:0.1.0
 ```
+
+While the repository is private, run `docker login ghcr.io` first with a token that has `read:packages`. To
+build the image yourself instead, run `docker build -t hstore .` and use `hstore` as the image name.
 
 * Open **http://localhost:7480** and sign in as `admin` / `change-me` to use HStore Studio.
 * Open a shell over the wire protocol: `docker exec -it hstore hstore connect 127.0.0.1:7432`.
@@ -129,6 +133,17 @@ try (HypergraphDatabase database = HypergraphDatabase.open(Path.of("data"))) {
     }
 }
 ```
+
+## Release downloads
+
+Each [release](https://github.com/metacoglabs/hypergraph/releases) has:
+
+| File | Contents |
+|---|---|
+| `hstore-<version>-linux-amd64.tar.gz` | native executable for Linux x86-64 |
+| `hstore-<version>-darwin-arm64.tar.gz` | native executable for Apple silicon Macs |
+| `hstore-<version>-jvm.tar.gz` | the three module jars and `bin/hstore`, for any OS with Java 25 |
+| `SHA256SUMS` | checksums of the archives |
 
 ## Building from source
 
