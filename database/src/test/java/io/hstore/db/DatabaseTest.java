@@ -16,6 +16,7 @@ import io.hstore.db.hora.Reducer;
 import io.hstore.db.hora.SwapSampler;
 import io.hstore.db.schema.AtomKind;
 import io.hstore.db.schema.TypeDef.PropertyDef;
+import io.hstore.db.security.Principal;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.temporal.StateBindings;
 import io.hstore.db.temporal.Temporal;
@@ -305,14 +306,14 @@ class DatabaseTest {
             writer.add(collaboration, writer.node("Person", "v1", Map.of("name", "V1")), MemberSpec.PLAIN);
             return collaboration;
         });
-        database.views().create("degrees", MaterializedViews.Kind.DEGREE, MaterializedViews.Refresh.ON_DEMAND, 0);
+        database.views().create(Principal.SYSTEM, "degrees", MaterializedViews.Kind.DEGREE, MaterializedViews.Refresh.ON_DEMAND, 0);
         long second = database.write(writer -> {
             long atom = writer.node("Person", "v2", Map.of("name", "V2"));
             writer.add(edge, atom, MemberSpec.PLAIN);
             return atom;
         });
         assertTrue(database.read(reader -> database.views().read(reader, "degrees", second)).isEmpty());
-        database.views().refresh("degrees");
+        database.views().refresh(Principal.SYSTEM, "degrees");
         database.read(reader -> {
             MaterializedViews.Reading reading = database.views().read(reader, "degrees", second).orElseThrow();
             assertEquals(new ViewCell.Count(1), reading.cell());

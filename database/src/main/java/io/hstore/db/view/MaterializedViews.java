@@ -3,6 +3,7 @@ package io.hstore.db.view;
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.Reader;
 import io.hstore.db.Writer;
+import io.hstore.db.security.Principal;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.AtomRecord.EdgeRecord;
 import io.hstore.engine.catalog.Branch;
@@ -21,6 +22,7 @@ import io.hstore.engine.tree.TreeAlgebra;
 import io.hstore.engine.tree.TreeSchema;
 import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.txn.IncidentEdge;
+import io.hstore.engine.txn.TxnOptions;
 
 import java.util.Comparator;
 import java.util.HashMap;
@@ -38,13 +40,13 @@ public final class MaterializedViews implements AutoCloseable {
 
     public enum Refresh { ON_DEMAND, CONTINUOUS }
 
-    public record Descriptor(int id, String name, Kind kind, Refresh refresh, long parameter, long lastGeneration) {
+    public record Descriptor(int id, String name, Kind kind, Refresh refresh, long parameter, long lastGeneration, int tenant) {
         long definitionHash() {
-            return Hashing.of(id, Hashing.of(name), kind.ordinal(), refresh.ordinal(), parameter);
+            return Hashing.of(id, Hashing.of(name), kind.ordinal(), refresh.ordinal(), parameter, tenant);
         }
 
         Descriptor advancedTo(long generation) {
-            return new Descriptor(id, name, kind, refresh, parameter, generation);
+            return new Descriptor(id, name, kind, refresh, parameter, generation, tenant);
         }
     }
 
@@ -54,11 +56,12 @@ public final class MaterializedViews implements AutoCloseable {
     private static final int KEY_BITS = 48;
 
     private static final ValueCodec<Descriptor> DESCRIPTOR_CODEC = ValueCodec.rows(
-            descriptor -> 40 + ByteCursor.stringSize(descriptor.name()),
+            descriptor -> 45 + ByteCursor.stringSize(descriptor.name()),
             (out, descriptor) -> out.putVarInt(descriptor.id()).putString(descriptor.name()).putByte(descriptor.kind().ordinal())
-                    .putByte(descriptor.refresh().ordinal()).putSignedVarLong(descriptor.parameter()).putVarLong(descriptor.lastGeneration()),
+                    .putByte(descriptor.refresh().ordinal()).putSignedVarLong(descriptor.parameter()).putVarLong(descriptor.lastGeneration())
+                    .putVarInt(descriptor.tenant()),
             in -> new Descriptor(in.getVarInt(), in.getString(), Kind.values()[in.getUnsignedByte()],
-                    Refresh.values()[in.getUnsignedByte()], in.getSignedVarLong(), in.getVarLong()));
+                    Refresh.values()[in.getUnsignedByte()], in.getSignedVarLong(), in.getVarLong(), in.getVarInt()));
 
     public static final Slot<Descriptor> VIEWS = Slot.primary(42, "views",
             new TreeSchema<>(79, "views", FingerprintMode.SET, DESCRIPTOR_CODEC,
@@ -87,14 +90,14 @@ public final class MaterializedViews implements AutoCloseable {
         return ((long) view << KEY_BITS) | key;
     }
 
-    public Descriptor create(String name, Kind kind, Refresh refresh, long parameter) {
-        return database.write(writer -> {
+    public Descriptor create(Principal principal, String name, Kind kind, Refresh refresh, long parameter) {
+        return database.write(TxnOptions.defaults(), principal, writer -> {
             writer.principal().requireAdmin();
             if (find(writer, name).isPresent()) {
                 throw HStoreException.invalid("view '" + name + "' already exists");
             }
             int id = writer.view().scan(VIEWS).last().map(entry -> (int) entry.key() + 1).orElse(1);
-            Descriptor descriptor = new Descriptor(id, name, kind, refresh, parameter, writer.generation());
+            Descriptor descriptor = new Descriptor(id, name, kind, refresh, parameter, writer.generation(), writer.tenant());
             writer.transaction().put(VIEWS, id, descriptor);
             build(writer, descriptor);
             return descriptor;
@@ -102,29 +105,39 @@ public final class MaterializedViews implements AutoCloseable {
     }
 
     public Optional<Descriptor> find(Reader reader, String name) {
-        return reader.view().scan(VIEWS).values().filter(descriptor -> descriptor.name().equals(name)).findFirst();
+        return list(reader).stream().filter(descriptor -> descriptor.name().equals(name)).findFirst();
     }
 
     public List<Descriptor> list(Reader reader) {
-        return reader.view().scan(VIEWS).values().toList();
+        return reader.view().scan(VIEWS).values().filter(descriptor -> descriptor.tenant() == reader.tenant()).toList();
     }
 
-    public Descriptor refresh(String name) {
-        return database.write(writer -> {
-            Descriptor descriptor = find(writer, name).orElseThrow(() -> HStoreException.invalid("unknown view '" + name + "'"));
-            long target = database.engine().feed().lastGeneration();
-            if (target <= descriptor.lastGeneration()) {
-                return descriptor;
-            }
-            List<CommitEvent> events = database.engine().feed().replay(descriptor.lastGeneration())
-                    .takeWhile(event -> event.generation() <= target)
-                    .filter(event -> event.branch() == Branch.MAIN)
-                    .toList();
-            apply(writer, descriptor, events);
-            Descriptor advanced = descriptor.advancedTo(target);
-            writer.transaction().put(VIEWS, descriptor.id(), advanced);
-            return advanced;
-        });
+    public Descriptor refresh(Principal principal, String name) {
+        return database.write(TxnOptions.defaults(), principal, writer ->
+                refresh(writer, find(writer, name).orElseThrow(() -> HStoreException.invalid("unknown view '" + name + "'"))));
+    }
+
+    private Descriptor refresh(Writer writer, Descriptor descriptor) {
+        long target = database.engine().feed().lastGeneration();
+        if (target <= descriptor.lastGeneration()) {
+            return descriptor;
+        }
+        List<CommitEvent> events = database.engine().feed().replay(descriptor.lastGeneration())
+                .takeWhile(event -> event.generation() <= target)
+                .filter(event -> event.branch() == Branch.MAIN)
+                .toList();
+        apply(writer, descriptor, events);
+        Descriptor advanced = descriptor.advancedTo(target);
+        writer.transaction().put(VIEWS, descriptor.id(), advanced);
+        return advanced;
+    }
+
+    private boolean owns(Writer writer, Descriptor descriptor, long atom) {
+        return writer.view().get(VIEW_DATA, cellKey(descriptor.id(), atom)).isPresent() || inTenant(writer, descriptor, atom);
+    }
+
+    private static boolean inTenant(Writer writer, Descriptor descriptor, long atom) {
+        return writer.view().atom(atom).map(record -> record.tenant() == descriptor.tenant()).orElse(false);
     }
 
     public Optional<Reading> read(Reader reader, String name, long key) {
@@ -152,20 +165,20 @@ public final class MaterializedViews implements AutoCloseable {
 
     private void build(Writer writer, Descriptor descriptor) {
         switch (descriptor.kind()) {
-            case DEGREE -> writer.view().atoms().map(Entry::key).forEach(atom -> {
+            case DEGREE -> writer.view().atoms().filter(entry -> entry.value().tenant() == descriptor.tenant()).map(Entry::key).forEach(atom -> {
                 long degree = writer.degree(atom);
                 if (degree > 0) {
                     put(writer, descriptor, atom, new ViewCell.Count(degree));
                 }
             });
             case CARDINALITY -> writer.view().atoms()
-                    .filter(entry -> entry.value() instanceof EdgeRecord)
+                    .filter(entry -> entry.value() instanceof EdgeRecord && entry.value().tenant() == descriptor.tenant())
                     .forEach(entry -> put(writer, descriptor, entry.key(), new ViewCell.Count(((EdgeRecord) entry.value()).cardinality())));
             case ACTIVITY -> apply(writer, descriptor, database.engine().feed().replay(0)
                     .filter(event -> event.branch() == Branch.MAIN && event.generation() <= descriptor.lastGeneration())
                     .toList());
             case OVERLAP_TOP_K -> writer.view().atoms()
-                    .filter(entry -> entry.value() instanceof EdgeRecord)
+                    .filter(entry -> entry.value() instanceof EdgeRecord && entry.value().tenant() == descriptor.tenant())
                     .map(Entry::key)
                     .toList()
                     .forEach(edge -> put(writer, descriptor, edge, topK(writer, edge, (int) descriptor.parameter())));
@@ -174,12 +187,23 @@ public final class MaterializedViews implements AutoCloseable {
 
     private void apply(Writer writer, Descriptor descriptor, List<CommitEvent> events) {
         switch (descriptor.kind()) {
-            case DEGREE -> deltas(events, MemberChange::member).forEach((atom, delta) -> adjust(writer, descriptor, atom, delta));
-            case CARDINALITY -> deltas(events, MemberChange::edge).forEach((edge, delta) -> adjust(writer, descriptor, edge, delta));
+            case DEGREE -> deltas(events, MemberChange::member).forEach((atom, delta) -> {
+                if (owns(writer, descriptor, atom)) {
+                    adjust(writer, descriptor, atom, delta);
+                }
+            });
+            case CARDINALITY -> deltas(events, MemberChange::edge).forEach((edge, delta) -> {
+                if (owns(writer, descriptor, edge)) {
+                    adjust(writer, descriptor, edge, delta);
+                }
+            });
             case ACTIVITY -> events.forEach(event -> {
                 long bucket = event.wallTime() / Math.max(1, descriptor.parameter());
-                long added = event.members().stream().filter(change -> change instanceof MemberChange.Added).count();
-                long removed = event.members().stream().filter(change -> change instanceof MemberChange.Removed).count();
+                List<MemberChange> changes = event.members().stream()
+                        .filter(change -> inTenant(writer, descriptor, change.member()) || inTenant(writer, descriptor, change.edge()))
+                        .toList();
+                long added = changes.stream().filter(change -> change instanceof MemberChange.Added).count();
+                long removed = changes.stream().filter(change -> change instanceof MemberChange.Removed).count();
                 if (added + removed > 0) {
                     ViewCell.Activity current = writer.view().get(VIEW_DATA, cellKey(descriptor.id(), bucket))
                             .map(ViewCell.Activity.class::cast).orElse(new ViewCell.Activity(0, 0));
@@ -193,7 +217,7 @@ public final class MaterializedViews implements AutoCloseable {
                     writer.view().incident(change.member()).map(IncidentEdge::edge).forEach(affected::add);
                 }));
                 affected.forEach(edge -> {
-                    if (writer.view().edge(edge).isPresent()) {
+                    if (writer.view().edge(edge).isPresent() && inTenant(writer, descriptor, edge)) {
                         put(writer, descriptor, edge, topK(writer, edge, (int) descriptor.parameter()));
                     } else {
                         writer.transaction().delete(VIEW_DATA, cellKey(descriptor.id(), edge));
@@ -251,10 +275,11 @@ public final class MaterializedViews implements AutoCloseable {
             return;
         }
         try {
-            List<Descriptor> continuous = database.read(reader -> list(reader).stream()
+            List<Descriptor> continuous = database.read(reader -> reader.view().scan(VIEWS).values()
                     .filter(descriptor -> descriptor.refresh() == Refresh.CONTINUOUS)
                     .toList());
-            continuous.forEach(descriptor -> refresh(descriptor.name()));
+            continuous.forEach(descriptor -> database.write(TxnOptions.defaults(), Principal.SYSTEM.inTenant(descriptor.tenant()), writer ->
+                    refresh(writer, writer.view().get(VIEWS, descriptor.id()).orElse(descriptor))));
         } catch (RuntimeException e) {
             System.getLogger("hstore.views").log(System.Logger.Level.WARNING, "continuous view refresh failed", e);
         }

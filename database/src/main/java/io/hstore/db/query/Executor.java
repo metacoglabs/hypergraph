@@ -95,12 +95,12 @@ final class Executor {
                 return QueryResult.message("indexed " + type + " documents at " + path + " as " + tag);
             });
             case Statement.CreateView(String name, MaterializedViews.Kind kind, long parameter, boolean continuous) -> {
-                MaterializedViews.Descriptor descriptor = database().views().create(name, kind, continuous
+                MaterializedViews.Descriptor descriptor = database().views().create(session.principal(), name, kind, continuous
                         ? MaterializedViews.Refresh.CONTINUOUS : MaterializedViews.Refresh.ON_DEMAND, parameter);
                 yield QueryResult.message("created view " + descriptor.name() + " at generation " + descriptor.lastGeneration());
             }
             case Statement.RefreshView(String name) -> QueryResult.message("view " + name + " refreshed to generation "
-                    + database().views().refresh(name).lastGeneration());
+                    + database().views().refresh(session.principal(), name).lastGeneration());
             case Statement.ShowView view -> showView(view);
             case Statement.CreateBranch(String name, Optional<String> from) -> {
                 Branch created = database().engine().createBranch(name, from.map(session::branchId).orElse(Branch.MAIN));

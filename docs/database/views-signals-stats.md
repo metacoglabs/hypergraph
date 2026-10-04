@@ -31,7 +31,7 @@ sequenceDiagram
 
 | Slot | Name | Schema | Key | Value |
 |---|---|---|---|---|
-| 42 | `views` | 79 | view id | `Descriptor(id, name, kind, refresh, parameter, lastGeneration)` |
+| 42 | `views` | 79 | view id | `Descriptor(id, name, kind, refresh, parameter, lastGeneration, tenant)` |
 | 43 | `view-data` | 80 | `(viewId << 48) \| key` | `ViewCell` |
 
 Cell keys are limited to 48 bits (`KEY_BITS`); `cellKey` rejects larger or negative keys. Scanning a view is a
@@ -82,9 +82,15 @@ VIEW claim_overlap KEY @103;                          -- staleness 0
 ### Scope and permissions
 
 Creating, refreshing and reading views requires ADMIN (`Executor.administrative`, `MaterializedViews.create/read/
-scan`). Views are computed over the whole database: the initial `DEGREE`, `CARDINALITY` and `OVERLAP_TOP_K`
-builds scan every catalog atom regardless of tenant, which is why they are restricted to administrators
-([security](security.md)).
+scan`). A view belongs to the tenant of the admin who created it:
+
+* The build only covers that tenant's atoms.
+* Feed deltas only touch that tenant's cells. An existing cell is always updated, which handles atoms deleted
+  since the last refresh.
+* View names are unique per tenant, and `SHOW VIEWS`, `VIEW` and `REFRESH VIEW` only see the session's own
+  tenant.
+* Continuous views are refreshed internally as `system` within the view's tenant, so tenant checks in the
+  computation still apply ([security](security.md)).
 
 ## Signals
 
