@@ -200,9 +200,30 @@ final class HStoreStore implements Store {
     }
 
     @Override
-    public void reopen() {
+    public void deleteEdges(int[] deletions, int from, int to) {
+        database.write(writer -> {
+            for (int i = from; i < to; i++) {
+                writer.delete(edges[deletions[i]]);
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void removeMembers(int[][] removals, int from, int to) {
+        database.write(writer -> {
+            for (int i = from; i < to; i++) {
+                writer.remove(edges[removals[i][0]], nodes[removals[i][1]]);
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void reopen(Runnable whileClosed) {
         writtenBeforeReopen = bytesWritten();
         database.close();
+        whileClosed.run();
         database = HypergraphDatabase.open(directory, options);
     }
 
