@@ -44,6 +44,33 @@ public final class Materializer {
         return pages;
     }
 
+    public static long pendingNodes(Ref ref, TreeSchema<?> schema) {
+        if (!(ref instanceof Ref.Pending(Node node))) {
+            return 0;
+        }
+        long[] count = {1};
+        switch (node) {
+            case Leaf leaf -> {
+                if (leaf.schema.codec().holdsRefs()) {
+                    leaf.valueList().forEach(value -> countNested(leaf.schema, value, count));
+                }
+            }
+            case Branch branch -> {
+                for (Ref child : branch.childArray()) {
+                    count[0] += pendingNodes(child, branch.schema);
+                }
+            }
+        }
+        return count[0];
+    }
+
+    private static <V> void countNested(TreeSchema<V> schema, Object value, long[] count) {
+        schema.codec().mapRefs(schema.cast(value), (nested, nestedSchema) -> {
+            count[0] += pendingNodes(nested, nestedSchema);
+            return nested;
+        });
+    }
+
     private Leaf freeze(Leaf leaf) {
         Object[] values = leaf.valueList().toArray();
         if (leaf.schema.codec().holdsRefs()) {

@@ -5,6 +5,7 @@ import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.CommitEvent;
 import io.hstore.engine.page.ByteCursor;
+import io.hstore.engine.page.SegmentInfo;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Hyperedge;
 import io.hstore.engine.topology.Incidence;
@@ -94,6 +95,20 @@ class EngineTest {
         return new TreeSchema<>(id, "counters-" + id, FingerprintMode.SET,
                 ValueCodec.rows(ByteCursor::signedVarLongSize, ByteCursor::putSignedVarLong, ByteCursor::getSignedVarLong),
                 (key, value, into) -> into.entry(key, Hashing.of(key, value)));
+    }
+
+    @Test
+    void commitsOverTheirPageBudgetAllocateNothing() {
+        try (StorageEngine engine = StorageEngine.open(directory, small())) {
+            engine.write(txn -> txn.createNode(NODE, "seed"));
+            long allocated = engine.stats().segments().stream().mapToLong(SegmentInfo::bytes).sum();
+            Transaction txn = engine.begin(TxnOptions.defaults().withMaxPages(1));
+            for (int i = 0; i < 200; i++) {
+                txn.createNode(NODE, "over-" + i);
+            }
+            assertThrows(HStoreException.ResourceLimit.class, txn::commit);
+            assertEquals(allocated, engine.stats().segments().stream().mapToLong(SegmentInfo::bytes).sum());
+        }
     }
 
     @Test
