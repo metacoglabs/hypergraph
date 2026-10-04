@@ -23,6 +23,9 @@ layout, conventions and recipes for common changes are in [docs/development.md](
    format change.
 7. Open a pull request that explains *what* changed and *why*, and how you verified it.
 
+CI only runs once a pull request is merged into `main`, so nothing checks your branch before review. Run the
+full build locally before opening the pull request.
+
 ## Standards
 
 * Code carries no comments. Choose names and structure that explain themselves, and put design rationale in
