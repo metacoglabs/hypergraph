@@ -67,7 +67,7 @@ public final class SemanticPlane implements AutoCloseable {
         this.encoder = encoder;
         this.directory = directory;
         long start = load().orElseGet(this::rebuild);
-        this.subscription = engine.feed().subscribe(start, this::apply);
+        this.subscription = engine.feed().subscribe(start, this::apply, this::recover);
         this.hold = engine.feed().hold(() -> persistedGeneration < 0 ? Long.MAX_VALUE : persistedGeneration);
     }
 
@@ -157,6 +157,18 @@ public final class SemanticPlane implements AutoCloseable {
             snapshot.scan(Embedding.EMBEDDINGS).stream().forEach(entry -> index(entry.key(), entry.value()));
             indexedGeneration = snapshot.generation();
             return snapshot.generation();
+        }
+    }
+
+    private void recover(long acknowledged, long firstRetained) {
+        applyLock.lock();
+        try {
+            LOG.log(System.Logger.Level.WARNING, "change feed skipped generations {0} to {1}; rebuilding the semantic index",
+                    acknowledged + 1, firstRetained - 1);
+            indexes.clear();
+            rebuild();
+        } finally {
+            applyLock.unlock();
         }
     }
 

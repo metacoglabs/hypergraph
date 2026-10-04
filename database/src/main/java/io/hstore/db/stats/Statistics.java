@@ -55,7 +55,7 @@ public final class Statistics implements AutoCloseable {
             if (changesSinceRefresh.addAndGet(event.members().size() + event.slots().size()) > REFRESH_AFTER_CHANGES) {
                 refresh();
             }
-        });
+        }, (_, _) -> refresh());
     }
 
     public Catalog catalog() {
