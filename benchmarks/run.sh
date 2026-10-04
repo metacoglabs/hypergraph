@@ -8,7 +8,11 @@ threads="${THREADS:-$(getconf _NPROCESSORS_ONLN)}"
 heap="${HEAP:-4g}"
 history="${HISTORY:-64}"
 runs="${RUNS:-3}"
+cache="${CACHE_MB:-0}"
 results="results/scale-$scale-$durability-history-$history"
+if [ "$cache" != 0 ]; then
+	results="$results-cache-$cache"
+fi
 
 ../mvnw -q -f ../pom.xml -Pbenchmarks -DskipTests install
 classpath="target/classes:$(cat target/classpath.txt)"
@@ -22,7 +26,7 @@ rm -rf "$results" && mkdir -p "$results"
 for run in $(seq 1 "$runs"); do
 	for store in hstore hypergraphdb; do
 		java "${jvm[@]}" io.hstore.bench.Comparison run --store "$store" --scale "$scale" --durability "$durability" \
-			--threads "$threads" --history "$history" --out "$results/$store-$run.json"
+			--threads "$threads" --history "$history" --cache-mb "$cache" --out "$results/$store-$run.json"
 	done
 done
 java "${jvm[@]}" io.hstore.bench.Comparison report "$results"/hstore-*.json "$results"/hypergraphdb-*.json | tee "$results/report.md"
