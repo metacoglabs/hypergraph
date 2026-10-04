@@ -103,7 +103,7 @@ for each present column c in order:
 
 A plain set edge with no roles or weights therefore encodes to one flag byte plus the delta-varint member keys, about 1–3 bytes per member.
 
-`IncidenceCodec.maxSize` charges each entry `1 + Σ present column sizes` (plus the member varint when sequenced). The leaf's actual fixed overhead is 1 flags byte and up to 6 bitmaps of ⌈n/8⌉ bytes. This is never more than 7 bytes above the per-entry charges, and only for leaves smaller than 8 entries. The 32-byte reserve in `Layout` absorbs it ([pages.md](pages.md#payload-treenodecodecjava)). The change feed reuses this codec to serialize a single incidence (`FeedCodec.writeIncidence`).
+`IncidenceCodec.maxSize` charges each entry `Σ present column sizes` (plus the member varint when sequenced), and `IncidenceCodec.leafOverhead(n) = 1 + 6·⌈n/8⌉` charges the leaf for its flags byte and column bitmaps, so leaf sizes are an exact upper bound ([pages.md](pages.md#payload-treenodecodecjava)). The change feed reuses this codec to serialize a single incidence (`FeedCodec.writeIncidence`).
 
 ### Filtered member scans with summary pruning
 

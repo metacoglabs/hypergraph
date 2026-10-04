@@ -57,8 +57,13 @@ public final class IncidenceCodec implements ValueCodec<Incidence> {
     }
 
     @Override
+    public int leafOverhead(int entries) {
+        return entries == 0 ? 0 : 1 + COLUMNS.length * ((entries + 7) >>> 3);
+    }
+
+    @Override
     public int maxSize(Incidence incidence) {
-        int size = 1 + (sequenced ? ByteCursor.signedVarLongSize(incidence.member()) : 0);
+        int size = sequenced ? ByteCursor.signedVarLongSize(incidence.member()) : 0;
         for (Column column : COLUMNS) {
             if (column.present.test(incidence)) {
                 size += column.size(incidence);

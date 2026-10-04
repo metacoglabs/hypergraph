@@ -19,6 +19,10 @@ public record TreeSchema<V>(int id, String name, FingerprintMode fingerprint, Va
         return codec.maxSize(cast(value));
     }
 
+    int leafOverhead(int entries) {
+        return codec.leafOverhead(entries);
+    }
+
     void measureEntry(long key, Object value, Summary.Builder into) {
         measure.measure(key, cast(value), into);
     }
