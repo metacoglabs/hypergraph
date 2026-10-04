@@ -5,6 +5,7 @@ import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.CommitEvent;
 import io.hstore.engine.page.ByteCursor;
+import io.hstore.engine.page.PageId;
 import io.hstore.engine.page.SegmentInfo;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Hyperedge;
@@ -509,6 +510,12 @@ class EngineTest {
             engine.compact();
             int after = engine.stats().segments().size();
             assertTrue(after < before, "segments " + before + " -> " + after);
+            Map<Integer, Long> live = engine.liveness();
+            for (SegmentInfo segment : engine.stats().segments()) {
+                long bytes = live.getOrDefault(segment.id(), 0L);
+                assertEquals(0, bytes % PageId.UNIT_BYTES);
+                assertTrue(bytes <= segment.bytes(), "segment " + segment.id() + " live " + bytes + " of " + segment.bytes());
+            }
             engine.read(snapshot -> {
                 assertEquals(List.copyOf(new TreeSet<>(oracle)), snapshot.requireEdge(edge).stream().map(Incidence::member).toList());
                 return null;
