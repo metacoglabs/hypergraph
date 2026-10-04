@@ -21,6 +21,7 @@ import java.util.Set;
 import java.util.function.BinaryOperator;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
+import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 public record Hyperedge(long id, EdgeKind kind, Tree<Incidence> members, Tree<Long> order) {
@@ -114,6 +115,13 @@ public record Hyperedge(long id, EdgeKind kind, Tree<Incidence> members, Tree<Lo
 
     public Stream<Incidence> stream() {
         return members.values();
+    }
+
+    public LongStream memberIds() {
+        return switch (kind) {
+            case SET -> members.keys();
+            case ORDERED -> members.values().mapToLong(Incidence::member);
+        };
     }
 
     public Stream<Incidence> validAt(long instant) {
