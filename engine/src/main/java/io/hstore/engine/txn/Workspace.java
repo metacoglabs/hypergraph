@@ -132,13 +132,21 @@ public final class Workspace {
     public RootVector rebasedOnto(RootVector latest) {
         RootVector roots = latest;
         for (Map.Entry<Integer, Tree<?>> entry : trees.entrySet()) {
-            roots = roots.with(entry.getKey(), entry.getValue().root());
+            if (changed(entry)) {
+                roots = roots.with(entry.getKey(), entry.getValue().root());
+            }
         }
         return roots;
     }
 
-    boolean untouchedSince(RootVector latest) {
-        return trees.keySet().stream().allMatch(slot -> Ref.same(base.get(slot), latest.get(slot)));
+    boolean untouchedSince(RootVector latest, boolean includingReads) {
+        return trees.entrySet().stream()
+                .filter(entry -> includingReads || changed(entry))
+                .allMatch(entry -> Ref.same(base.get(entry.getKey()), latest.get(entry.getKey())));
+    }
+
+    private boolean changed(Map.Entry<Integer, Tree<?>> entry) {
+        return !Ref.same(entry.getValue().root(), base.get(entry.getKey()));
     }
 
     public RootVector base() {

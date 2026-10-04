@@ -195,7 +195,8 @@ public final class TransactionManager {
             }
             boolean requestsStable = request.isEmpty()
                     || Ref.same(txn.baseRoots().get(EngineSlots.REQUESTS), branch.roots().get(EngineSlots.REQUESTS));
-            fast = branch.roots().sameAs(txn.baseRoots()) || (requestsStable && txn.workspace().untouchedSince(branch.roots()));
+            boolean serializable = txn.options().isolation() == Isolation.SERIALIZABLE;
+            fast = branch.roots().sameAs(txn.baseRoots()) || (requestsStable && txn.workspace().untouchedSince(branch.roots(), serializable));
             if (!fast && txn.generation() < relocationFence && txn.carriesStoredRoots()) {
                 conflicts.increment();
                 throw HStoreException.conflict("bulk-loaded roots of transaction " + txn.id() + " predate a compaction");

@@ -105,7 +105,7 @@ Closed branches (`MERGED`, `DROPPED`) carry empty root vectors ([catalog-and-gen
 
 A transaction that started before the compaction holds roots from its base generation. At commit, one of these applies:
 
-* **Fast path** (`Workspace.untouchedSince`). Every slot the transaction touched still has the same root in the latest generation. Compaction rewrote none of those slots, which means they contained no images in victim segments, so the transaction's versions of them cannot reference victims either. `rebasedOnto` combines them with the latest, relocated roots for every other slot.
+* **Fast path** (`Workspace.untouchedSince`). Every slot the transaction changed (and, for `SERIALIZABLE`, every slot it read) still has the same root in the latest generation. Compaction rewrote none of those slots, which means they contained no images in victim segments, so the transaction's versions of them cannot reference victims either. `rebasedOnto` combines them with the latest, relocated roots for every other slot.
 * **Rebase path.** The op log is replayed onto the latest (relocated) roots, so the result references only relocated images.
 * **Fence.** A transaction whose base generation predates `relocationFence` and that carries already-stored roots, such as spilled bulk-load subtrees (`Transaction.carriesStoredRoots`), cannot be safely rebased onto relocated data. It fails with a retryable conflict (`bulk-loaded roots of transaction N predate a compaction`), and `HypergraphDatabase.write` retries it.
 

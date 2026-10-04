@@ -117,7 +117,7 @@ commit(txn):
     branch  = latest.branch(txn.branch)
     if txn has requestId and REQUESTS[hash(id)] exists -> DUPLICATE (prior txn id, prior generation)
     fast = branch.roots sameAs txn.baseRoots
-        || (requestsStable && workspace.untouchedSince(branch.roots))
+        || (requestsStable && workspace.untouchedSince(branch.roots, isolation == SERIALIZABLE))
     if !fast and txn.generation < relocationFence and txn carries Load ops -> Conflict
     if fast: workspace = txn.workspace
     else:    txn.validateReads(branch.roots); workspace = txn.replay(branch.roots)
@@ -131,7 +131,7 @@ commit(txn):
 
 ### 5.1 Fast path: per-slot merge
 
-`Workspace.untouchedSince(latest)` is true when, for every slot the workspace has **touched** (the key set of its `trees` map, which includes slots that were only read, because `Transaction.tree(slot)` goes through `Workspace.tree`), the root in `latest` is the same `Ref` as in the transaction's base (`Ref.same`). In that case nobody else changed anything this transaction looked at, and the commit takes the latest root vector and overlays the transaction's trees slot by slot (`rebasedOnto`). Commits that touch disjoint slots therefore never replay, regardless of how many other commits landed in between.
+`Workspace.untouchedSince(latest, includingReads)` is true when every slot the transaction **changed** still has the same root in `latest` as in its base (`Ref.same`). A slot counts as changed when its tree root differs from the base root. Slots that were only read are ignored for `SNAPSHOT` transactions. For `SERIALIZABLE` transactions they are included, because the fast path skips `validateReads`. When the check passes, the commit takes the latest root vector and overlays only the changed slots (`rebasedOnto`). A concurrent commit to a slot this transaction merely read is therefore kept, and commits that write disjoint slots never replay, however many other commits landed in between.
 
 `requestsStable` handles idempotency keys: if the transaction carries a request id, the `REQUESTS` slot is written inside the commit lock, so the fast path additionally requires that `REQUESTS` itself has not moved since the base.
 
