@@ -8,6 +8,7 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,6 +19,7 @@ import java.util.concurrent.Future;
 import java.util.function.IntToLongFunction;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.concurrent.locks.LockSupport;
 
 public final class Comparison {
 
@@ -61,6 +63,10 @@ public final class Comparison {
 
     private static final int BATCH = 1_000;
     private static final int COMMITS = 5_000;
+    private static final long MIXED_NANOS = 10_000_000_000L;
+    private static final int MIXED_BATCH = 10;
+    private static final int MIXED_UPDATES_PER_SECOND = 1_000;
+    private static final int SAMPLES_PER_THREAD = 200_000;
     private static final long SEED = 20_260_904L;
 
     private Comparison() {
@@ -140,6 +146,7 @@ public final class Comparison {
                 store.update(dataset.updates(), i, i + 1, round[0]++);
                 return 1;
             }, false)));
+            results.addAll(mixed(store, dataset, threads));
             int largeSize = dataset.nodes();
             results.add(writing(store, () -> measure("large.ingest", "create one hyperedge with %,d members".formatted(largeSize), largeSize, () -> {
                 store.largeEdge(largeSize);
@@ -223,6 +230,65 @@ public final class Comparison {
         }
         return new Result(workload, description, operations, (System.nanoTime() - started) / 1e6, checksum)
                 .using(JvmUsage.now().since(usage)).with("latency", Latency.of(nanos).json());
+    }
+
+    private static List<Result> mixed(Store store, Dataset dataset, int threads) throws Exception {
+        int[] probes = dataset.probeNodes();
+        int[] updates = dataset.updates();
+        int readers = Math.max(1, threads - 1);
+        Reservoir[] reads = new Reservoir[readers];
+        Reservoir commits = new Reservoir(SAMPLES_PER_THREAD, SEED);
+        long interval = 1_000_000_000L * MIXED_BATCH / MIXED_UPDATES_PER_SECOND;
+        long before = store.bytesWritten();
+        JvmUsage usage = JvmUsage.now();
+        long started;
+        long finished;
+        long committed = 0;
+        try (ExecutorService pool = Executors.newFixedThreadPool(readers)) {
+            started = System.nanoTime();
+            long deadline = started + MIXED_NANOS;
+            List<Future<?>> futures = new ArrayList<>();
+            for (int t = 0; t < readers; t++) {
+                Reservoir reservoir = reads[t] = new Reservoir(SAMPLES_PER_THREAD, SEED + t + 1);
+                int offset = t * BATCH;
+                futures.add(pool.submit(() -> {
+                    for (int i = offset; System.nanoTime() < deadline; i = (i + 1) % probes.length) {
+                        long begin = System.nanoTime();
+                        store.incidence(probes, i, i + 1);
+                        reservoir.add(System.nanoTime() - begin);
+                    }
+                }));
+            }
+            for (int k = 0; ; k++) {
+                long intended = started + k * interval;
+                if (intended >= deadline || System.nanoTime() >= deadline) {
+                    break;
+                }
+                for (long wait = intended - System.nanoTime(); wait > 0; wait = intended - System.nanoTime()) {
+                    LockSupport.parkNanos(wait);
+                }
+                int from = k * MIXED_BATCH % updates.length;
+                store.update(updates, from, Math.min(updates.length, from + MIXED_BATCH), 1_000_000 + k);
+                commits.add(System.nanoTime() - intended);
+                committed += Math.min(updates.length, from + MIXED_BATCH) - from;
+            }
+            for (Future<?> future : futures) {
+                future.get();
+            }
+            finished = System.nanoTime();
+        }
+        JvmUsage used = JvmUsage.now().since(usage);
+        store.flush();
+        double millis = (finished - started) / 1e6;
+        long readCount = Arrays.stream(reads).mapToLong(Reservoir::seen).sum();
+        String load = "%,d readers while one writer commits %d updates at a time, targeting %,d updates/s"
+                .formatted(readers, MIXED_BATCH, MIXED_UPDATES_PER_SECOND);
+        Result read = new Result("mixed.read", "single incidence lookups from " + load, readCount, millis, 0)
+                .using(used).with("latency", Reservoir.merge(reads).json()).with("checked", new Json.Bool(false));
+        Result write = new Result("mixed.write", "updates committed by the writer alongside the readers", committed, millis, 0)
+                .with("latency", Reservoir.merge(commits).json()).with("checked", new Json.Bool(false))
+                .with("bytesWritten", number(store.bytesWritten() - before));
+        return List.of(read, write);
     }
 
     private static Result concurrent(Store store, Dataset dataset, int threads) throws Exception {
