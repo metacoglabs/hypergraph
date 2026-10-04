@@ -34,5 +34,6 @@ EXPOSE 7432 7480
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
     CMD hstore ping "127.0.0.1:${HSTORE_PORT}" > /dev/null || exit 1
+USER hstore
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["serve"]

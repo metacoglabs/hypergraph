@@ -21,6 +21,13 @@ if [ "$(id -u)" = '0' ]; then
 	exec setpriv --reuid=hstore --regid=hstore --init-groups "$BASH_SOURCE" serve "$@"
 fi
 
+if [ ! -w "$HSTORE_DATA" ]; then
+	log "error: $HSTORE_DATA is not writable by $(id -un) (uid $(id -u))"
+	log '       chown the volume to uid 999, or start the container with --user root once'
+	log '       so the entrypoint can fix the ownership and drop privileges itself'
+	exit 1
+fi
+
 if [ ! -s "$HSTORE_DATA/FORMAT" ]; then
 	user="${HSTORE_USER:-hstore}"
 	if [ -n "${HSTORE_PASSWORD_FILE:-}" ]; then
