@@ -21,7 +21,7 @@ flowchart LR
 |---|---|---|
 | Version | 0.1.0 (this repository) | 1.4 at commit `99485a1`, storage `bdb-je` on Berkeley DB JE 5.0.73 |
 | Data model used | node type `Entity` (indexed by key, property `name`); `SET_EDGE` type `Relation` | `String` atoms; `HGPlainLink` links |
-| Cache | node cache of 1,048,576 decoded nodes | JE cache at 30% of the heap (HyperGraphDB default) plus the HyperGraphDB atom cache |
+| Cache | node cache of 1,048,576 decoded nodes, or `CACHE_MB` / page size | JE cache at 30% of the heap (HyperGraphDB default), or `CACHE_MB`, plus the HyperGraphDB atom cache |
 | `async` durability | `durability = async` | HyperGraphDB default: JE `WRITE_NO_SYNC` |
 | `sync` durability | `durability = sync`, `wal_mode = references`, group commit | JE `COMMIT_SYNC` |
 | History | `history_limit = 64` generations retained for time travel (default) | none |
@@ -210,3 +210,23 @@ SCALE=4 DURABILITY=async HISTORY=1 benchmarks/run.sh
 run in brackets, and "Results agree" requires every run of both stores to return the same checksum. `THREADS`
 and `HEAP` override the thread count and heap size. Close other
 workloads first: the numbers are only meaningful on an otherwise idle machine.
+
+**Equal cache budgets.** By default the two caches are not the same size. HStore caches about a million decoded
+nodes, which at 16 KiB pages is enough to hold the whole dataset. HyperGraphDB gets JE's default of 30% of the
+heap. `CACHE_MB` gives both the same budget:
+
+| HStore | HyperGraphDB |
+|---|---|
+| node cache of `CACHE_MB` / page size nodes | JE cache of exactly `CACHE_MB` |
+
+Decoded nodes can take more or less heap than their page, and HyperGraphDB's own atom and incidence caches can't
+be capped in bytes (they shrink under memory pressure). So check the retained-heap line in the report to see what
+each store actually kept. Results go to a directory ending in `-cache-<mb>`.
+
+```
+SCALE=4 CACHE_MB=64 benchmarks/run.sh   # working set several times larger than either cache
+```
+
+With a small budget, reads that miss the cache go to the files, but the operating system's page cache will
+usually still serve them from memory. Reads only really hit the disk when the data is larger than the machine's
+free RAM.
