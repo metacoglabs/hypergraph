@@ -57,11 +57,12 @@ final class Report {
             double[] mine = values(subjects, workload, disk, single);
             double[] theirs = values(baselines, workload, disk, single);
             double ratio = disk || single ? median(theirs) / median(mine) : median(mine) / median(theirs);
+            boolean checked = !(entry.getValue().get("checked") instanceof Json.Bool(boolean value)) || value;
             boolean agree = disk || workload.startsWith("ingest") || workload.equals("reopen")
                     || Stream.concat(subjects.stream(), baselines.stream())
                     .map(run -> number(run.results().get(workload).get("checksum"))).distinct().count() == 1;
             out.append("| `%s`: %s | %s | %s | **%.2f×** | %s |%n".formatted(workload, text(entry.getValue().get("description")),
-                    cell(mine, disk, single), cell(theirs, disk, single), ratio, agree ? "yes" : "**no**"));
+                    cell(mine, disk, single), cell(theirs, disk, single), ratio, !checked ? "n/a" : agree ? "yes" : "**no**"));
         }
         out.append("%nRatios above 1 favour %s: throughput ratios divide %s by %s; latency and size ratios divide %s by %s.%n"
                 .formatted(subject.store(), subject.store(), baseline.store(), baseline.store(), subject.store()));
