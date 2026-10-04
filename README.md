@@ -166,4 +166,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+HStore is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE)
+(SPDX: `PolyForm-Noncommercial-1.0.0`). You may use, modify and share it for any noncommercial purpose.
+Commercial use is not covered by this license; contact the maintainers if you need it.

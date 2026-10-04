@@ -58,4 +58,4 @@ Report security vulnerabilities privately to the maintainers rather than in a pu
 
 ## License
 
-By contributing you agree that your contributions are licensed under the [Apache License 2.0](LICENSE).
+By contributing you agree that your contributions are licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
