@@ -18,7 +18,7 @@ Sources are under `engine/src/main/java/io/hstore/engine/maintenance/`, plus `St
 | `COMPACT;` (HQL), `StorageEngine.compact()` | compact, checkpoint, reclaim | `StorageEngine.compact` |
 | `StorageEngine.close()` | final checkpoint, then shutdown | `close` |
 
-Checkpoint and compaction are serialized by `StorageEngine.maintenance`, a `ReentrantLock`. Background compaction plays the role of PostgreSQL's autovacuum. Its trigger is write volume, `pages.bytesWritten()` advancing by more than `checkpoint_wal_mb` since the last pass, so an idle database never pays for a liveness walk. The pass only relocates segments whose live ratio is below `compaction_live_ratio`, and `COMPACT;` runs the same pass on demand.
+Checkpoint and compaction are serialized by `StorageEngine.maintenance`, a `ReentrantLock`. Background compaction plays the role of PostgreSQL's autovacuum. Its trigger is write volume, `pages.bytesWritten()` advancing by more than `checkpoint_wal_mb` since the last pass, so an idle database never pays for a liveness walk. The background pass relocates at most one segment, the emptiest one whose live bytes are below `compaction_live_ratio` of its allocated bytes. `COMPACT;` relocates every such segment on demand.
 
 Every checkpoint is logged, and then the checkpoint listeners run. The database registers `SemanticPlane.persist`, which saves the HNSW index alongside the catalog. A sample log line:
 
@@ -71,23 +71,23 @@ stateDiagram-v2
 
 ### Liveness
 
-`Compactor.liveness()` returns, per segment, the number of distinct node images reachable from:
+`Compactor.liveness()` returns, per segment, the bytes of distinct node images reachable from:
 
 * **every retained generation** (`transactions.history()`) plus `current`;
 * **every branch** in each of those generations;
 * **every slot root** in each branch.
 
-`TreeWalker.visit(root, schema, visited)` adds each `Ref.Stored` page id it meets to one shared `visited` set, so an image shared by several generations, branches or trees is counted once. It descends into branches and, for codecs that hold references (catalog edge records, promoted posting lists), into nested trees.
+`TreeWalker.visit(root, schema, visited)` records each `Ref.Stored` page id it meets, with the image size the reference carries, in one shared `visited` map, so an image shared by several generations, branches or trees is counted once. The size comes from the reference itself, so no page has to be read to learn it. It descends into branches and, for codecs that hold references (catalog edge records, promoted posting lists), into nested trees.
 
 A detail that keeps this cheap: at height 0 of a tree whose codec has no nested references, the walker records the leaf's id **without loading it**. The summaries in the parent already prove that the leaf exists. Liveness is therefore proportional to the number of internal nodes plus the reference-holding leaves, not to total data size.
 
-Liveness is exposed as `StorageEngine.liveness()`. The Studio dashboard shows it per segment next to `SegmentInfo.pages` and `bytes()`.
+Liveness is exposed as `StorageEngine.liveness()` (live bytes per segment). The Studio dashboard shows it per segment next to `SegmentInfo.pages` and `bytes()`.
 
 ### Compaction
 
 `Compactor.compact(liveThreshold)` (default threshold `compaction_live_ratio = 0.5`):
 
-1. **Choose victims.** A victim is a `SEALED` segment, not the active one, with `live < pages × threshold`. Here `pages` is the number of images ever allocated in the segment, so the ratio is *live node images / images written*. If there are no victims, it reports and returns.
+1. **Choose victims.** A victim is a `SEALED` segment, not the active one, with `live bytes < allocated bytes × threshold`, so the ratio is *live bytes / bytes written*. Candidates are ordered from emptiest to fullest. The background pass takes only the first one (`compact(threshold, 1)`), which bounds how long a single relocation holds the commit lock; `COMPACT` takes all of them. If there are no victims, it reports and returns.
 2. Mark the victims `COMPACTING`.
 3. **Relocate.** For every **active** branch of the current generation, call `transactions.rewrite(branch, roots -> roots.map(relocate))`. `TreeWalker.relocate(ref, schema, moving, scope)` rebuilds as a fresh `Ref.Pending` copy:
    * every stored node whose page id lies in a victim segment;
