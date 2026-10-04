@@ -118,7 +118,9 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
     CMD hstore ping "127.0.0.1:${HSTORE_PORT}" > /dev/null || exit 1
 ```
 
-`hstore ping` connects, reads the banner and disconnects without sending a request. It needs no credentials and
+`hstore ping` connects, reads the banner and disconnects without sending a request. When `HSTORE_TLS=on` it
+connects over TLS, trusting `HSTORE_TLS_CA_FILE` or the server's own certificate, and skips the hostname check
+since it always talks to `127.0.0.1`. It needs no credentials and
 logs only at DEBUG level, so probes do not fill the log. `docker inspect -f '{{.State.Health.Status}}' hstore`
 reports `healthy` once the server accepts connections.
 

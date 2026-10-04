@@ -77,8 +77,10 @@ This is every message the server emits. Placeholders are in `{braces}`.
 | WARNING | semantic | `semantic index files are unreadable; rebuilding from embeddings` | Corrupt or partial index files. Rebuilt from stored embeddings. |
 | WARNING | semantic | `change feed no longer covers semantic index generation {g}; rebuilding` | The saved index is older than the oldest retained feed generation, so it cannot be caught up. |
 | WARNING | semantic | `could not persist the semantic index` | I/O error while writing index files at a checkpoint or at close. Retried at the next checkpoint. |
-| LOG | studio | `studio listening on http://{host}:{port}` | Studio started. |
-| LOG | server | `listening on {host}:{port}` | Wire protocol accepting connections. |
+| LOG | studio | `studio listening on {http\|https}://{host}:{port}` | Studio started; `https` when `tls = on`. |
+| LOG | server | `listening on {host}:{port}` (suffix ` with TLS` when `tls = on`) | Wire protocol accepting connections. |
+| LOG | server | `connection {n} from {peer} failed the TLS handshake: {reason}` | A client could not complete the handshake, for example an untrusted certificate. |
+| LOG | server | `connection {n} from {peer} did not complete the TLS handshake in time` | No handshake within 10 seconds, typically a plaintext client on a TLS port. |
 | LOG | main | `received shutdown request; closing connections and checkpointing` | SIGTERM or SIGINT received. |
 | LOG | engine | `checkpoint complete: generation {g}, lsn {lsn}, {n} wal segments retained, {ms} ms` | Background, explicit (`CHECKPOINT;`), compaction and shutdown checkpoints. |
 | WARNING | engine | `checkpoint listener failed` | A post-checkpoint hook (semantic index persistence) threw. The checkpoint itself succeeded. |

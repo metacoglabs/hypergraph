@@ -3,8 +3,8 @@
 The HQL wire protocol is a line-oriented UTF-8 text protocol over TCP (default port `7432`). It is
 implemented by [`WireProtocol.java`](../../server/src/main/java/io/hstore/server/WireProtocol.java) (framing)
 and [`Server.java`](../../server/src/main/java/io/hstore/server/Server.java) (conversation). It has no binary
-framing, no length prefixes and no TLS. Run it on a trusted network, or terminate TLS in front of it (for
-example with `stunnel`, HAProxy or a service mesh).
+framing and no length prefixes. With [`tls = on`](configuration.md) the same protocol runs inside TLS on the
+same port; otherwise it is plaintext and belongs on a trusted network.
 
 ## Framing
 
@@ -104,7 +104,10 @@ server CPU. Together with the five-attempt limit, this bounds online guessing to
 connection. Every failure is logged as a WARNING with the peer address; see
 [logging](logging.md#connections-log_connections--on).
 
-The password travels in clear text. Use TLS termination for untrusted networks.
+Without `tls = on` the password travels in clear text. With TLS the server completes the handshake before it
+sends the banner, and gives the client 10 seconds to do so. A client that fails or stalls the handshake (for
+example a plaintext client on the TLS port) is logged at LOG level and disconnected. `hstore connect` and
+`hstore ping` likewise give up after 10 seconds without a banner.
 
 ### Requests and responses
 

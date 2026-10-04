@@ -75,6 +75,10 @@ max_connections          = 200
 | `max_connections` | `HSTORE_MAX_CONNECTIONS` | `200` | Open wire connections allowed. Connection *n+1* receives `error [ABORTED_RESOURCE_LIMIT]: too many connections` and is closed. Studio sessions are not counted. |
 | `authentication` | `HSTORE_AUTHENTICATION` | `auto` | `auto` requires `AUTHENTICATE` once at least one user exists. `on` always requires it. `off` never requires it, and every connection runs as the built-in `system` ADMIN principal. Applies to the wire protocol and to Studio. |
 | `idle_timeout_seconds` | `HSTORE_IDLE_TIMEOUT_SECONDS` | `0` | Wire connections with no request for this long are closed (the socket read timeout). `0` disables the timeout. |
+| `tls` | `HSTORE_TLS` | `off` | `on` serves the wire protocol over TLS and Studio over HTTPS, with the same certificate. Startup fails if the certificate or key is missing or unreadable. |
+| `tls_certificate_file` | `HSTORE_TLS_CERTIFICATE_FILE` | *(empty)* | PEM certificate chain the server presents, leaf first. |
+| `tls_key_file` | `HSTORE_TLS_KEY_FILE` | *(empty)* | Unencrypted PKCS#8 PEM private key (`BEGIN PRIVATE KEY`), EC, RSA or Ed25519. Convert other formats with `openssl pkcs8 -topk8 -nocrypt`. |
+| `tls_ca_file` | `HSTORE_TLS_CA_FILE` | *(empty)* | Client side: certificates `hstore connect` and `hstore ping` trust when `tls = on`. Falls back to `tls_certificate_file` (handy for self-signed setups), then the system trust store. |
 | `studio` | `HSTORE_STUDIO` | `on` | Serve [HStore Studio](studio.md). |
 | `studio_port` | `HSTORE_STUDIO_PORT` | `7480` | HTTP port of Studio. |
 | `studio_session_minutes` | `HSTORE_STUDIO_SESSION_MINUTES` | `60` | Idle minutes before a Studio session is closed and its HQL session released. |
