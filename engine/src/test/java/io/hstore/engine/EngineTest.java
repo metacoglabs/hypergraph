@@ -84,6 +84,37 @@ class EngineTest {
     }
 
     @Test
+    void subscribersBehindRetentionAreToldAboutTheGap() throws InterruptedException {
+        EngineOptions options = small().withWalSegmentBytes(4096).withFeedRetention(10);
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            long edge = engine.write(txn -> txn.createEdge(EDGE, EdgeKind.SET));
+            for (int i = 0; i < 200; i++) {
+                int index = i;
+                engine.write(txn -> {
+                    txn.insert(edge, txn.createNode(NODE, "g" + index));
+                    return null;
+                });
+            }
+            engine.checkpoint();
+            long first = engine.feed().firstGeneration();
+            assertTrue(first > 2);
+            List<long[]> gaps = new CopyOnWriteArrayList<>();
+            List<CommitEvent> seen = new CopyOnWriteArrayList<>();
+            try (ChangeFeed.Subscription _ = engine.feed().subscribe(1, seen::add,
+                    (acknowledged, firstRetained) -> gaps.add(new long[]{acknowledged, firstRetained}))) {
+                long deadline = System.currentTimeMillis() + 5000;
+                while (seen.isEmpty() && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(10);
+                }
+                assertEquals(1, gaps.size());
+                assertEquals(1, gaps.getFirst()[0]);
+                assertEquals(first, gaps.getFirst()[1]);
+                assertEquals(first, seen.getFirst().generation());
+            }
+        }
+    }
+
+    @Test
     void randomTopologyMatchesOracleAcrossRestarts() {
         RandomGenerator random = RandomGeneratorFactory.of("L64X128MixRandom").create(42);
         Map<Long, List<Long>> ordered = new HashMap<>();

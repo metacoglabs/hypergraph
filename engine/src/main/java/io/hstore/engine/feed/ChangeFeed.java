@@ -45,6 +45,11 @@ public final class ChangeFeed implements AutoCloseable {
         void close();
     }
 
+    @FunctionalInterface
+    public interface Gap {
+        void missed(long acknowledged, long firstRetained);
+    }
+
     private static final int FRAME_HEADER = 16;
     private static final int INDEX_STRIDE = 64;
     private static final long SEGMENT_BYTES = 64L << 20;
@@ -290,7 +295,12 @@ public final class ChangeFeed implements AutoCloseable {
     }
 
     public Subscription subscribe(long afterGeneration, Consumer<CommitEvent> consumer) {
-        Tail tail = new Tail(afterGeneration, consumer);
+        return subscribe(afterGeneration, consumer, (acknowledged, first) -> LOG.log(System.Logger.Level.WARNING,
+                "change feed subscriber at generation {0} fell behind retention; resuming at generation {1}", acknowledged, first));
+    }
+
+    public Subscription subscribe(long afterGeneration, Consumer<CommitEvent> consumer, Gap gap) {
+        Tail tail = new Tail(afterGeneration, consumer, gap);
         Thread.ofVirtual().name("feed-subscriber").start(tail);
         return tail;
     }
@@ -403,19 +413,28 @@ public final class ChangeFeed implements AutoCloseable {
 
     private final class Tail implements Runnable, Subscription {
         private final Consumer<CommitEvent> consumer;
+        private final Gap gap;
         private volatile long acknowledged;
         private volatile boolean stopped;
 
-        Tail(long afterGeneration, Consumer<CommitEvent> consumer) {
+        Tail(long afterGeneration, Consumer<CommitEvent> consumer, Gap gap) {
             this.acknowledged = afterGeneration;
             this.consumer = consumer;
+            this.gap = gap;
         }
 
         @Override
         public void run() {
             try {
                 while (!stopped && !closed) {
-                    replay(acknowledged).takeWhile(_ -> !stopped && !closed).forEach(event -> {
+                    Stream<CommitEvent> events = replay(acknowledged);
+                    if (!covers(acknowledged)) {
+                        long first = firstGeneration();
+                        gap.missed(acknowledged, first);
+                        acknowledged = first - 1;
+                        continue;
+                    }
+                    events.takeWhile(_ -> !stopped && !closed).forEach(event -> {
                         consumer.accept(event);
                         acknowledged = event.generation();
                     });
