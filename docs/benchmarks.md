@@ -46,7 +46,9 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `read.members` | enumerate a hyperedge's members | `Reader.members` | `HGLink.getTargetAt` over `graph.get(h)` |
 | `read.comembership` | count hyperedges containing both nodes of a pair | `TreeAlgebra.intersectKeys` (leapfrog) | `hg.count(hg.and(hg.incident(a), hg.incident(b)))` |
 | `read.incidence.parallel` | `read.incidence` from one thread per core | same | same |
+| `latency.read` | one incidence lookup per read transaction, each timed on its own | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
 | `write.update` | replace a node's value, 1,000 per transaction | `Writer.set` | `graph.replace` |
+| `latency.commit` | 5,000 write transactions of one update each, each timed on its own | `Writer.set` | `graph.replace` |
 | `large.ingest` | one hyperedge containing every node | `Writer.load` | one `HGPlainLink` |
 | `large.scan` | enumerate the large hyperedge twenty times | `Reader.members` | `getTargetAt` loop |
 | `large.probe` | test whether a node belongs to the large hyperedge | `View.incidence(edge, node)` (membership-tree lookup) | `getIncidenceSet(node).contains(edge)` |
@@ -55,6 +57,12 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `disk` | bytes on disk after a clean shutdown | | |
 
 Read workloads run a warm-up pass over 10% of the probes before timing, except `read.incidence.cold`.
+
+The two `latency.*` workloads time every operation separately with `System.nanoTime()`. Each operation is a whole
+transaction, as it would be for a request to a server. The report adds a second table with p50, p99, p99.9 and the
+maximum, taking the median of each percentile across runs. Throughput hides occasional slow operations caused by
+group commit, checkpoints, compaction or GC; these percentiles show them. Under `sync` durability,
+`latency.commit` is effectively the cost of one durable commit.
 
 ## Results
 
