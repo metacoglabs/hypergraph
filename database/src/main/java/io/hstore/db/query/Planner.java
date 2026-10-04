@@ -19,10 +19,11 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.function.ToLongFunction;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 final class Planner {
 
-    record Candidate(AccessPath path, Optional<Expr> source, double rows, double cost) {
+    record Candidate(AccessPath path, List<Expr> sources, double rows, double cost) {
     }
 
     record Plan(Ast.Match match, Optional<TypeDef> type, Candidate chosen, List<Candidate> alternatives, List<Expr> residual) {
@@ -50,6 +51,7 @@ final class Planner {
     private static final double VERIFY_WEIGHT = 0.05;
     private static final double ENTRIES_PER_PAGE = 128;
     private static final double TREE_DEPTH = 3;
+    private static final int MAX_INTERSECTED = 4;
 
     private final Reader reader;
     private final Statistics statistics;
@@ -71,38 +73,83 @@ final class Planner {
         List<Expr> conjuncts = match.where().map(Planner::conjuncts).orElse(List.of());
         List<Candidate> candidates = new ArrayList<>();
         double catalogSize = reader.view().scan(EngineSlots.CATALOG).size();
-        candidates.add(candidate(new AccessPath.AllAtoms(match.edges()), Optional.empty(), catalogSize,
-                verificationWeight(conjuncts, Optional.empty(), null) + 1));
-        type.ifPresent(found -> candidates.add(candidate(new AccessPath.TypeScan(found), Optional.empty(),
-                reader.countOfType(found.id()), verificationWeight(conjuncts, Optional.empty(), null))));
+        double population = type.map(found -> (double) reader.countOfType(found.id())).orElse(catalogSize);
+        Candidate catalogScan = candidate(new AccessPath.AllAtoms(match.edges()), List.of(), catalogSize, conjuncts);
+        candidates.add(new Candidate(catalogScan.path(), List.of(), catalogScan.rows(), catalogScan.cost() + VERIFY_WEIGHT * catalogScan.rows()));
+        type.ifPresent(found -> candidates.add(candidate(new AccessPath.TypeScan(found), List.of(), population, conjuncts)));
+        List<Candidate> exactParts = new ArrayList<>();
         for (Expr conjunct : conjuncts) {
-            accessPath(match, type, conjunct).ifPresent(path -> candidates.add(
-                    candidate(path, Optional.of(conjunct), estimate(path, catalogSize), verificationWeight(conjuncts, Optional.of(conjunct), path))));
+            accessPath(match, type, conjunct).or(() -> union(match, type, conjunct)).ifPresent(path -> {
+                List<Expr> consumed = exact(path, conjunct) ? List.of(conjunct) : List.of();
+                Candidate single = candidate(path, consumed, estimate(path, catalogSize), conjuncts);
+                candidates.add(single);
+                if (!consumed.isEmpty() && !(path instanceof AccessPath.Semantic)) {
+                    exactParts.add(single);
+                }
+            });
+        }
+        exactParts.sort(Comparator.comparingDouble(Candidate::rows));
+        for (int size = 2; size <= Math.min(MAX_INTERSECTED, exactParts.size()); size++) {
+            candidates.add(intersection(exactParts.subList(0, size), population, conjuncts));
         }
         Candidate chosen = candidates.stream().min(Comparator.comparingDouble(Candidate::cost)).orElseThrow();
         List<Expr> residual = conjuncts.stream()
-                .filter(conjunct -> chosen.source().filter(source -> source == conjunct && exact(chosen.path(), conjunct)).isEmpty())
+                .filter(conjunct -> chosen.sources().stream().noneMatch(source -> source == conjunct))
                 .sorted(Comparator.comparingInt(Planner::costClass))
                 .toList();
         return new Plan(match, type, chosen, List.copyOf(candidates), residual);
     }
 
-    private static double verificationWeight(List<Expr> conjuncts, Optional<Expr> consumed, AccessPath path) {
+    private Optional<AccessPath> union(Ast.Match match, Optional<TypeDef> type, Expr conjunct) {
+        if (!(conjunct instanceof Expr.Or(List<Expr> terms))) {
+            return Optional.empty();
+        }
+        List<AccessPath> parts = new ArrayList<>();
+        for (Expr term : terms) {
+            Optional<AccessPath> part = accessPath(match, type, term);
+            if (part.isEmpty() || part.get() instanceof AccessPath.Semantic) {
+                return Optional.empty();
+            }
+            parts.add(part.get());
+        }
+        return Optional.of(new AccessPath.Union(parts));
+    }
+
+    private Candidate intersection(List<Candidate> parts, double population, List<Expr> conjuncts) {
+        double rows = parts.getFirst().rows();
+        for (Candidate part : parts.subList(1, parts.size())) {
+            rows *= Math.min(1.0, part.rows() / Math.max(1.0, population));
+        }
+        List<Expr> consumed = parts.stream().flatMap(part -> part.sources().stream()).toList();
+        AccessPath path = new AccessPath.Intersection(parts.stream().map(Candidate::path).toList());
+        double corrected = rows * statistics.correction(path.kind());
+        double access = parts.stream().mapToDouble(part -> scanCost(part.path(), part.rows())).sum();
+        return new Candidate(path, consumed, corrected, access + VERIFY_WEIGHT * corrected * verificationWeight(conjuncts, consumed));
+    }
+
+    private static double verificationWeight(List<Expr> conjuncts, List<Expr> consumed) {
         return conjuncts.stream()
-                .filter(conjunct -> consumed.filter(source -> source == conjunct && exact(path, conjunct)).isEmpty())
+                .filter(conjunct -> consumed.stream().noneMatch(source -> source == conjunct))
                 .mapToInt(Planner::costClass)
                 .sum();
     }
 
-    private Candidate candidate(AccessPath path, Optional<Expr> source, double rows, double verification) {
+    private Candidate candidate(AccessPath path, List<Expr> sources, double rows, List<Expr> conjuncts) {
         double corrected = rows * statistics.correction(path.kind());
-        double pages = switch (path) {
-            case AccessPath.Fixed _ -> TREE_DEPTH;
-            case AccessPath.Semantic(String _, int k, var _) -> 2.0 * k + TREE_DEPTH;
-            default -> corrected / ENTRIES_PER_PAGE + TREE_DEPTH;
+        return new Candidate(path, sources, corrected,
+                scanCost(path, corrected) + VERIFY_WEIGHT * corrected * verificationWeight(conjuncts, sources));
+    }
+
+    private double scanCost(AccessPath path, double rows) {
+        return switch (path) {
+            case AccessPath.Fixed _ -> IO_WEIGHT * TREE_DEPTH + CPU_WEIGHT * rows;
+            case AccessPath.Semantic(String _, int k, var _) -> IO_WEIGHT * (2.0 * k + TREE_DEPTH) + CPU_WEIGHT * rows;
+            case AccessPath.Union(List<AccessPath> parts) -> parts.stream()
+                    .mapToDouble(part -> scanCost(part, estimate(part, reader.view().scan(EngineSlots.CATALOG).size()))).sum();
+            case AccessPath.Intersection(List<AccessPath> parts) -> parts.stream()
+                    .mapToDouble(part -> scanCost(part, estimate(part, reader.view().scan(EngineSlots.CATALOG).size()))).sum();
+            default -> IO_WEIGHT * (rows / ENTRIES_PER_PAGE + TREE_DEPTH) + CPU_WEIGHT * rows;
         };
-        double cost = IO_WEIGHT * pages + CPU_WEIGHT * corrected + VERIFY_WEIGHT * corrected * verification;
-        return new Candidate(path, source, corrected, cost);
     }
 
     private double estimate(AccessPath path, double population) {
@@ -121,6 +168,9 @@ final class Planner {
             case AccessPath.IndexRange range -> indexEstimate(range);
             case AccessPath.TypeScan(TypeDef type) -> reader.countOfType(type.id());
             case AccessPath.AllAtoms _ -> reader.view().scan(EngineSlots.CATALOG).size();
+            case AccessPath.Union(List<AccessPath> parts) -> Math.min(population,
+                    parts.stream().mapToDouble(part -> estimate(part, population)).sum());
+            case AccessPath.Intersection(List<AccessPath> parts) -> parts.stream().mapToDouble(part -> estimate(part, population)).min().orElse(0);
         };
     }
 
@@ -197,6 +247,9 @@ final class Planner {
             case AccessPath.Semantic _, AccessPath.TypeScan _, AccessPath.AllAtoms _ -> false;
             case AccessPath.Incident _ -> !(conjunct instanceof Expr.Has(String _, Ast.Ref _, Optional<String> role) && role.isPresent());
             case AccessPath.Members _, AccessPath.IndexRange _, AccessPath.Fixed _ -> true;
+            case AccessPath.Union(List<AccessPath> parts) -> conjunct instanceof Expr.Or(List<Expr> terms) && terms.size() == parts.size()
+                    && IntStream.range(0, parts.size()).allMatch(i -> exact(parts.get(i), terms.get(i)));
+            case AccessPath.Intersection _ -> false;
         };
     }
 

@@ -8,6 +8,7 @@ import io.hstore.db.value.Value;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeAlgebra;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.LongStream;
@@ -118,6 +119,61 @@ public sealed interface AccessPath {
 
         public LongStream scan(Reader reader) {
             return reader.visible(atom) ? LongStream.of(atom) : LongStream.empty();
+        }
+    }
+
+    record Intersection(List<AccessPath> parts) implements AccessPath {
+        public String kind() {
+            return "intersection";
+        }
+
+        public String describe() {
+            return "Intersect" + parts.stream().map(AccessPath::describe).toList();
+        }
+
+        public LongStream scan(Reader reader) {
+            long[] result = null;
+            for (AccessPath part : parts) {
+                long[] ids = part.scan(reader).sorted().distinct().toArray();
+                result = result == null ? ids : intersect(result, ids);
+                if (result.length == 0) {
+                    break;
+                }
+            }
+            return LongStream.of(result == null ? new long[0] : result);
+        }
+
+        private static long[] intersect(long[] left, long[] right) {
+            long[] out = new long[Math.min(left.length, right.length)];
+            int i = 0;
+            int j = 0;
+            int n = 0;
+            while (i < left.length && j < right.length) {
+                if (left[i] < right[j]) {
+                    i++;
+                } else if (left[i] > right[j]) {
+                    j++;
+                } else {
+                    out[n++] = left[i];
+                    i++;
+                    j++;
+                }
+            }
+            return Arrays.copyOf(out, n);
+        }
+    }
+
+    record Union(List<AccessPath> parts) implements AccessPath {
+        public String kind() {
+            return "union";
+        }
+
+        public String describe() {
+            return "Union" + parts.stream().map(AccessPath::describe).toList();
+        }
+
+        public LongStream scan(Reader reader) {
+            return parts.stream().flatMapToLong(part -> part.scan(reader)).sorted().distinct();
         }
     }
 }
