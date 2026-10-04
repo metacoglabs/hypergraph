@@ -1,0 +1,20 @@
+services:
+  hstore:
+    build: .
+    image: hstore:latest
+    restart: unless-stopped
+    ports:
+      - "7432:7432"
+      - "7480:7480"
+    environment:
+      HSTORE_USER: admin
+      HSTORE_PASSWORD: change-me
+      HSTORE_LOG_STATEMENT: ddl
+      HSTORE_LOG_MIN_DURATION_MS: "250"
+    volumes:
+      - hstore-data:/var/lib/hstore/data
+      - ./examples/clinical-claims.hql:/docker-entrypoint-initdb.d/01-clinical-claims.hql:ro
+    stop_grace_period: 30s
+
+volumes:
+  hstore-data:
