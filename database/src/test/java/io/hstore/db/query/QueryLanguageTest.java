@@ -100,6 +100,25 @@ class QueryLanguageTest {
     }
 
     @Test
+    void broadPredicatesAreIntersectedAndDisjunctionsUnioned() {
+        StringBuilder script = new StringBuilder("CREATE NODE TYPE Item (color STRING INDEXED, shape STRING INDEXED, size INT INDEXED);\nBEGIN;\n");
+        for (int i = 0; i < 4000; i++) {
+            script.append("INSERT NODE Item 'i").append(i).append("' {color: '").append(i % 2 == 0 ? "red" : "blue")
+                    .append("', shape: '").append(i % 4 < 2 ? "round" : "square").append("', size: ").append(i % 100).append("};\n");
+        }
+        session.executeAll(script.append("COMMIT;").toString());
+        String both = "MATCH NODE i:Item WHERE i.color = 'red' AND i.shape = 'round'";
+        assertTrue(session.execute("EXPLAIN " + both).message().startsWith("Intersect["), session.execute("EXPLAIN " + both).message());
+        assertEquals("1000", column(session.execute(both + " RETURN count(*)"), 0).getFirst());
+        String either = "MATCH NODE i:Item WHERE i.size = 1 OR i.size = 2";
+        String plan = session.execute("EXPLAIN " + either).message();
+        assertTrue(plan.startsWith("Union["), plan);
+        assertTrue(plan.lines().noneMatch(line -> line.contains("Verify")), plan);
+        assertEquals("80", column(session.execute(either + " RETURN count(*)"), 0).getFirst());
+        assertEquals("80", column(session.execute("MATCH NODE i:Item WHERE i.size + 0 = 1 OR i.size + 0 = 2 RETURN count(*)"), 0).getFirst());
+    }
+
+    @Test
     void indexedPredicatesDriveThePlan() {
         String plan = session.execute("EXPLAIN MATCH NODE p:Person WHERE p.age >= 30 AND p.age < 40").message();
         assertTrue(plan.startsWith("IndexRange(Person.age"), plan);
