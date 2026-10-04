@@ -32,7 +32,16 @@ interface Store extends AutoCloseable {
 
     long probeLargeEdge(int[] nodes, int from, int to);
 
-    void reopen();
+    void deleteEdges(int[] deletions, int from, int to);
+
+    void removeMembers(int[][] removals, int from, int to);
+
+    default void reopen() {
+        reopen(() -> {
+        });
+    }
+
+    void reopen(Runnable whileClosed);
 
     void flush();
 

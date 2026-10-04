@@ -57,6 +57,10 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `reopen` | close and reopen, including recovery | `HypergraphDatabase.open` | `HGEnvironment.get` |
 | `read.incidence.cold` | `read.incidence` immediately after reopening | | |
 | `disk` | bytes on disk after a clean shutdown | | |
+| `churn.delete` | delete 20% of the hyperedges, 1,000 per transaction | `Writer.delete` | `graph.remove` |
+| `churn.remove` | remove one member from each of 20,000 other hyperedges, 1,000 per transaction | `Writer.remove` | `graph.replace` with a new `HGPlainLink` (links are immutable) |
+| `read.incidence.churned` | `read.incidence` after the deletes | | |
+| `disk.churned` | bytes on disk after the deletes and a clean shutdown | | |
 
 Read workloads run a warm-up pass over 10% of the probes before timing, except `read.incidence.cold`.
 
@@ -72,6 +76,13 @@ when it actually started. If the engine stalls, the commits queued behind the st
 the writer quietly slowing down. The writer stops at the deadline even when it is behind, so an engine that can't
 keep up shows an achieved rate below 1,000 updates/s. Readers keep a uniform random sample of 200,000 latencies
 each, plus the exact maximum. Both results depend on timing, so *Results agree* shows "n/a".
+
+**Deletes.** The churn set is drawn from the same seed after everything else, so the rest of the dataset is
+unchanged. It has 20% of the hyperedges to delete and 20,000 others, each with at least three members, that lose
+one member. `disk` is recorded while the store is closed for a reopen, before the churn starts, so it still means
+the loaded store after a clean shutdown. The checksum of `read.incidence.churned` has to agree, which confirms
+both engines applied the same deletes. `disk.churned` shows whether the space came back: through compaction for
+HStore, and the log cleaner for JE.
 
 **Bytes written.** For every write workload the report also shows the bytes each engine wrote per operation, in a
 *Resources* table, plus the total for the whole run. Both engines count the bytes they write themselves:

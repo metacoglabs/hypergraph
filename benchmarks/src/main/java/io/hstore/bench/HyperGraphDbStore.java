@@ -215,9 +215,39 @@ final class HyperGraphDbStore implements Store {
     }
 
     @Override
-    public void reopen() {
+    public void deleteEdges(int[] deletions, int from, int to) {
+        transact(() -> {
+            for (int i = from; i < to; i++) {
+                graph.remove(edges[deletions[i]]);
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void removeMembers(int[][] removals, int from, int to) {
+        transact(() -> {
+            for (int i = from; i < to; i++) {
+                HGPersistentHandle edge = edges[removals[i][0]];
+                HGPersistentHandle removed = nodes[removals[i][1]];
+                HGLink link = graph.get(edge);
+                HGHandle[] remaining = new HGHandle[link.getArity() - 1];
+                for (int t = 0, r = 0; t < link.getArity(); t++) {
+                    if (!graph.getPersistentHandle(link.getTargetAt(t)).equals(removed)) {
+                        remaining[r++] = link.getTargetAt(t);
+                    }
+                }
+                graph.replace(edge, new HGPlainLink(remaining));
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void reopen(Runnable whileClosed) {
         writtenBeforeReopen = bytesWritten();
         graph.close();
+        whileClosed.run();
         graph = HGEnvironment.get(directory.toString(), configuration);
     }
 

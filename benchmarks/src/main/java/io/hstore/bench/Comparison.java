@@ -168,13 +168,31 @@ public final class Comparison {
             }));
             results.add(read("read.incidence.cold", "incidence sets immediately after reopening", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), false));
+            long[] loaded = new long[1];
+            store.reopen(() -> loaded[0] = store.diskBytes());
+            results.add(new Result("disk", "bytes on disk after a clean shutdown", loaded[0], 1000.0, loaded[0]));
+            int[] deletions = dataset.deletions();
+            results.add(writing(store, () -> measure("churn.delete", "delete %,d hyperedges (%d%%) in transactions of 1,000"
+                    .formatted(deletions.length, Math.round(100.0 * deletions.length / dataset.edges().length)), deletions.length,
+                    () -> batched(deletions.length, (from, to) -> {
+                        store.deleteEdges(deletions, from, to);
+                        return to - from;
+                    }))));
+            int[][] removals = dataset.removals();
+            results.add(writing(store, () -> measure("churn.remove", "remove one member from each of %,d other hyperedges, 1,000 per transaction"
+                    .formatted(removals.length), removals.length, () -> batched(removals.length, (from, to) -> {
+                        store.removeMembers(removals, from, to);
+                        return to - from;
+                    }))));
+            results.add(read("read.incidence.churned", "enumerate incidence sets after the deletes", nodes.length,
+                    (from, to) -> store.incidence(nodes, from, to), true));
             store.flush();
             totals.put("bytesWritten", number(store.bytesWritten()));
         } finally {
             store.close();
         }
-        long disk = store.diskBytes();
-        results.add(new Result("disk", "bytes on disk after a clean shutdown", disk, 1000.0, disk));
+        long churned = store.diskBytes();
+        results.add(new Result("disk.churned", "bytes on disk after the deletes and a clean shutdown", churned, 1000.0, churned));
         write(out, store, scale, sync, threads, dataset, totals, results);
         results.forEach(result -> IO.println("  %-22s %,14.0f ops/s  %,10.1f ms  checksum %d"
                 .formatted(result.workload(), result.rate(), result.millis(), result.checksum())));
