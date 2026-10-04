@@ -7,6 +7,7 @@ import io.hstore.db.property.PropertySlots;
 import io.hstore.db.schema.Schema;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.security.Principal;
+import io.hstore.db.security.Security;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.value.Json;
 import io.hstore.db.value.TypeTag;
@@ -38,6 +39,8 @@ public sealed class Reader permits Writer {
     private final View view;
     private final Principal principal;
 
+    private Boolean onlyDefaultTenant;
+
     Reader(HypergraphDatabase database, View view, Principal principal) {
         this.database = database;
         this.view = view;
@@ -50,6 +53,16 @@ public sealed class Reader permits Writer {
 
     public int tenant() {
         return principal.tenant();
+    }
+
+    private boolean onlyDefaultTenant() {
+        Boolean known = onlyDefaultTenant;
+        if (known == null) {
+            known = tenant() == Principal.DEFAULT_TENANT
+                    && view.scan(Security.TENANTS).last().map(entry -> entry.key() == Principal.DEFAULT_TENANT).orElse(true);
+            onlyDefaultTenant = known;
+        }
+        return known;
     }
 
     public boolean visible(long atom) {
@@ -210,7 +223,7 @@ public sealed class Reader permits Writer {
     }
 
     public Stream<Incident> incident(long atom) {
-        if (!visible(atom)) {
+        if (!onlyDefaultTenant() && !visible(atom)) {
             return Stream.empty();
         }
         return view.incident(atom).map(incident -> new Incident(incident.edge(), roles(incident.roleSet()), incident.locator()));
