@@ -73,18 +73,24 @@ final class Report {
     private record Metric(String key, String name, boolean perOperation, DoubleFunction<String> format) {
     }
 
-    private static final List<Metric> METRICS = List.of(new Metric("bytesWritten", "bytes written per operation", true, Report::bytes));
+    private static final List<Metric> METRICS = List.of(new Metric("bytesWritten", "bytes written per operation", true, Report::bytes),
+            new Metric("allocated", "heap allocated per operation", true, Report::bytes),
+            new Metric("gcMillis", "GC pause time", false, value -> "%,.0f ms".formatted(value)));
 
     private static void resources(StringBuilder out, List<Run> subjects, List<Run> baselines) {
         List<Run> all = Stream.concat(subjects.stream(), baselines.stream()).toList();
         StringBuilder rows = new StringBuilder();
-        for (String workload : subjects.getFirst().results().keySet()) {
-            for (Metric metric : METRICS) {
+        for (Metric metric : METRICS) {
+            for (String workload : subjects.getFirst().results().keySet()) {
                 if (all.stream().allMatch(run -> run.results().containsKey(workload) && run.results().get(workload).containsKey(metric.key()))) {
                     double mine = median(metric(subjects, workload, metric));
                     double theirs = median(metric(baselines, workload, metric));
-                    rows.append("| `%s` | %s | %s | %s | **%.2f×** |%n".formatted(workload, metric.name(), metric.format().apply(mine),
-                            metric.format().apply(theirs), theirs / mine));
+                    if (mine == 0 && theirs == 0) {
+                        continue;
+                    }
+                    double ratio = theirs / mine;
+                    rows.append("| `%s` | %s | %s | %s | %s |%n".formatted(workload, metric.name(), metric.format().apply(mine),
+                            metric.format().apply(theirs), Double.isFinite(ratio) ? "**%.2f×**".formatted(ratio) : "n/a"));
                 }
             }
         }
@@ -94,6 +100,11 @@ final class Report {
         out.append("%nResources used by each workload, median of the runs:%n%n".formatted());
         out.append("| Workload | Measure | %s | %s | Ratio |%n".formatted(subjects.getFirst().store(), baselines.getFirst().store()));
         out.append("|---|---|---:|---:|---:|%n".formatted()).append(rows);
+        if (all.stream().allMatch(run -> run.header().containsKey("retainedHeap"))) {
+            out.append("%nHeap retained by the loaded store after a full GC: %s %s, %s %s.%n".formatted(
+                    subjects.getFirst().store(), bytes(median(header(subjects, "retainedHeap"))),
+                    baselines.getFirst().store(), bytes(median(header(baselines, "retainedHeap")))));
+        }
         if (all.stream().allMatch(run -> run.header().containsKey("bytesWritten"))) {
             out.append("%nBytes written in total, after a final flush: %s %s, %s %s.%n".formatted(
                     subjects.getFirst().store(), bytes(median(header(subjects, "bytesWritten"))),
