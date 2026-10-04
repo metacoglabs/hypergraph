@@ -24,6 +24,8 @@ interface Store extends AutoCloseable {
 
     long coMembership(int[][] pairs, int from, int to);
 
+    long twoHop(int[] probes, int from, int to);
+
     void update(int[] nodes, int from, int to, int round);
 
     void largeEdge(int members);

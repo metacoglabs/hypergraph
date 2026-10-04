@@ -18,6 +18,8 @@ import org.hypergraphdb.IncidenceSet;
 import org.hypergraphdb.storage.bje.BJEStorageImplementation;
 
 import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.Callable;
 
 final class HyperGraphDbStore implements Store {
@@ -152,6 +154,31 @@ final class HyperGraphDbStore implements Store {
             long total = 0;
             for (int i = from; i < to; i++) {
                 total += hg.count(graph, hg.and(hg.incident(nodes[pairs[i][0]]), hg.incident(nodes[pairs[i][1]])));
+            }
+            return total;
+        });
+    }
+
+    @Override
+    public long twoHop(int[] probes, int from, int to) {
+        return read(() -> {
+            long total = 0;
+            for (int i = from; i < to; i++) {
+                HGPersistentHandle start = nodes[probes[i]];
+                Set<HGPersistentHandle> reached = new HashSet<>();
+                HGSearchResult<HGHandle> incident = graph.getIncidenceSet(start).getSearchResult();
+                try {
+                    while (incident.hasNext()) {
+                        HGLink link = graph.get(incident.next());
+                        for (int t = 0; t < link.getArity(); t++) {
+                            reached.add(graph.getPersistentHandle(link.getTargetAt(t)));
+                        }
+                    }
+                } finally {
+                    incident.close();
+                }
+                reached.remove(start);
+                total += reached.size();
             }
             return total;
         });
