@@ -301,7 +301,7 @@ final class Bench {
             }
             return new Measurement(measurement.scenario(), measurement.operations(), measurement.p50(), measurement.p95(), measurement.p99(),
                     measurement.pagesRead(), measurement.pagesWritten(), measurement.walBytes(), measurement.writeAmplification(),
-                    "pinned snapshot stable; " + retained + " live pages retained across history");
+                    "pinned snapshot stable; " + retained + " live bytes retained across history");
         }
     }
 

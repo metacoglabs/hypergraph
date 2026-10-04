@@ -1,6 +1,6 @@
 package io.hstore.engine.tree;
 
-import java.util.Set;
+import java.util.Map;
 import java.util.function.LongPredicate;
 
 public final class TreeWalker {
@@ -13,12 +13,12 @@ public final class TreeWalker {
         this.source = source;
     }
 
-    public void visit(Ref root, TreeSchema<?> schema, Set<Long> visited) {
+    public void visit(Ref root, TreeSchema<?> schema, Map<Long, Integer> visited) {
         visit(root, schema, UNKNOWN_HEIGHT, visited);
     }
 
-    private void visit(Ref ref, TreeSchema<?> schema, int height, Set<Long> visited) {
-        if (!(ref instanceof Ref.Stored(long pageId, Summary _)) || !visited.add(pageId)) {
+    private void visit(Ref ref, TreeSchema<?> schema, int height, Map<Long, Integer> visited) {
+        if (!(ref instanceof Ref.Stored(long pageId, int units, Summary _)) || visited.putIfAbsent(pageId, units) != null) {
             return;
         }
         if (height == 0 && !schema.codec().holdsRefs()) {
@@ -46,7 +46,7 @@ public final class TreeWalker {
     }
 
     private Ref relocate(Ref ref, TreeSchema<?> schema, int height, LongPredicate inVictim, WriteScope scope) {
-        if (!(ref instanceof Ref.Stored(long pageId, Summary _))) {
+        if (!(ref instanceof Ref.Stored(long pageId, int _, Summary _))) {
             return ref;
         }
         boolean moving = inVictim.test(pageId);

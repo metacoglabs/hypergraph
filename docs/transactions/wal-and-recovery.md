@@ -45,7 +45,7 @@ All fixed-width integers are **little-endian** (`ByteCursor` uses `JAVA_INT_UNAL
 | `svarlong` | zigzag (`(v << 1) ^ (v >> 63)`) then `varlong` |
 | `blob` | `varint` length, then that many bytes |
 | `string` | `blob` of UTF-8 |
-| `Ref` | `i64 pageId`; `0` (`PageId.NONE`) means the empty tree and ends the encoding; otherwise followed by a `Summary` |
+| `Ref` | `i64 pageId`; `0` (`PageId.NONE`) means the empty tree and ends the encoding; otherwise followed by `varlong units` (the image size in 64-byte units, at most 3 bytes) and a `Summary` |
 | `Summary` | `varlong count`; if `count == 0` nothing else; otherwise `svarlong min`, `varlong (max - min)`, `svarlong weightSum`, `svarlong weightMin`, `svarlong weightMax`, `svarlong timeMin`, `svarlong timeMax`, `i64 roleBits`, `i64 fingerprint` (at most `Summary.MAX_ENCODED_BYTES = 96`) |
 
 ## 3. Segments and frames

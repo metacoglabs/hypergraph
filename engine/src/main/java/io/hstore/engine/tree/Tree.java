@@ -52,7 +52,7 @@ public record Tree<V>(TreeSchema<V> schema, NodeSource source, Ref root) {
         Node node = node(root);
         while (node instanceof Branch branch) {
             Ref child = branch.child(branch.route(key));
-            if (child instanceof Ref.Stored(long _, Summary summary) && !summary.overlaps(key, key)) {
+            if (child instanceof Ref.Stored(long _, int _, Summary summary) && !summary.overlaps(key, key)) {
                 return Optional.empty();
             }
             node = node(child);

@@ -82,7 +82,7 @@ INTERNAL: Ref × slotCount
                      | zigzag weightMax | zigzag timeMin | zigzag timeMax | i64le roleBits | i64le fingerprint
 ```
 
-For an internal node, "keys" are the separators. `separators[0]` is the first child's minimum (set by `Branch.frozenWith`), so the delta stream is non-negative. Each child reference embeds the child's **complete** summary. This lets readers prune and count without loading children, and is why a branch entry costs up to `KEY_BYTES + 8 + 96` bytes in the fanout calculation (`Layout`).
+For an internal node, "keys" are the separators. `separators[0]` is the first child's minimum (set by `Branch.frozenWith`), so the delta stream is non-negative. Each child reference embeds the child's image size in 64-byte units and its **complete** summary. This lets readers prune and count without loading children, lets compaction measure live bytes without reading pages, and is why a branch entry costs up to `KEY_BYTES + 8 + 3 + 96` bytes in the fanout calculation (`Layout`).
 
 **Size invariant.** Splits are decided from each value codec's `maxSize`, summed per entry, plus the exact key-stream size. `IncidenceCodec.maxSize` charges 1 byte per entry for leaf-level overhead. The real per-leaf fixed overhead is 1 flags byte plus up to 6 column bitmaps of ⌈n/8⌉ bytes. For n ≥ 8 the per-entry charge covers this: 7·⌈n/8⌉ ≤ n + 7 and the charge is n. For small leaves the excess is at most 7 bytes. `Layout` reserves 32 bytes beyond `leafBudget` (`RESERVED = 32`), which covers it, so an encoded leaf never exceeds `pageSize`. `NodeCodec.encode` encodes into a cursor of exactly `pageSize` bytes and would fail loudly (`node of N entries overflows a P byte page`) if the invariant were broken.
 
@@ -252,7 +252,7 @@ Because images are never overwritten in place, a torn write can only damage an i
 
 | Version | Where | Meaning |
 |---|---|---|
-| `format=2` in `<data>/FORMAT` | `StorageEngine.verifyFormat` | Packed 64-byte-unit extents. A directory with `format=1` (or no format key) was written with fixed page slots, and opening it fails: `uses storage format 1; this build reads format 2 (packed segment extents); export and reload it`. |
+| `format=3` in `<data>/FORMAT` | `StorageEngine.verifyFormat` | Packed 64-byte-unit extents, with image sizes in every stored reference. Directories written by older builds (`format=1` fixed page slots, `format=2` references without sizes) fail to open: `uses storage format 2; this build reads format 3 (sized page references); export and reload it`. |
 | `page-size=N` in `<data>/FORMAT` | same | Fixed at creation. A mismatching `--page_size` is rejected. |
 | header byte 4 = `1` | `PageHeader.FORMAT` | Node image layout; unchanged by packing. |
 | `SegmentInfo` in catalog images | `CatalogImage` | Now `(id, u8 state, pages, units, retiredAt)` |

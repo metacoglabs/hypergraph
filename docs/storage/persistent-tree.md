@@ -41,7 +41,7 @@ Leaf                                   Branch
 
 ```text
 leafBudget = pageSize − 80 (PageHeader.SIZE) − 96 (Summary.MAX_ENCODED_BYTES) − 32 (reserve)
-maxFanout  = leafBudget / (KEY_BYTES 10 + Ref.maxEncodedSize() 8 + 96)
+maxFanout  = leafBudget / (KEY_BYTES 10 + Ref.maxEncodedSize() (8 + 3 + 96))
 maxValueBytes = leafBudget / 2 − KEY_BYTES        (largest inline value; larger values throw HStoreException.limit)
 leaf underfull   ⇔ leaf.bytes()  < leafBudget / 4
 branch underfull ⇔ branch.size() < max(2, maxFanout / 4)

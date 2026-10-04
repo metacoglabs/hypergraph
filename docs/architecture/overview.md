@@ -227,7 +227,7 @@ Readers take no locks at all.
 The following is real output from `hstore init` followed by loading `examples/clinical-claims.hql` and running `CHECKPOINT;` (default 16 KiB pages):
 
 ```text
-FORMAT                                   55 B  format=2, page-size=16384 (java.util.Properties)
+FORMAT                                   55 B  format=3, page-size=16384 (java.util.Properties)
 LOCK                                      0 B  FileChannel.tryLock() held while open
 hstore.conf                            2397 B  server configuration template written by `hstore init`
 catalog/manifest                         20 B  name of the latest catalog file
@@ -242,7 +242,7 @@ semantic/state                           53 B  persisted HNSW index state (datab
 
 | Path | Owner | Format |
 |---|---|---|
-| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=2` (packed extents) and `page-size` (the maximum node size). Opening a format 1 directory, or opening with a different page size, fails. |
+| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=3` (packed extents, sized references) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
 | `LOCK` | `StorageEngine.open` | An exclusive OS file lock. A second process gets `database ... is opened by another process`. |
 | `catalog/generations/%016x.cat` | `CatalogStore.publish` | `int magic 0x54414348`, `int crc32c(payload)`, `long length`, then the `CatalogImage` payload. Written to `*.tmp`, fsynced, atomically renamed, and the directory fsynced. The three newest files are kept. |
 | `catalog/manifest` | `CatalogStore` | The file name of the latest `.cat`, written durably the same way. |

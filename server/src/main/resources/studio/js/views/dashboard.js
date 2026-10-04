@@ -103,7 +103,7 @@ export class DashboardPage {
             fill.style.height = `${Math.round(Math.min(1, segment.bytes / configuration.segmentBytes) * 100)}%`;
             return h('div', {
               class: `segment ${segment.state}`,
-              title: `segment ${segment.id} · ${segment.state.toLowerCase()} · ${bytes(segment.bytes)} · ${count(segment.pages)} nodes, ${count(segment.live)} live`
+              title: `segment ${segment.id} · ${segment.state.toLowerCase()} · ${bytes(segment.bytes)} · ${count(segment.pages)} nodes, ${bytes(segment.live)} live`
             }, fill);
           })),
           h('div', { class: 'segment-legend' }, ['ACTIVE', 'SEALED', 'COMPACTING', 'RETIRED'].map(state => {

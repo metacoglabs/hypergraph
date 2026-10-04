@@ -38,7 +38,7 @@ import java.util.function.Function;
 public final class StorageEngine implements AutoCloseable {
 
     private static final System.Logger LOG = System.getLogger("hstore.engine");
-    private static final String FORMAT_VERSION = "2";
+    private static final String FORMAT_VERSION = "3";
 
     private static final int MAX_ATTEMPTS = 8;
     private static final Duration MAINTENANCE_INTERVAL = Duration.ofMillis(500);
@@ -116,7 +116,7 @@ public final class StorageEngine implements AutoCloseable {
             }
             if (!format.getProperty("format", "1").equals(FORMAT_VERSION)) {
                 throw HStoreException.invalid("database " + directory + " uses storage format " + format.getProperty("format", "1")
-                        + "; this build reads format " + FORMAT_VERSION + " (packed segment extents); export and reload it");
+                        + "; this build reads format " + FORMAT_VERSION + " (sized page references); export and reload it");
             }
             int stored = Integer.parseInt(format.getProperty("page-size"));
             if (stored != options.pageSize()) {
@@ -305,7 +305,7 @@ public final class StorageEngine implements AutoCloseable {
                     }
                     if (pages.bytesWritten() - writtenAtCompaction > options.checkpointWalBytes()) {
                         writtenAtCompaction = pages.bytesWritten();
-                        Compactor.Report report = compactor.compact(options.compactionLiveRatio());
+                        Compactor.Report report = compactor.compact(options.compactionLiveRatio(), 1);
                         if (!report.compacted().isEmpty()) {
                             timedCheckpoint();
                             LOG.log(System.Logger.Level.INFO, "background compaction relocated segments {0}", report.compacted());

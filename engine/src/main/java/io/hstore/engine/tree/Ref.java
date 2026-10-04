@@ -7,6 +7,8 @@ public sealed interface Ref {
 
     Ref EMPTY = new Empty();
 
+    int MAX_UNITS_BYTES = 3;
+
     Summary summary();
 
     long count();
@@ -23,7 +25,7 @@ public sealed interface Ref {
         }
     }
 
-    record Stored(long pageId, Summary summary) implements Ref {
+    record Stored(long pageId, int units, Summary summary) implements Ref {
         @Override
         public long count() {
             return summary.count();
@@ -50,7 +52,7 @@ public sealed interface Ref {
     static boolean same(Ref a, Ref b) {
         return switch (a) {
             case Empty _ -> b instanceof Empty;
-            case Stored(long page, _) -> b instanceof Stored(long other, _) && page == other;
+            case Stored(long page, _, _) -> b instanceof Stored(long other, _, _) && page == other;
             case Pending(Node node) -> b instanceof Pending(Node other) && node == other;
         };
     }
@@ -58,8 +60,9 @@ public sealed interface Ref {
     static void write(ByteCursor out, Ref ref) {
         switch (ref) {
             case Empty _ -> out.putLong(PageId.NONE);
-            case Stored(long pageId, Summary summary) -> {
+            case Stored(long pageId, int units, Summary summary) -> {
                 out.putLong(pageId);
+                out.putVarLong(units);
                 summary.writeTo(out);
             }
             case Pending _ -> throw new IllegalStateException("pending reference cannot be encoded");
@@ -68,18 +71,18 @@ public sealed interface Ref {
 
     static Ref read(ByteCursor in) {
         long pageId = in.getLong();
-        return pageId == PageId.NONE ? EMPTY : new Stored(pageId, Summary.readFrom(in));
+        return pageId == PageId.NONE ? EMPTY : new Stored(pageId, Math.toIntExact(in.getVarLong()), Summary.readFrom(in));
     }
 
     static int encodedSize(Ref ref) {
         return switch (ref) {
             case Empty _ -> 8;
-            case Stored(long _, Summary summary) -> 8 + summary.encodedSize();
+            case Stored(long _, int units, Summary summary) -> 8 + ByteCursor.varLongSize(units) + summary.encodedSize();
             case Pending _ -> maxEncodedSize();
         };
     }
 
     static int maxEncodedSize() {
-        return 8 + Summary.MAX_ENCODED_BYTES;
+        return 8 + MAX_UNITS_BYTES + Summary.MAX_ENCODED_BYTES;
     }
 }
