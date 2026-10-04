@@ -1,0 +1,17 @@
+target/
+benchmarks/results/
+
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+.factorypath
+*.swp
+*~
+
+.DS_Store
+Thumbs.db
+
+.mvn/wrapper/maven-wrapper.jar
