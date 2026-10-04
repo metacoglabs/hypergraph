@@ -31,7 +31,7 @@ to `docker run`, `docker exec -it hstore hstore connect 127.0.0.1:7432` needs no
 | default command | `serve` |
 | data directory | `/var/lib/hstore/data` (`HSTORE_DATA`), declared as a `VOLUME`, mode `0700` |
 | init scripts | `/docker-entrypoint-initdb.d/` |
-| user | `hstore` (uid/gid `999`, configurable with the `UID`/`GID` build args). The entrypoint starts as root, fixes data-directory ownership, and re-executes itself as `hstore` through `setpriv`. |
+| user | `hstore` (uid/gid `999`, configurable with the `UID`/`GID` build args). The image sets `USER hstore`, so the server and `docker exec` run as `hstore`. Started explicitly as root (`--user root`), the entrypoint fixes data-directory ownership and re-executes itself as `hstore` through `setpriv`. |
 | ports | `7432` wire protocol, `7480` Studio |
 | stop signal | `SIGTERM` |
 | base | `debian:bookworm-slim` |
@@ -86,7 +86,9 @@ flowchart TD
     S --> R{running as root?}
     R -- yes --> O["mkdir, chown hstore, chmod 700 $HSTORE_DATA<br/>exec setpriv --reuid=hstore … entrypoint serve"]
     O --> F
-    R -- no --> F{"$HSTORE_DATA/FORMAT exists?"}
+    R -- no --> W{"$HSTORE_DATA writable?"}
+    W -- no --> E["log how to fix ownership, exit 1"]
+    W -- yes --> F{"$HSTORE_DATA/FORMAT exists?"}
     F -- yes --> V["unset HSTORE_PASSWORD<br/>exec hstore serve $HSTORE_DATA &lt;flags&gt;"]
     F -- no --> P{password?}
     P -- yes --> I1["hstore init --superuser $HSTORE_USER --password …"]
@@ -211,12 +213,13 @@ The native-image step needs several GB of memory in the Docker builder and takes
 
 ## Bind mounts and permissions
 
-With a named volume, ownership is handled automatically. With a bind mount
-(`-v /srv/hstore:/var/lib/hstore/data`), the entrypoint runs `chown -R hstore:hstore` on the directory at every
-start while it is still root. If the container runs with `--user`, the entrypoint cannot change ownership, so
-the host directory must already be writable by that uid.
+With a named volume, ownership is handled automatically: Docker copies the image directory's ownership onto an
+empty volume. A bind mount (`-v /srv/hstore:/var/lib/hstore/data`) must be writable by uid `999`. Either
+`chown 999:999 /srv/hstore` on the host, or start the container once with `--user root`: the entrypoint then
+runs `chown -R hstore:hstore` on the directory and drops to `hstore` before starting the server. If the
+directory is not writable, the entrypoint stops with an error that says so instead of failing later.
 
-`docker exec` runs as root by default. Embedded commands (`check`, `exec`, `shell`) cannot run beside the server,
+`docker exec` runs as `hstore`. Embedded commands (`check`, `exec`, `shell`) cannot run beside the server,
 because the server holds the data-directory lock (`database … is opened by another process`). Run them in a separate
 container on the same volume while the server container is stopped, and as `-u hstore` so new files keep the
 right owner.
