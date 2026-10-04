@@ -111,6 +111,16 @@ class StudioTest {
     }
 
     @Test
+    void repeatedFailedLoginsAreThrottled() throws Exception {
+        for (int i = 0; i < 5; i++) {
+            assertEquals(401, post("/api/login", "{\"user\":\"admin\",\"password\":\"wrong\"}", Optional.empty(), true).statusCode());
+        }
+        HttpResponse<String> blocked = post("/api/login", "{\"user\":\"admin\",\"password\":\"secret\"}", Optional.empty(), true);
+        assertEquals(429, blocked.statusCode());
+        assertTrue(blocked.body().contains("too many failed sign-in attempts"));
+    }
+
+    @Test
     void queriesReturnFramesWithAtomsAndGraphsIncludeHigherOrderMembers() throws Exception {
         Optional<String> cookie = login();
         HttpResponse<String> response = post("/api/query",

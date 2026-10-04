@@ -58,7 +58,7 @@ public final class Studio implements AutoCloseable {
                           String version, Duration idleSession, Optional<Path> assets) {
     }
 
-    private record Request(String method, String path, Map<String, String> query, Headers headers, String body, String peer) {
+    private record Request(String method, String path, Map<String, String> query, Headers headers, String body, String peer, String address) {
 
         Optional<String> cookie(String name) {
             return headers.getOrDefault("Cookie", List.of()).stream()
@@ -107,6 +107,8 @@ public final class Studio implements AutoCloseable {
     private static final String CSRF_HEADER = "X-HStore-Studio";
     private static final int MAX_BODY = 1 << 20;
     private static final int MAX_RESULT_ATOMS = 500;
+    private static final int MAX_FAILED_LOGINS = 5;
+    private static final Duration FAILED_LOGIN_WINDOW = Duration.ofMinutes(15);
     private static final String SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
             + "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
@@ -116,6 +118,7 @@ public final class Studio implements AutoCloseable {
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Sessions sessions;
     private final Assets assets;
+    private final LoginThrottle throttle = new LoginThrottle(MAX_FAILED_LOGINS, FAILED_LOGIN_WINDOW, System::nanoTime);
     private final long startedAt = System.currentTimeMillis();
 
     public Studio(HypergraphDatabase database, Options options) {
@@ -186,7 +189,8 @@ public final class Studio implements AutoCloseable {
             }
         });
         return new Request(exchange.getRequestMethod(), exchange.getRequestURI().getPath(), query, exchange.getRequestHeaders(),
-                new String(body, StandardCharsets.UTF_8), String.valueOf(exchange.getRemoteAddress()));
+                new String(body, StandardCharsets.UTF_8), String.valueOf(exchange.getRemoteAddress()),
+                exchange.getRemoteAddress().getAddress().getHostAddress());
     }
 
     private static String decode(String value) {
@@ -259,13 +263,19 @@ public final class Studio implements AutoCloseable {
     private Response login(Request request) {
         Json body = request.json();
         Optional<String> user = field(body, "user");
+        long wait = throttle.secondsUntilAllowed(request.address());
+        if (wait > 0) {
+            throw HttpFailure.tooManyRequests("too many failed sign-in attempts; try again in " + wait + " seconds");
+        }
         Session session = new Session(database);
         if (user.isPresent()) {
             if (!session.authenticate(user.get(), field(body, "password").orElse(""))) {
                 session.close();
+                throttle.failed(request.address());
                 LOG.log(System.Logger.Level.WARNING, "studio password authentication failed for user \"{0}\" from {1}", user.get(), request.peer());
                 throw HttpFailure.unauthorized("authentication failed");
             }
+            throttle.succeeded(request.address());
         } else if (options.authenticationRequired().getAsBoolean()) {
             session.close();
             throw HttpFailure.unauthorized("user and password are required");

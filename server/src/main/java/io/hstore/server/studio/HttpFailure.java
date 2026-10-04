@@ -29,6 +29,10 @@ final class HttpFailure extends RuntimeException {
         return new HttpFailure(404, message);
     }
 
+    static HttpFailure tooManyRequests(String message) {
+        return new HttpFailure(429, message);
+    }
+
     static HttpFailure tooLarge(String message) {
         return new HttpFailure(413, message);
     }
