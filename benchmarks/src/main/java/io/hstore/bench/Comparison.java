@@ -55,7 +55,7 @@ public final class Comparison {
             default -> {
                 IO.println("""
                         usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] --out FILE
-                               Comparison report FILE...""");
+                               Comparison report FILE... (runs of two stores; cells show the median and range)""");
                 System.exit(2);
             }
         }

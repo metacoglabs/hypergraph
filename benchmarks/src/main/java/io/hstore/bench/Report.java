@@ -11,7 +11,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
+import java.util.stream.Stream;
 
 final class Report {
 
@@ -22,12 +22,17 @@ final class Report {
     }
 
     static String markdown(String[] args) {
-        List<Run> runs = Arrays.stream(args).skip(1).map(Path::of).map(Report::load).toList();
-        if (runs.size() < 2) {
-            throw new IllegalArgumentException("report needs at least two result files");
+        Map<String, List<Run>> byStore = new LinkedHashMap<>();
+        Arrays.stream(args).skip(1).map(Path::of).map(Report::load)
+                .forEach(run -> byStore.computeIfAbsent(run.store(), _ -> new ArrayList<>()).add(run));
+        if (byStore.size() != 2) {
+            throw new IllegalArgumentException("report needs runs of exactly two stores, got " + byStore.keySet());
         }
-        Run baseline = runs.getLast();
-        Run subject = runs.getFirst();
+        List<List<Run>> stores = List.copyOf(byStore.values());
+        List<Run> subjects = stores.getFirst();
+        List<Run> baselines = stores.getLast();
+        Run subject = subjects.getFirst();
+        Run baseline = baselines.getFirst();
         StringBuilder out = new StringBuilder();
         Map<String, Json> header = subject.header();
         out.append("Dataset: %s nodes, %s hyperedges, %s incidences; durability %s; %s threads.%n"
@@ -37,28 +42,51 @@ final class Report {
                 text(header.get("java")), number(header.get("maxHeap")) / (1 << 20)));
         out.append("Caches: %s uses a %s; %s uses a %s.%n%n".formatted(subject.store(), text(subject.header().get("cache")),
                 baseline.store(), text(baseline.header().get("cache"))));
-        out.append("| Workload | %s | %s | Ratio | Results agree |%n".formatted(subject.store(), baseline.store()));
+        out.append("Each cell is the median of %d runs of %s and %d runs of %s, with the range in brackets.%n%n"
+                .formatted(subjects.size(), subject.store(), baselines.size(), baseline.store()));
+        out.append("| Workload | %s | %s | Ratio of medians | Results agree |%n".formatted(subject.store(), baseline.store()));
         out.append("|---|---:|---:|---:|:---:|%n".formatted());
         for (Map.Entry<String, Map<String, Json>> entry : subject.results().entrySet()) {
             String workload = entry.getKey();
-            Map<String, Json> mine = entry.getValue();
-            Map<String, Json> theirs = baseline.results().get(workload);
-            if (theirs == null) {
+            if (baselines.stream().anyMatch(run -> !run.results().containsKey(workload))) {
                 continue;
             }
             boolean disk = workload.equals("disk");
-            boolean single = number(mine.get("operations")) == 1;
-            double a = disk ? number(mine.get("operations")) : single ? number(mine.get("millis")) : rate(mine);
-            double b = disk ? number(theirs.get("operations")) : single ? number(theirs.get("millis")) : rate(theirs);
-            double ratio = disk || single ? b / a : a / b;
+            boolean single = number(entry.getValue().get("operations")) == 1;
+            double[] mine = values(subjects, workload, disk, single);
+            double[] theirs = values(baselines, workload, disk, single);
+            double ratio = disk || single ? median(theirs) / median(mine) : median(mine) / median(theirs);
             boolean agree = disk || workload.startsWith("ingest") || workload.equals("reopen")
-                    || Objects.equals(number(mine.get("checksum")), number(theirs.get("checksum")));
-            out.append("| `%s` — %s | %s | %s | **%.2f×** | %s |%n".formatted(workload, text(mine.get("description")),
-                    format(a, disk, single), format(b, disk, single), ratio, agree ? "yes" : "**no**"));
+                    || Stream.concat(subjects.stream(), baselines.stream())
+                    .map(run -> number(run.results().get(workload).get("checksum"))).distinct().count() == 1;
+            out.append("| `%s`: %s | %s | %s | **%.2f×** | %s |%n".formatted(workload, text(entry.getValue().get("description")),
+                    cell(mine, disk, single), cell(theirs, disk, single), ratio, agree ? "yes" : "**no**"));
         }
         out.append("%nRatios above 1 favour %s: throughput ratios divide %s by %s; latency and size ratios divide %s by %s.%n"
                 .formatted(subject.store(), subject.store(), baseline.store(), baseline.store(), subject.store()));
         return out.toString();
+    }
+
+    private static double[] values(List<Run> runs, String workload, boolean disk, boolean single) {
+        return runs.stream().mapToDouble(run -> {
+            Map<String, Json> result = run.results().get(workload);
+            return disk ? number(result.get("operations")) : single ? number(result.get("millis")) : rate(result);
+        }).sorted().toArray();
+    }
+
+    private static double median(double[] sorted) {
+        int middle = sorted.length / 2;
+        return sorted.length % 2 == 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    }
+
+    private static String cell(double[] sorted, boolean disk, boolean single) {
+        String median = format(median(sorted), disk, single);
+        return sorted.length == 1 ? median
+                : median + " (" + bare(sorted[0], disk) + " to " + bare(sorted[sorted.length - 1], disk) + ")";
+    }
+
+    private static String bare(double value, boolean disk) {
+        return disk ? "%.1f".formatted(value / (1 << 20)) : "%,.0f".formatted(value);
     }
 
     private static String format(double value, boolean disk, boolean single) {
