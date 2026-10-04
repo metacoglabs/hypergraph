@@ -2,6 +2,7 @@ package io.hstore.bench;
 
 import com.sleepycat.je.Durability;
 import com.sleepycat.je.Environment;
+import com.sleepycat.je.EnvironmentConfig;
 import com.sleepycat.je.EnvironmentStats;
 import com.sleepycat.je.StatsConfig;
 import org.hypergraphdb.HGConfiguration;
@@ -29,12 +30,18 @@ final class HyperGraphDbStore implements Store {
     private HGPersistentHandle large;
     private long writtenBeforeReopen;
 
-    HyperGraphDbStore(Path directory, boolean sync) {
+    private final long cacheBytes;
+
+    HyperGraphDbStore(Path directory, boolean sync, long cacheBytes) {
         this.directory = directory;
+        this.cacheBytes = cacheBytes;
         configuration.setTransactional(true);
+        EnvironmentConfig environment = ((BJEStorageImplementation) configuration.getStoreImplementation()).getConfiguration().getEnvironmentConfig();
         if (sync) {
-            ((BJEStorageImplementation) configuration.getStoreImplementation()).getConfiguration()
-                    .getEnvironmentConfig().setDurability(Durability.COMMIT_SYNC);
+            environment.setDurability(Durability.COMMIT_SYNC);
+        }
+        if (cacheBytes > 0) {
+            environment.setCacheSize(cacheBytes);
         }
         this.graph = HGEnvironment.get(directory.toString(), configuration);
     }
@@ -51,7 +58,8 @@ final class HyperGraphDbStore implements Store {
 
     @Override
     public String cache() {
-        return "Berkeley DB JE cache at 30% of the heap (HyperGraphDB default) plus the HyperGraphDB atom cache";
+        String je = cacheBytes > 0 ? "Berkeley DB JE cache of %,d MiB".formatted(cacheBytes >> 20) : "Berkeley DB JE cache at 30% of the heap (HyperGraphDB default)";
+        return je + " plus the HyperGraphDB atom cache";
     }
 
     @Override

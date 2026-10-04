@@ -73,7 +73,7 @@ public final class Comparison {
             case "report" -> IO.println(Report.markdown(args));
             default -> {
                 IO.println("""
-                        usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] --out FILE
+                        usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] [--cache-mb N] --out FILE
                                Comparison report FILE... (runs of two stores; cells show the median and range)""");
                 System.exit(2);
             }
@@ -97,13 +97,14 @@ public final class Comparison {
         int threads = Integer.parseInt(options.getOrDefault("threads", String.valueOf(Runtime.getRuntime().availableProcessors())));
         Path out = Path.of(options.getOrDefault("out", "results/" + storeName + ".json"));
         Path directory = Files.createTempDirectory("hstore-bench-" + storeName);
+        long cacheBytes = Long.parseLong(options.getOrDefault("cache-mb", "0")) << 20;
         Dataset dataset = Dataset.generate(scale, SEED);
         List<Result> results = new ArrayList<>();
         Map<String, Json> totals = new LinkedHashMap<>();
         long baselineHeap = JvmUsage.retainedHeap();
         Store store = switch (storeName) {
-            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")));
-            case "hypergraphdb" -> new HyperGraphDbStore(directory, sync);
+            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes);
+            case "hypergraphdb" -> new HyperGraphDbStore(directory, sync, cacheBytes);
             default -> throw new IllegalArgumentException("unknown store " + storeName);
         };
         IO.println("%s: %,d nodes, %,d hyperedges, %,d incidences, durability %s, %d threads"

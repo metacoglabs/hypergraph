@@ -34,11 +34,17 @@ final class HStoreStore implements Store {
 
     private final int history;
 
-    HStoreStore(Path directory, boolean sync, int history) {
+    private final int cachedNodes;
+    private final long cacheBytes;
+
+    HStoreStore(Path directory, boolean sync, int history, long cacheBytes) {
         this.directory = directory;
         this.history = history;
-        this.options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults()
-                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withCachedNodes(CACHED_NODES).withHistoryLimit(history));
+        this.cacheBytes = cacheBytes;
+        EngineOptions engine = EngineOptions.defaults();
+        this.cachedNodes = cacheBytes > 0 ? Math.toIntExact(cacheBytes / engine.pageSize()) : CACHED_NODES;
+        this.options = DatabaseOptions.defaults().withEngine(engine
+                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withCachedNodes(cachedNodes).withHistoryLimit(history));
         this.database = HypergraphDatabase.open(directory, options);
         database.write(writer -> {
             writer.defineNode(NODE, List.of(new PropertyDef("name", TypeTag.STRING, false, false)));
@@ -59,7 +65,8 @@ final class HStoreStore implements Store {
 
     @Override
     public String cache() {
-        return "node cache of %,d decoded nodes and retains %d generations of history".formatted(CACHED_NODES, history);
+        String budget = cacheBytes > 0 ? " (%,d MiB divided by the page size)".formatted(cacheBytes >> 20) : "";
+        return "node cache of %,d decoded nodes%s and retains %d generations of history".formatted(cachedNodes, budget, history);
     }
 
     @Override
