@@ -1,6 +1,9 @@
 package io.hstore.bench;
 
 import com.sleepycat.je.Durability;
+import com.sleepycat.je.Environment;
+import com.sleepycat.je.EnvironmentStats;
+import com.sleepycat.je.StatsConfig;
 import org.hypergraphdb.HGConfiguration;
 import org.hypergraphdb.HGEnvironment;
 import org.hypergraphdb.HGHandle;
@@ -24,6 +27,7 @@ final class HyperGraphDbStore implements Store {
     private HGPersistentHandle[] nodes;
     private HGPersistentHandle[] edges;
     private HGPersistentHandle large;
+    private long writtenBeforeReopen;
 
     HyperGraphDbStore(Path directory, boolean sync) {
         this.directory = directory;
@@ -187,8 +191,24 @@ final class HyperGraphDbStore implements Store {
         });
     }
 
+    private Environment environment() {
+        return ((BJEStorageImplementation) configuration.getStoreImplementation()).getBerkleyEnvironment();
+    }
+
+    @Override
+    public void flush() {
+        environment().sync();
+    }
+
+    @Override
+    public long bytesWritten() {
+        EnvironmentStats stats = environment().getStats(new StatsConfig());
+        return writtenBeforeReopen + stats.getNSequentialWriteBytes() + stats.getNRandomWriteBytes();
+    }
+
     @Override
     public void reopen() {
+        writtenBeforeReopen = bytesWritten();
         graph.close();
         graph = HGEnvironment.get(directory.toString(), configuration);
     }
