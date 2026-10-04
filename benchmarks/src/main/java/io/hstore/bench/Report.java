@@ -71,12 +71,13 @@ final class Report {
         return out.toString();
     }
 
-    private record Metric(String key, String name, boolean perOperation, DoubleFunction<String> format) {
+    private record Metric(String key, String name, boolean perOperation, boolean showZero, DoubleFunction<String> format) {
     }
 
-    private static final List<Metric> METRICS = List.of(new Metric("bytesWritten", "bytes written per operation", true, Report::bytes),
-            new Metric("allocated", "heap allocated per operation", true, Report::bytes),
-            new Metric("gcMillis", "GC pause time", false, value -> "%,.0f ms".formatted(value)));
+    private static final List<Metric> METRICS = List.of(new Metric("bytesWritten", "bytes written per operation", true, false, Report::bytes),
+            new Metric("allocated", "heap allocated per operation", true, false, Report::bytes),
+            new Metric("gcMillis", "GC pause time", false, false, value -> "%,.0f ms".formatted(value)),
+            new Metric("lost", "acknowledged nodes lost", false, true, value -> "%,.0f".formatted(value)));
 
     private static void resources(StringBuilder out, List<Run> subjects, List<Run> baselines) {
         List<Run> all = Stream.concat(subjects.stream(), baselines.stream()).toList();
@@ -86,7 +87,7 @@ final class Report {
                 if (all.stream().allMatch(run -> run.results().containsKey(workload) && run.results().get(workload).containsKey(metric.key()))) {
                     double mine = median(metric(subjects, workload, metric));
                     double theirs = median(metric(baselines, workload, metric));
-                    if (mine == 0 && theirs == 0) {
+                    if (mine == 0 && theirs == 0 && !metric.showZero()) {
                         continue;
                     }
                     double ratio = theirs / mine;
