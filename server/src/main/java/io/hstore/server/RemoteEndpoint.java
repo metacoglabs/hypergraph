@@ -19,17 +19,27 @@ final class RemoteEndpoint implements Endpoint {
         }
     }
 
+    private static final int TIMEOUT_MILLIS = 10_000;
+
     private final Socket socket;
     private final BufferedReader in;
     private final Writer out;
     private String banner;
 
     RemoteEndpoint(InetSocketAddress address, Optional<Credentials> credentials) {
+        this(address, credentials, Optional.empty());
+    }
+
+    RemoteEndpoint(InetSocketAddress address, Optional<Credentials> credentials, Optional<Tls.Client> tls) {
         try {
-            this.socket = new Socket(address.getHostString(), address.getPort());
+            this.socket = tls.isPresent()
+                    ? tls.get().connect(address.getHostString(), address.getPort(), TIMEOUT_MILLIS)
+                    : plain(address);
+            socket.setSoTimeout(TIMEOUT_MILLIS);
             this.in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
             this.out = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
             this.banner = WireProtocol.receive(in).orElseThrow(() -> new IOException("server closed the connection"));
+            socket.setSoTimeout(0);
         } catch (IOException e) {
             throw new UncheckedIOException("cannot connect to " + address, e);
         }
@@ -45,6 +55,12 @@ final class RemoteEndpoint implements Endpoint {
             }
             banner = banner.replace("authentication required", reply);
         }
+    }
+
+    private static Socket plain(InetSocketAddress address) throws IOException {
+        Socket socket = new Socket();
+        socket.connect(new InetSocketAddress(address.getHostString(), address.getPort()), TIMEOUT_MILLIS);
+        return socket;
     }
 
     @Override

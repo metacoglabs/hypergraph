@@ -22,6 +22,8 @@ import io.hstore.engine.txn.TransactionManager;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -46,6 +48,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
+import javax.net.ssl.SSLContext;
 
 public final class Studio implements AutoCloseable {
 
@@ -55,7 +58,7 @@ public final class Studio implements AutoCloseable {
     }
 
     public record Options(InetSocketAddress address, BooleanSupplier authenticationRequired, StatementListener statements,
-                          String version, Duration idleSession, Optional<Path> assets) {
+                          String version, Duration idleSession, Optional<Path> assets, Optional<SSLContext> tls) {
     }
 
     private record Request(String method, String path, Map<String, String> query, Headers headers, String body, String peer, String address) {
@@ -127,7 +130,13 @@ public final class Studio implements AutoCloseable {
         this.sessions = new Sessions(options.idleSession());
         this.assets = new Assets(options.assets());
         try {
-            this.http = HttpServer.create(options.address(), 64);
+            if (options.tls().isPresent()) {
+                HttpsServer secure = HttpsServer.create(options.address(), 64);
+                secure.setHttpsConfigurator(new HttpsConfigurator(options.tls().get()));
+                this.http = secure;
+            } else {
+                this.http = HttpServer.create(options.address(), 64);
+            }
         } catch (IOException e) {
             throw new UncheckedIOException("cannot listen on " + options.address(), e);
         }
@@ -138,7 +147,8 @@ public final class Studio implements AutoCloseable {
 
     public void start() {
         http.start();
-        LOG.log(System.Logger.Level.INFO, "studio listening on http://{0}:{1}", options.address().getHostString(), String.valueOf(port()));
+        LOG.log(System.Logger.Level.INFO, "studio listening on {0}://{1}:{2}", options.tls().isPresent() ? "https" : "http",
+                options.address().getHostString(), String.valueOf(port()));
     }
 
     public int port() {
@@ -283,7 +293,7 @@ public final class Studio implements AutoCloseable {
         Sessions.Entry entry = sessions.open(session);
         LOG.log(System.Logger.Level.INFO, "studio session opened for user={0} role={1} from {2}",
                 session.principal().user(), session.principal().role(), request.peer());
-        boolean secure = request.headers().getOrDefault("X-Forwarded-Proto", List.of()).contains("https");
+        boolean secure = options.tls().isPresent() || request.headers().getOrDefault("X-Forwarded-Proto", List.of()).contains("https");
         return Response.json(JsonFields.object().put("session", describe(session)).build(),
                 COOKIE + "=" + entry.token() + "; Path=/; HttpOnly; SameSite=Strict" + (secure ? "; Secure" : ""));
     }

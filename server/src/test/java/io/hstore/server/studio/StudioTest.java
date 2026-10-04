@@ -50,7 +50,7 @@ class StudioTest {
                     """);
         }
         studio = new Studio(database, new Studio.Options(new InetSocketAddress("127.0.0.1", 0), database::requiresAuthentication,
-                (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty()));
+                (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty(), Optional.empty()));
         studio.start();
     }
 
