@@ -20,6 +20,7 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import javax.net.ssl.SSLContext;
 
 final class ServerConfig {
 
@@ -124,18 +125,38 @@ final class ServerConfig {
         Optional<String> key = Optional.of(string(Setting.EMBEDDING_API_KEY)).filter(value -> !value.isBlank());
         return switch (string(Setting.EMBEDDING_PROVIDER).toLowerCase()) {
             case "hashing" -> Encoder.hashing(dimensions);
-            case "openai" -> new HttpEncoder(URI.create(required(Setting.EMBEDDING_URL)), required(Setting.EMBEDDING_MODEL), dimensions, key,
-                    HttpEncoder.Protocol.OPENAI);
-            case "ollama" -> new HttpEncoder(URI.create(required(Setting.EMBEDDING_URL)), required(Setting.EMBEDDING_MODEL), dimensions, key,
-                    HttpEncoder.Protocol.OLLAMA);
+            case "openai" -> new HttpEncoder(URI.create(required(Setting.EMBEDDING_URL, "embedding_provider openai")),
+                    required(Setting.EMBEDDING_MODEL, "embedding_provider openai"), dimensions, key, HttpEncoder.Protocol.OPENAI);
+            case "ollama" -> new HttpEncoder(URI.create(required(Setting.EMBEDDING_URL, "embedding_provider ollama")),
+                    required(Setting.EMBEDDING_MODEL, "embedding_provider ollama"), dimensions, key, HttpEncoder.Protocol.OLLAMA);
             default -> throw new IllegalArgumentException("embedding_provider must be hashing, openai or ollama");
         };
     }
 
-    private String required(Setting setting) {
+    Optional<SSLContext> serverTls() {
+        if (!flag(Setting.TLS)) {
+            return Optional.empty();
+        }
+        return Optional.of(Tls.server(Path.of(required(Setting.TLS_CERTIFICATE_FILE, "tls")), Path.of(required(Setting.TLS_KEY_FILE, "tls"))));
+    }
+
+    Optional<Tls.Client> clientTls(boolean verifyHostname) {
+        if (!flag(Setting.TLS)) {
+            return Optional.empty();
+        }
+        SSLContext context = Stream.of(Setting.TLS_CA_FILE, Setting.TLS_CERTIFICATE_FILE)
+                .map(this::string)
+                .filter(value -> !value.isBlank())
+                .findFirst()
+                .map(file -> Tls.trusting(Path.of(file)))
+                .orElseGet(Tls::system);
+        return Optional.of(new Tls.Client(context, verifyHostname));
+    }
+
+    private String required(Setting setting, String requiredBy) {
         String value = string(setting);
         if (value.isBlank()) {
-            throw new IllegalArgumentException(setting.key() + " is required by embedding_provider " + string(Setting.EMBEDDING_PROVIDER));
+            throw new IllegalArgumentException(setting.key() + " is required by " + requiredBy);
         }
         return value;
     }
