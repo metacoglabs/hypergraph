@@ -49,6 +49,8 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `latency.read` | one incidence lookup per read transaction, each timed on its own | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
 | `write.update` | replace a node's value, 1,000 per transaction | `Writer.set` | `graph.replace` |
 | `latency.commit` | 5,000 write transactions of one update each, each timed on its own | `Writer.set` | `graph.replace` |
+| `mixed.read` | single incidence lookups from `threads − 1` threads for 10 s while `mixed.write` runs | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
+| `mixed.write` | one thread committing 10 updates at a time on a fixed schedule of 1,000 updates/s | `Writer.set` | `graph.replace` |
 | `large.ingest` | one hyperedge containing every node | `Writer.load` | one `HGPlainLink` |
 | `large.scan` | enumerate the large hyperedge twenty times | `Reader.members` | `getTargetAt` loop |
 | `large.probe` | test whether a node belongs to the large hyperedge | `View.incidence(edge, node)` (membership-tree lookup) | `getIncidenceSet(node).contains(edge)` |
@@ -63,6 +65,13 @@ transaction, as it would be for a request to a server. The report adds a second 
 maximum, taking the median of each percentile across runs. Throughput hides occasional slow operations caused by
 group commit, checkpoints, compaction or GC; these percentiles show them. Under `sync` durability,
 `latency.commit` is effectively the cost of one durable commit.
+
+**Reads during writes.** In `mixed`, the readers run in a closed loop for 10 s, and a single writer commits on a
+fixed schedule (open loop). Each commit's latency is measured from when it was *scheduled* to start, not from
+when it actually started. If the engine stalls, the commits queued behind the stall show the delay, instead of
+the writer quietly slowing down. The writer stops at the deadline even when it is behind, so an engine that can't
+keep up shows an achieved rate below 1,000 updates/s. Readers keep a uniform random sample of 200,000 latencies
+each, plus the exact maximum. Both results depend on timing, so *Results agree* shows "n/a".
 
 **Bytes written.** For every write workload the report also shows the bytes each engine wrote per operation, in a
 *Resources* table, plus the total for the whole run. Both engines count the bytes they write themselves:
