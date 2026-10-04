@@ -52,7 +52,7 @@ final class Report {
             if (baselines.stream().anyMatch(run -> !run.results().containsKey(workload))) {
                 continue;
             }
-            boolean disk = workload.equals("disk");
+            boolean disk = workload.startsWith("disk");
             boolean single = number(entry.getValue().get("operations")) == 1;
             double[] mine = values(subjects, workload, disk, single);
             double[] theirs = values(baselines, workload, disk, single);
