@@ -11,6 +11,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.DoubleFunction;
 import java.util.stream.Stream;
 
 final class Report {
@@ -65,7 +66,58 @@ final class Report {
         out.append("%nRatios above 1 favour %s: throughput ratios divide %s by %s; latency and size ratios divide %s by %s.%n"
                 .formatted(subject.store(), subject.store(), baseline.store(), baseline.store(), subject.store()));
         latency(out, subjects, baselines);
+        resources(out, subjects, baselines);
         return out.toString();
+    }
+
+    private record Metric(String key, String name, boolean perOperation, DoubleFunction<String> format) {
+    }
+
+    private static final List<Metric> METRICS = List.of(new Metric("bytesWritten", "bytes written per operation", true, Report::bytes));
+
+    private static void resources(StringBuilder out, List<Run> subjects, List<Run> baselines) {
+        List<Run> all = Stream.concat(subjects.stream(), baselines.stream()).toList();
+        StringBuilder rows = new StringBuilder();
+        for (String workload : subjects.getFirst().results().keySet()) {
+            for (Metric metric : METRICS) {
+                if (all.stream().allMatch(run -> run.results().containsKey(workload) && run.results().get(workload).containsKey(metric.key()))) {
+                    double mine = median(metric(subjects, workload, metric));
+                    double theirs = median(metric(baselines, workload, metric));
+                    rows.append("| `%s` | %s | %s | %s | **%.2f×** |%n".formatted(workload, metric.name(), metric.format().apply(mine),
+                            metric.format().apply(theirs), theirs / mine));
+                }
+            }
+        }
+        if (rows.isEmpty()) {
+            return;
+        }
+        out.append("%nResources used by each workload, median of the runs:%n%n".formatted());
+        out.append("| Workload | Measure | %s | %s | Ratio |%n".formatted(subjects.getFirst().store(), baselines.getFirst().store()));
+        out.append("|---|---|---:|---:|---:|%n".formatted()).append(rows);
+        if (all.stream().allMatch(run -> run.header().containsKey("bytesWritten"))) {
+            out.append("%nBytes written in total, after a final flush: %s %s, %s %s.%n".formatted(
+                    subjects.getFirst().store(), bytes(median(header(subjects, "bytesWritten"))),
+                    baselines.getFirst().store(), bytes(median(header(baselines, "bytesWritten")))));
+        }
+    }
+
+    private static double[] metric(List<Run> runs, String workload, Metric metric) {
+        return runs.stream().mapToDouble(run -> {
+            Map<String, Json> result = run.results().get(workload);
+            double value = number(result.get(metric.key()));
+            return metric.perOperation() ? value / number(result.get("operations")) : value;
+        }).sorted().toArray();
+    }
+
+    private static double[] header(List<Run> runs, String key) {
+        return runs.stream().mapToDouble(run -> number(run.header().get(key))).sorted().toArray();
+    }
+
+    private static String bytes(double value) {
+        if (value < 1024) {
+            return "%.0f B".formatted(value);
+        }
+        return value < 1 << 20 ? "%.1f KiB".formatted(value / 1024) : "%,.1f MiB".formatted(value / (1 << 20));
     }
 
     private static void latency(StringBuilder out, List<Run> subjects, List<Run> baselines) {

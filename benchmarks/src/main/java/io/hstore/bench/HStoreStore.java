@@ -8,6 +8,7 @@ import io.hstore.db.schema.TypeDef.PropertyDef;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.engine.EngineOptions;
+import io.hstore.engine.EngineStats;
 import io.hstore.engine.tree.TreeAlgebra;
 import io.hstore.engine.txn.Durability;
 
@@ -27,6 +28,7 @@ final class HStoreStore implements Store {
     private long[] nodes;
     private long[] edges;
     private long large;
+    private long writtenBeforeReopen;
 
     static final int CACHED_NODES = 1 << 20;
 
@@ -180,7 +182,19 @@ final class HStoreStore implements Store {
     }
 
     @Override
+    public void flush() {
+        database.engine().checkpoint();
+    }
+
+    @Override
+    public long bytesWritten() {
+        EngineStats stats = database.engine().stats();
+        return writtenBeforeReopen + stats.walBytes() + stats.dataBytesWritten();
+    }
+
+    @Override
     public void reopen() {
+        writtenBeforeReopen = bytesWritten();
         database.close();
         database = HypergraphDatabase.open(directory, options);
     }

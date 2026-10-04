@@ -34,6 +34,10 @@ interface Store extends AutoCloseable {
 
     void reopen();
 
+    void flush();
+
+    long bytesWritten();
+
     Path directory();
 
     @Override

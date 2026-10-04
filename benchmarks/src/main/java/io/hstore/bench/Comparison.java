@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.function.IntToLongFunction;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 public final class Comparison {
 
@@ -93,6 +94,7 @@ public final class Comparison {
         Path directory = Files.createTempDirectory("hstore-bench-" + storeName);
         Dataset dataset = Dataset.generate(scale, SEED);
         List<Result> results = new ArrayList<>();
+        long written = 0;
         Store store = switch (storeName) {
             case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")));
             case "hypergraphdb" -> new HyperGraphDbStore(directory, sync);
@@ -101,15 +103,15 @@ public final class Comparison {
         IO.println("%s: %,d nodes, %,d hyperedges, %,d incidences, durability %s, %d threads"
                 .formatted(store.name(), dataset.nodes(), dataset.edges().length, dataset.incidences(), sync ? "sync" : "async", threads));
         try {
-            results.add(measure("ingest.nodes", "insert nodes in transactions of 1,000", dataset.nodes(), () -> {
+            results.add(writing(store, () -> measure("ingest.nodes", "insert nodes in transactions of 1,000", dataset.nodes(), () -> {
                 store.ingestNodes(dataset, BATCH);
                 return dataset.nodes();
-            }));
-            results.add(measure("ingest.edges", "insert hyperedges (mean cardinality %.1f) in transactions of 1,000"
+            })));
+            results.add(writing(store, () -> measure("ingest.edges", "insert hyperedges (mean cardinality %.1f) in transactions of 1,000"
                     .formatted((double) dataset.incidences() / dataset.edges().length), dataset.edges().length, () -> {
                 store.ingestEdges(dataset, BATCH);
                 return dataset.incidences();
-            }));
+            })));
             int[] nodes = dataset.probeNodes();
             results.add(read("read.incidence", "enumerate the incidence set of a node", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), true));
@@ -121,20 +123,20 @@ public final class Comparison {
             results.add(latency("latency.read", "one incidence lookup per read transaction", nodes.length,
                     i -> store.incidence(nodes, i, i + 1), true));
             int[] round = {0};
-            results.add(measure("write.update", "replace a node value in transactions of 1,000", dataset.updates().length,
+            results.add(writing(store, () -> measure("write.update", "replace a node value in transactions of 1,000", dataset.updates().length,
                     () -> batched(dataset.updates().length, (from, to) -> {
                         store.update(dataset.updates(), from, to, round[0]++);
                         return to - from;
-                    })));
-            results.add(latency("latency.commit", "one node update per write transaction", COMMITS, i -> {
+                    }))));
+            results.add(writing(store, () -> latency("latency.commit", "one node update per write transaction", COMMITS, i -> {
                 store.update(dataset.updates(), i, i + 1, round[0]++);
                 return 1;
-            }, false));
+            }, false)));
             int largeSize = dataset.nodes();
-            results.add(measure("large.ingest", "create one hyperedge with %,d members".formatted(largeSize), largeSize, () -> {
+            results.add(writing(store, () -> measure("large.ingest", "create one hyperedge with %,d members".formatted(largeSize), largeSize, () -> {
                 store.largeEdge(largeSize);
                 return largeSize;
-            }));
+            })));
             store.scanLargeEdge();
             results.add(measure("large.scan", "enumerate all members of the large hyperedge (x20)", 20L * largeSize, () -> {
                 long total = 0;
@@ -151,12 +153,14 @@ public final class Comparison {
             }));
             results.add(read("read.incidence.cold", "incidence sets immediately after reopening", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), false));
+            store.flush();
+            written = store.bytesWritten();
         } finally {
             store.close();
         }
         long disk = store.diskBytes();
         results.add(new Result("disk", "bytes on disk after a clean shutdown", disk, 1000.0, disk));
-        write(out, store, scale, sync, threads, dataset, results);
+        write(out, store, scale, sync, threads, dataset, written, results);
         results.forEach(result -> IO.println("  %-22s %,14.0f ops/s  %,10.1f ms  checksum %d"
                 .formatted(result.workload(), result.rate(), result.millis(), result.checksum())));
     }
@@ -180,6 +184,13 @@ public final class Comparison {
             batched(Math.max(BATCH, operations / 10), slice);
         }
         return measure(workload, description, operations, () -> batched(operations, slice));
+    }
+
+    private static Result writing(Store store, Supplier<Result> workload) {
+        long before = store.bytesWritten();
+        Result result = workload.get();
+        store.flush();
+        return result.with("bytesWritten", new Json.Number(BigDecimal.valueOf(store.bytesWritten() - before)));
     }
 
     private static Result latency(String workload, String description, int operations, IntToLongFunction operation, boolean warm) {
@@ -223,7 +234,7 @@ public final class Comparison {
         }
     }
 
-    private static void write(Path out, Store store, int scale, boolean sync, int threads, Dataset dataset, List<Result> results) {
+    private static void write(Path out, Store store, int scale, boolean sync, int threads, Dataset dataset, long written, List<Result> results) {
         Map<String, Json> fields = new LinkedHashMap<>();
         fields.put("store", new Json.Str(store.name()));
         fields.put("version", new Json.Str(store.version()));
@@ -238,6 +249,7 @@ public final class Comparison {
         fields.put("os", new Json.Str(System.getProperty("os.name") + " " + System.getProperty("os.version") + " " + System.getProperty("os.arch")));
         fields.put("processors", new Json.Number(BigDecimal.valueOf(Runtime.getRuntime().availableProcessors())));
         fields.put("maxHeap", new Json.Number(BigDecimal.valueOf(Runtime.getRuntime().maxMemory())));
+        fields.put("bytesWritten", new Json.Number(BigDecimal.valueOf(written)));
         fields.put("results", new Json.Array(results.stream().map(Result::json).toList()));
         try {
             Files.createDirectories(out.toAbsolutePath().getParent());
