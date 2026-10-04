@@ -45,6 +45,7 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `read.incidence` | enumerate a node's incidence set, 1,000 probes per read transaction | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
 | `read.members` | enumerate a hyperedge's members | `Reader.members` | `HGLink.getTargetAt` over `graph.get(h)` |
 | `read.comembership` | count hyperedges containing both nodes of a pair | `TreeAlgebra.intersectKeys` (leapfrog) | `hg.count(hg.and(hg.incident(a), hg.incident(b)))` |
+| `read.twohop` | count the distinct nodes that share a hyperedge with a node, 10,000 probes | `Reader.incident` + `Reader.memberIds` | `getIncidenceSet` + the link's targets |
 | `read.incidence.parallel` | `read.incidence` from one thread per core | same | same |
 | `latency.read` | one incidence lookup per read transaction, each timed on its own | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
 | `write.update` | replace a node's value, 1,000 per transaction | `Writer.set` | `graph.replace` |
@@ -76,6 +77,13 @@ when it actually started. If the engine stalls, the commits queued behind the st
 the writer quietly slowing down. The writer stops at the deadline even when it is behind, so an engine that can't
 keep up shows an achieved rate below 1,000 updates/s. Readers keep a uniform random sample of 200,000 latencies
 each, plus the exact maximum. Both results depend on timing, so *Results agree* shows "n/a".
+
+**Two hops.** `read.twohop` follows each probe node to its hyperedges and from there to their members. It runs
+before `large.ingest`, because once the hyperedge containing every node exists, every node is two hops from all
+the others. Each adapter uses plain incidence and member calls and its own id type: `long` ids, sorted and
+de-duplicated, for HStore, and a `HashSet` of persistent handles for HyperGraphDB, which has no numeric ids.
+HyperGraphDB's `HGBreadthFirstTraversal` isn't used, since it would measure that framework rather than the
+storage underneath.
 
 **Deletes.** The churn set is drawn from the same seed after everything else, so the rest of the dataset is
 unchanged. It has 20% of the hyperedges to delete and 20,000 others, each with at least three members, that lose
