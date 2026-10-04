@@ -64,7 +64,41 @@ final class Report {
         }
         out.append("%nRatios above 1 favour %s: throughput ratios divide %s by %s; latency and size ratios divide %s by %s.%n"
                 .formatted(subject.store(), subject.store(), baseline.store(), baseline.store(), subject.store()));
+        latency(out, subjects, baselines);
         return out.toString();
+    }
+
+    private static void latency(StringBuilder out, List<Run> subjects, List<Run> baselines) {
+        List<Run> all = Stream.concat(subjects.stream(), baselines.stream()).toList();
+        List<String> workloads = subjects.getFirst().results().keySet().stream()
+                .filter(workload -> all.stream().allMatch(run -> latency(run, workload) != null))
+                .toList();
+        if (workloads.isEmpty()) {
+            return;
+        }
+        out.append("%nLatency of single operations, median of the runs:%n%n".formatted());
+        out.append("| Workload | Percentile | %s | %s | Ratio |%n".formatted(subjects.getFirst().store(), baselines.getFirst().store()));
+        out.append("|---|---|---:|---:|---:|%n".formatted());
+        for (String workload : workloads) {
+            for (Latency.Percentile percentile : Latency.PERCENTILES) {
+                double mine = median(percentiles(subjects, workload, percentile));
+                double theirs = median(percentiles(baselines, workload, percentile));
+                out.append("| `%s` | %s | %s | %s | **%.2f×** |%n".formatted(workload, percentile.name(), micros(mine), micros(theirs), theirs / mine));
+            }
+        }
+    }
+
+    private static Json.Obj latency(Run run, String workload) {
+        Map<String, Json> result = run.results().get(workload);
+        return result != null && result.get("latency") instanceof Json.Obj latency ? latency : null;
+    }
+
+    private static double[] percentiles(List<Run> runs, String workload, Latency.Percentile percentile) {
+        return runs.stream().mapToDouble(run -> number(latency(run, workload).fields().get(percentile.name()))).sorted().toArray();
+    }
+
+    private static String micros(double value) {
+        return value < 1000 ? "%.1f µs".formatted(value) : "%,.2f ms".formatted(value / 1000);
     }
 
     private static double[] values(List<Run> runs, String workload, boolean disk, boolean single) {
