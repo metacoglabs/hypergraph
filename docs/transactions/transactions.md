@@ -161,7 +161,7 @@ Compaction rewrites roots through `TransactionManager.rewrite`, which records `r
 
 ### 5.4 Page budget
 
-`append` materializes the new tree nodes and rejects the commit with `HStoreException.limit` (`ABORTED_RESOURCE_LIMIT`, not retryable) if `materializer.pagesWritten() > txn.options().maxPages() - txn.spilledPages()`. The check runs before any WAL or data I/O.
+`append` counts the pending tree nodes, nested trees included, with `Materializer.pendingNodes` and rejects the commit with `HStoreException.limit` (`ABORTED_RESOURCE_LIMIT`, not retryable) if that count exceeds `txn.options().maxPages() - txn.spilledPages()`. The check runs before anything is materialized, so a rejected commit allocates no segment space, admits nothing to the node cache and does no WAL or data I/O.
 
 ### 5.5 Outcomes
 
