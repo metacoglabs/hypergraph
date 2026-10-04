@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.IntConsumer;
 
 final class HStoreStore implements Store {
 
@@ -37,7 +38,7 @@ final class HStoreStore implements Store {
     private final int cachedNodes;
     private final long cacheBytes;
 
-    HStoreStore(Path directory, boolean sync, int history, long cacheBytes) {
+    HStoreStore(Path directory, boolean sync, int history, long cacheBytes, boolean create) {
         this.directory = directory;
         this.history = history;
         this.cacheBytes = cacheBytes;
@@ -46,11 +47,13 @@ final class HStoreStore implements Store {
         this.options = DatabaseOptions.defaults().withEngine(engine
                 .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withCachedNodes(cachedNodes).withHistoryLimit(history));
         this.database = HypergraphDatabase.open(directory, options);
-        database.write(writer -> {
-            writer.defineNode(NODE, List.of(new PropertyDef("name", TypeTag.STRING, false, false)));
-            writer.defineEdge(EDGE, AtomKind.SET_EDGE, List.of(), List.of());
-            return null;
-        });
+        if (create) {
+            database.write(writer -> {
+                writer.defineNode(NODE, List.of(new PropertyDef("name", TypeTag.STRING, false, false)));
+                writer.defineEdge(EDGE, AtomKind.SET_EDGE, List.of(), List.of());
+                return null;
+            });
+        }
     }
 
     @Override
@@ -75,7 +78,7 @@ final class HStoreStore implements Store {
     }
 
     @Override
-    public void ingestNodes(Dataset dataset, int batch) {
+    public void ingestNodes(Dataset dataset, int batch, IntConsumer committed) {
         nodes = new long[dataset.nodes()];
         for (int start = 0; start < nodes.length; start += batch) {
             int from = start;
@@ -86,7 +89,13 @@ final class HStoreStore implements Store {
                 }
                 return null;
             });
+            committed.accept(to);
         }
+    }
+
+    @Override
+    public long countNodes() {
+        return database.read(reader -> reader.atoms(NODE).count());
     }
 
     @Override

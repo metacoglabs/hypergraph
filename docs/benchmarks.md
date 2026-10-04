@@ -62,6 +62,7 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `churn.remove` | remove one member from each of 20,000 other hyperedges, 1,000 per transaction | `Writer.remove` | `graph.replace` with a new `HGPlainLink` (links are immutable) |
 | `read.incidence.churned` | `read.incidence` after the deletes | | |
 | `disk.churned` | bytes on disk after the deletes and a clean shutdown | | |
+| `recover` | open the store after the process ingesting into it was killed with SIGKILL | `HypergraphDatabase.open` | `HGEnvironment.get` |
 
 Read workloads run a warm-up pass over 10% of the probes before timing, except `read.incidence.cold`.
 
@@ -91,6 +92,18 @@ one member. `disk` is recorded while the store is closed for a reopen, before th
 the loaded store after a clean shutdown. The checksum of `read.incidence.churned` has to agree, which confirms
 both engines applied the same deletes. `disk.churned` shows whether the space came back: through compaction for
 HStore, and the log cleaner for JE.
+
+**Crash recovery.** `reopen` closes the store cleanly first. `recover` doesn't:
+1. The run starts a second JVM (`Comparison crash`) with the same flags and classpath. It ingests nodes into a
+   fresh directory and prints the count after every acknowledged commit.
+2. Once half the nodes are acknowledged, the parent kills it with SIGKILL.
+3. The parent times opening the directory, then counts the nodes that survived.
+
+The *Resources* table shows how many acknowledged nodes were lost, including when it's zero. SIGKILL is a process
+crash, not a power failure: bytes the engine handed to the operating system survive it even without an fsync. So
+this measures recovery time and the engine's own buffering, not whether `sync` really reaches the disk. Torn
+writes and lost fsyncs are covered by HStore's crash matrix (`CrashRecoveryTest`, see [development.md](development.md)), not by this
+benchmark.
 
 **Bytes written.** For every write workload the report also shows the bytes each engine wrote per operation, in a
 *Resources* table, plus the total for the whole run. Both engines count the bytes they write themselves:

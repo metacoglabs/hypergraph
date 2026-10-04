@@ -2,8 +2,10 @@ package io.hstore.bench;
 
 import io.hstore.db.value.Json;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.management.ManagementFactory;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -63,6 +65,7 @@ public final class Comparison {
 
     private static final int BATCH = 1_000;
     private static final int COMMITS = 5_000;
+    private static final String COMMITTED = "committed ";
     private static final long MIXED_NANOS = 10_000_000_000L;
     private static final int MIXED_BATCH = 10;
     private static final int MIXED_UPDATES_PER_SECOND = 1_000;
@@ -76,10 +79,12 @@ public final class Comparison {
         Map<String, String> options = options(args);
         switch (args.length == 0 ? "" : args[0]) {
             case "run" -> run(options);
+            case "crash" -> crash(options);
             case "report" -> IO.println(Report.markdown(args));
             default -> {
                 IO.println("""
                         usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] [--cache-mb N] --out FILE
+                               Comparison crash --store hstore|hypergraphdb --dir DIRECTORY (used by run; ingests until killed)
                                Comparison report FILE... (runs of two stores; cells show the median and range)""");
                 System.exit(2);
             }
@@ -103,16 +108,11 @@ public final class Comparison {
         int threads = Integer.parseInt(options.getOrDefault("threads", String.valueOf(Runtime.getRuntime().availableProcessors())));
         Path out = Path.of(options.getOrDefault("out", "results/" + storeName + ".json"));
         Path directory = Files.createTempDirectory("hstore-bench-" + storeName);
-        long cacheBytes = Long.parseLong(options.getOrDefault("cache-mb", "0")) << 20;
         Dataset dataset = Dataset.generate(scale, SEED);
         List<Result> results = new ArrayList<>();
         Map<String, Json> totals = new LinkedHashMap<>();
         long baselineHeap = JvmUsage.retainedHeap();
-        Store store = switch (storeName) {
-            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes);
-            case "hypergraphdb" -> new HyperGraphDbStore(directory, sync, cacheBytes);
-            default -> throw new IllegalArgumentException("unknown store " + storeName);
-        };
+        Store store = open(options, directory, true);
         IO.println("%s: %,d nodes, %,d hyperedges, %,d incidences, durability %s, %d threads"
                 .formatted(store.name(), dataset.nodes(), dataset.edges().length, dataset.incidences(), sync ? "sync" : "async", threads));
         try {
@@ -196,9 +196,72 @@ public final class Comparison {
         }
         long churned = store.diskBytes();
         results.add(new Result("disk.churned", "bytes on disk after the deletes and a clean shutdown", churned, 1000.0, churned));
+        results.add(recover(options, dataset));
         write(out, store, scale, sync, threads, dataset, totals, results);
         results.forEach(result -> IO.println("  %-22s %,14.0f ops/s  %,10.1f ms  checksum %d"
                 .formatted(result.workload(), result.rate(), result.millis(), result.checksum())));
+    }
+
+    private static Store open(Map<String, String> options, Path directory, boolean create) {
+        boolean sync = options.getOrDefault("durability", "async").equals("sync");
+        long cacheBytes = Long.parseLong(options.getOrDefault("cache-mb", "0")) << 20;
+        return switch (options.getOrDefault("store", "hstore")) {
+            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes, create);
+            case "hypergraphdb" -> new HyperGraphDbStore(directory, sync, cacheBytes);
+            case String other -> throw new IllegalArgumentException("unknown store " + other);
+        };
+    }
+
+    private static void crash(Map<String, String> options) throws InterruptedException {
+        Dataset dataset = Dataset.generate(Integer.parseInt(options.getOrDefault("scale", "1")), SEED);
+        Store store = open(options, Path.of(options.get("dir")), true);
+        store.ingestNodes(dataset, BATCH, committed -> {
+            System.out.println(COMMITTED + committed);
+            System.out.flush();
+        });
+        Thread.sleep(Long.MAX_VALUE);
+    }
+
+    private static Result recover(Map<String, String> options, Dataset dataset) throws Exception {
+        Path directory = Files.createTempDirectory("hstore-bench-crash");
+        List<String> command = new ArrayList<>();
+        command.add(ProcessHandle.current().info().command().orElse("java"));
+        command.addAll(ManagementFactory.getRuntimeMXBean().getInputArguments());
+        command.addAll(List.of("-cp", System.getProperty("java.class.path"), Comparison.class.getName(), "crash", "--dir", directory.toString()));
+        for (String option : List.of("store", "scale", "durability", "history", "cache-mb")) {
+            if (options.containsKey(option)) {
+                command.addAll(List.of("--" + option, options.get(option)));
+            }
+        }
+        Process child = new ProcessBuilder(command).redirectErrorStream(true).start();
+        int target = dataset.nodes() / 2;
+        int acknowledged = 0;
+        try (BufferedReader lines = child.inputReader()) {
+            for (String line = lines.readLine(); line != null && acknowledged < target; line = lines.readLine()) {
+                if (line.startsWith(COMMITTED)) {
+                    acknowledged = Integer.parseInt(line.substring(COMMITTED.length()));
+                }
+            }
+        } finally {
+            child.destroyForcibly();
+            child.waitFor();
+        }
+        if (acknowledged < target) {
+            throw new IllegalStateException("the crash child exited after %,d acknowledged nodes".formatted(acknowledged));
+        }
+        Store[] recovered = new Store[1];
+        Result result = measure("recover", "open the store after killing the ingest process with SIGKILL", 1, () -> {
+            recovered[0] = open(options, directory, false);
+            return 1;
+        });
+        long present;
+        try {
+            present = recovered[0].countNodes();
+        } finally {
+            recovered[0].close();
+        }
+        return result.with("checked", new Json.Bool(false)).with("acknowledged", number(acknowledged))
+                .with("lost", number(Math.max(0, acknowledged - present)));
     }
 
     private static Json number(long value) {

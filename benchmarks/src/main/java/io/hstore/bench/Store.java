@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.function.IntConsumer;
 import java.util.stream.Stream;
 
 interface Store extends AutoCloseable {
@@ -14,7 +15,14 @@ interface Store extends AutoCloseable {
 
     String cache();
 
-    void ingestNodes(Dataset dataset, int batch);
+    default void ingestNodes(Dataset dataset, int batch) {
+        ingestNodes(dataset, batch, _ -> {
+        });
+    }
+
+    void ingestNodes(Dataset dataset, int batch, IntConsumer committed);
+
+    long countNodes();
 
     void ingestEdges(Dataset dataset, int batch);
 
