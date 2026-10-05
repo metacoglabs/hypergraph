@@ -217,6 +217,11 @@ final class HStoreStore implements Store {
     }
 
     @Override
+    public void compact() {
+        database.engine().compact();
+    }
+
+    @Override
     public long bytesWritten() {
         EngineStats stats = database.engine().stats();
         return writtenBeforeReopen + stats.walBytes() + stats.dataBytesWritten();
