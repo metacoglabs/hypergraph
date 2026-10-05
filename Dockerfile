@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 FROM ghcr.io/graalvm/native-image-community:25 AS build
+ENV LANG=C.UTF-8
 WORKDIR /src
 COPY .mvn .mvn
 COPY mvnw pom.xml ./
