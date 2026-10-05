@@ -416,11 +416,11 @@ public final class TransactionManager {
         pagesWritten.add(materializer.pagesWritten());
         walBytes.add(written);
         GroupCommitter.Pending pending = new GroupCommitter.Pending(next, () -> {
+            current.set(next);
+            history.put(next.id(), next);
             if (!event.isEmpty()) {
                 storage.feed().append(event);
             }
-            current.set(next);
-            history.put(next.id(), next);
             trimHistory();
             storage.faults().reach(CrashPoint.CATALOG_PUBLISH);
         });
