@@ -1,5 +1,6 @@
 package io.hstore.bench;
 
+import com.sleepycat.je.CheckpointConfig;
 import com.sleepycat.je.Durability;
 import com.sleepycat.je.Environment;
 import com.sleepycat.je.EnvironmentConfig;
@@ -240,6 +241,15 @@ final class HyperGraphDbStore implements Store {
     @Override
     public void flush() {
         environment().sync();
+    }
+
+    @Override
+    public void compact() {
+        Environment environment = environment();
+        while (environment.cleanLog() > 0) {
+            Thread.onSpinWait();
+        }
+        environment.checkpoint(new CheckpointConfig().setForce(true));
     }
 
     @Override

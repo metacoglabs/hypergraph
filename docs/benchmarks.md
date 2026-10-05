@@ -62,6 +62,9 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `churn.remove` | remove one member from each of 20,000 other hyperedges, 1,000 per transaction | `Writer.remove` | `graph.replace` with a new `HGPlainLink` (links are immutable) |
 | `read.incidence.churned` | `read.incidence` after the deletes | | |
 | `disk.churned` | bytes on disk after the deletes and a clean shutdown | | |
+| `compaction.baseline` | single-update commits at 50/s for 10 s, no compaction | `Writer.set` | `graph.replace` |
+| `compaction` | the same commits while a full compaction runs, starting 1 s in | `StorageEngine.compact` | `Environment.cleanLog` until it finds nothing, then a forced checkpoint |
+| `disk.compacted` | bytes on disk after the compaction and a clean shutdown | | |
 | `recover` | open the store after the process ingesting into it was killed with SIGKILL | `HypergraphDatabase.open` | `HGEnvironment.get` |
 
 Read workloads run a warm-up pass over 10% of the probes before timing, except `read.incidence.cold`.
@@ -92,6 +95,16 @@ one member. `disk` is recorded while the store is closed for a reopen, before th
 the loaded store after a clean shutdown. The checksum of `read.incidence.churned` has to agree, which confirms
 both engines applied the same deletes. `disk.churned` shows whether the space came back: through compaction for
 HStore, and the log cleaner for JE.
+
+**Compaction.** After the churn, `disk.churned` is recorded at a reopen, and then two 10 s windows run. In both, one
+writer commits a single update every 20 ms on a fixed schedule, and each commit's latency is measured from when it
+was scheduled. In `compaction`, the store also runs a full compaction starting 1 s in, and the window lasts until
+the compaction has finished. HStore calls `StorageEngine.compact()`. JE calls `cleanLog()` until it cleans nothing,
+then forces a checkpoint so the cleaned files are deleted. The latency table compares the two windows, and the
+*Resources* table adds the compaction time and the space reclaimed (disk while open, before against after). That
+figure can be negative when compaction frees less than the writer adds. HStore's default segments are 256 MiB, so
+at scale 1 most data shares one or two segments. `--pages-per-segment` (`PAGES_PER_SEGMENT`) and
+`--compaction-live-ratio` (`COMPACTION_LIVE_RATIO`) change HStore's settings for a run.
 
 **Crash recovery.** `reopen` closes the store cleanly first. `recover` doesn't:
 1. The run starts a second JVM (`Comparison crash`) with the same flags and classpath. It ingests nodes into a

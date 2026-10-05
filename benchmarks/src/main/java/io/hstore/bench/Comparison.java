@@ -1,6 +1,7 @@
 package io.hstore.bench;
 
 import io.hstore.db.value.Json;
+import io.hstore.engine.EngineOptions;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -21,6 +22,7 @@ import java.util.concurrent.Future;
 import java.util.function.IntToLongFunction;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 public final class Comparison {
@@ -70,6 +72,9 @@ public final class Comparison {
     private static final int MIXED_BATCH = 10;
     private static final int MIXED_UPDATES_PER_SECOND = 1_000;
     private static final int SAMPLES_PER_THREAD = 200_000;
+    private static final long COMPACTION_WINDOW_NANOS = 10_000_000_000L;
+    private static final long COMPACTION_DELAY_NANOS = 1_000_000_000L;
+    private static final long COMPACTION_INTERVAL_NANOS = 20_000_000L;
     private static final long SEED = 20_260_904L;
 
     private Comparison() {
@@ -83,7 +88,7 @@ public final class Comparison {
             case "report" -> IO.println(Report.markdown(args));
             default -> {
                 IO.println("""
-                        usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] [--cache-mb N] --out FILE
+                        usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] [--cache-mb N] [--compaction-live-ratio R] [--pages-per-segment N] --out FILE
                                Comparison crash --store hstore|hypergraphdb --dir DIRECTORY (used by run; ingests until killed)
                                Comparison report FILE... (runs of two stores; cells show the median and range)""");
                 System.exit(2);
@@ -189,13 +194,18 @@ public final class Comparison {
                     }))));
             results.add(read("read.incidence.churned", "enumerate incidence sets after the deletes", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), true));
+            long[] churned = new long[1];
+            store.reopen(() -> churned[0] = store.diskBytes());
+            results.add(new Result("disk.churned", "bytes on disk after the deletes and a clean shutdown", churned[0], 1000.0, churned[0]));
+            results.add(compaction(store, dataset, false));
+            results.add(compaction(store, dataset, true));
             store.flush();
             totals.put("bytesWritten", number(store.bytesWritten()));
         } finally {
             store.close();
         }
-        long churned = store.diskBytes();
-        results.add(new Result("disk.churned", "bytes on disk after the deletes and a clean shutdown", churned, 1000.0, churned));
+        long compacted = store.diskBytes();
+        results.add(new Result("disk.compacted", "bytes on disk after a full compaction and a clean shutdown", compacted, 1000.0, compacted));
         results.add(recover(options, dataset));
         write(out, store, scale, sync, threads, dataset, totals, results);
         results.forEach(result -> IO.println("  %-22s %,14.0f ops/s  %,10.1f ms  checksum %d"
@@ -206,7 +216,9 @@ public final class Comparison {
         boolean sync = options.getOrDefault("durability", "async").equals("sync");
         long cacheBytes = Long.parseLong(options.getOrDefault("cache-mb", "0")) << 20;
         return switch (options.getOrDefault("store", "hstore")) {
-            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes, create);
+            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes,
+                    Double.parseDouble(options.getOrDefault("compaction-live-ratio", String.valueOf(EngineOptions.defaults().compactionLiveRatio()))),
+                    Integer.parseInt(options.getOrDefault("pages-per-segment", "0")), create);
             case "hypergraphdb" -> new HyperGraphDbStore(directory, sync, cacheBytes);
             case String other -> throw new IllegalArgumentException("unknown store " + other);
         };
@@ -228,7 +240,7 @@ public final class Comparison {
         command.add(ProcessHandle.current().info().command().orElse("java"));
         command.addAll(ManagementFactory.getRuntimeMXBean().getInputArguments());
         command.addAll(List.of("-cp", System.getProperty("java.class.path"), Comparison.class.getName(), "crash", "--dir", directory.toString()));
-        for (String option : List.of("store", "scale", "durability", "history", "cache-mb")) {
+        for (String option : List.of("store", "scale", "durability", "history", "cache-mb", "compaction-live-ratio", "pages-per-segment")) {
             if (options.containsKey(option)) {
                 command.addAll(List.of("--" + option, options.get(option)));
             }
@@ -373,6 +385,59 @@ public final class Comparison {
                 .with("latency", Reservoir.merge(commits).json()).with("checked", new Json.Bool(false))
                 .with("bytesWritten", number(store.bytesWritten() - before));
         return List.of(read, write);
+    }
+
+    private static Result compaction(Store store, Dataset dataset, boolean compact) throws Exception {
+        int[] updates = dataset.updates();
+        Reservoir commits = new Reservoir(SAMPLES_PER_THREAD, SEED);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        long[] compactNanos = new long[1];
+        long before = store.bytesWritten();
+        long diskBefore = store.diskBytes();
+        JvmUsage usage = JvmUsage.now();
+        long started = System.nanoTime();
+        long deadline = started + COMPACTION_WINDOW_NANOS;
+        Thread compactor = Thread.ofPlatform().name("bench-compaction").start(() -> {
+            if (!compact) {
+                return;
+            }
+            LockSupport.parkNanos(started + COMPACTION_DELAY_NANOS - System.nanoTime());
+            long begin = System.nanoTime();
+            try {
+                store.compact();
+            } catch (Throwable e) {
+                failure.set(e);
+            }
+            compactNanos[0] = System.nanoTime() - begin;
+        });
+        int committed = 0;
+        for (int k = 0; ; k++) {
+            long intended = started + k * COMPACTION_INTERVAL_NANOS;
+            if (intended >= deadline && !compactor.isAlive()) {
+                break;
+            }
+            for (long wait = intended - System.nanoTime(); wait > 0; wait = intended - System.nanoTime()) {
+                LockSupport.parkNanos(wait);
+            }
+            int index = k % updates.length;
+            store.update(updates, index, index + 1, (compact ? 4_000_000 : 3_000_000) + k);
+            commits.add(System.nanoTime() - intended);
+            committed++;
+        }
+        compactor.join();
+        if (failure.get() != null) {
+            throw new IllegalStateException("compaction failed", failure.get());
+        }
+        double millis = (System.nanoTime() - started) / 1e6;
+        JvmUsage used = JvmUsage.now().since(usage);
+        store.flush();
+        String schedule = "single-update commits at %d/s".formatted(1_000_000_000L / COMPACTION_INTERVAL_NANOS);
+        Result result = new Result(compact ? "compaction" : "compaction.baseline",
+                compact ? schedule + " while a full compaction runs" : schedule + " with no compaction, for comparison",
+                committed, millis, 0).using(used).with("latency", Reservoir.merge(commits).json()).with("checked", new Json.Bool(false))
+                .with("bytesWritten", number(store.bytesWritten() - before));
+        return compact ? result.with("compactionMillis", number(compactNanos[0] / 1_000_000)).with("reclaimed", number(diskBefore - store.diskBytes()))
+                : result;
     }
 
     private static Result concurrent(Store store, Dataset dataset, int threads) throws Exception {
