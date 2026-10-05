@@ -118,7 +118,7 @@ public final class MaterializedViews implements AutoCloseable {
     }
 
     private Descriptor refresh(Writer writer, Descriptor descriptor) {
-        long target = database.engine().feed().lastGeneration();
+        long target = Math.min(database.engine().feed().lastGeneration(), writer.generation());
         if (target <= descriptor.lastGeneration()) {
             return descriptor;
         }
