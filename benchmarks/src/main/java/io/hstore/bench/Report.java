@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.DoubleFunction;
+import java.util.function.ToDoubleFunction;
 import java.util.stream.Stream;
 
 final class Report {
@@ -71,22 +72,36 @@ final class Report {
         return out.toString();
     }
 
-    private record Metric(String key, String name, boolean perOperation, boolean showZero, boolean higherIsBetter, DoubleFunction<String> format) {
+    private record Metric(String name, List<String> keys, ToDoubleFunction<Map<String, Json>> value, boolean showZero, boolean higherIsBetter,
+                          DoubleFunction<String> format) {
+
+        static Metric field(String key, String name, boolean perOperation, boolean showZero, boolean higherIsBetter, DoubleFunction<String> format) {
+            return new Metric(name, List.of(key), result -> number(result.get(key)) / (perOperation ? number(result.get("operations")) : 1),
+                    showZero, higherIsBetter, format);
+        }
+
+        static Metric ratio(String numerator, String denominator, String name) {
+            return new Metric(name, List.of(numerator, denominator), result -> number(result.get(numerator)) / number(result.get(denominator)),
+                    false, false, value -> "%.1f×".formatted(value));
+        }
     }
 
-    private static final List<Metric> METRICS = List.of(new Metric("bytesWritten", "bytes written per operation", true, false, false, Report::bytes),
-            new Metric("allocated", "heap allocated per operation", true, false, false, Report::bytes),
-            new Metric("gcMillis", "GC pause time", false, false, false, value -> "%,.0f ms".formatted(value)),
-            new Metric("lost", "acknowledged nodes lost", false, true, false, value -> "%,.0f".formatted(value)),
-            new Metric("compactionMillis", "compaction time", false, true, false, value -> "%,.0f ms".formatted(value)),
-            new Metric("reclaimed", "disk space reclaimed", false, true, true, Report::bytes));
+    private static final List<Metric> METRICS = List.of(Metric.field("bytesWritten", "bytes written per operation", true, false, false, Report::bytes),
+            Metric.ratio("bytesWritten", "logicalWritten", "write amplification"),
+            Metric.field("bytesRead", "bytes read from storage per operation", true, false, false, Report::bytes),
+            Metric.ratio("bytesRead", "logicalRead", "read amplification"),
+            Metric.field("allocated", "heap allocated per operation", true, false, false, Report::bytes),
+            Metric.field("gcMillis", "GC pause time", false, false, false, value -> "%,.0f ms".formatted(value)),
+            Metric.field("lost", "acknowledged nodes lost", false, true, false, value -> "%,.0f".formatted(value)),
+            Metric.field("compactionMillis", "compaction time", false, true, false, value -> "%,.0f ms".formatted(value)),
+            Metric.field("reclaimed", "disk space reclaimed", false, true, true, Report::bytes));
 
     private static void resources(StringBuilder out, List<Run> subjects, List<Run> baselines) {
         List<Run> all = Stream.concat(subjects.stream(), baselines.stream()).toList();
         StringBuilder rows = new StringBuilder();
         for (Metric metric : METRICS) {
             for (String workload : subjects.getFirst().results().keySet()) {
-                if (all.stream().allMatch(run -> run.results().containsKey(workload) && run.results().get(workload).containsKey(metric.key()))) {
+                if (all.stream().allMatch(run -> run.results().containsKey(workload) && run.results().get(workload).keySet().containsAll(metric.keys()))) {
                     double mine = median(metric(subjects, workload, metric));
                     double theirs = median(metric(baselines, workload, metric));
                     if (mine == 0 && theirs == 0 && !metric.showZero()) {
@@ -117,11 +132,7 @@ final class Report {
     }
 
     private static double[] metric(List<Run> runs, String workload, Metric metric) {
-        return runs.stream().mapToDouble(run -> {
-            Map<String, Json> result = run.results().get(workload);
-            double value = number(result.get(metric.key()));
-            return metric.perOperation() ? value / number(result.get("operations")) : value;
-        }).sorted().toArray();
+        return runs.stream().mapToDouble(run -> metric.value().applyAsDouble(run.results().get(workload))).sorted().toArray();
     }
 
     private static double[] header(List<Run> runs, String key) {
