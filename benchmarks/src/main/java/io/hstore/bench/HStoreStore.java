@@ -30,6 +30,7 @@ final class HStoreStore implements Store {
     private long[] edges;
     private long large;
     private long writtenBeforeReopen;
+    private long readBeforeReopen;
 
     static final int CACHED_NODES = 1 << 20;
 
@@ -248,8 +249,14 @@ final class HStoreStore implements Store {
     }
 
     @Override
+    public long bytesRead() {
+        return readBeforeReopen + database.engine().stats().pagesRead() * options.engine().pageSize();
+    }
+
+    @Override
     public void reopen(Runnable whileClosed) {
         writtenBeforeReopen = bytesWritten();
+        readBeforeReopen = bytesRead();
         database.close();
         whileClosed.run();
         database = HypergraphDatabase.open(directory, options);
