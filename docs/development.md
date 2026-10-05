@@ -196,6 +196,29 @@ java -p engine/target/classes:database/target/classes:server/target/classes \
 Reload the browser after each edit. Check syntax with
 `for f in $(find server/src/main/resources/studio/js -name '*.js'); do node --check "$f"; done`.
 
+## Releasing
+
+Releases come from a `v<version>` tag on `main`, and the tag has to match the version in the POMs.
+
+1. Merge a PR that sets the release version in all five POMs and in `Main.VERSION`.
+2. Build and push the arm64 image from that commit on an Apple silicon machine. GitHub has no free arm64 runners
+   for private repositories, and building the native image under emulation takes too long:
+
+   ```
+   docker build --platform linux/arm64 -t ghcr.io/metacoglabs/hypergraph:<version>-arm64 .
+   docker push ghcr.io/metacoglabs/hypergraph:<version>-arm64
+   ```
+
+3. Push the tag: `git tag -a v<version> -m "HStore <version>" && git push origin v<version>`.
+   `.github/workflows/release.yml` then:
+   * builds the Linux native executable and the JVM bundle, and smoke-tests both;
+   * builds, health-checks and pushes the amd64 image;
+   * points `<version>`, `<major>.<minor>` and `latest` at both architectures (pre-release versions, the ones
+     containing `-`, only get `<version>`);
+   * creates a draft release with the archives, `SHA256SUMS` and generated notes.
+4. On the Mac, build the native executable and attach it to the draft as `hstore-<version>-darwin-arm64.tar.gz`.
+   Update `SHA256SUMS`, edit the notes and publish.
+
 ## Benchmarks against HyperGraphDB
 
 The `benchmarks` module is excluded from the default build because HyperGraphDB is not published to Maven

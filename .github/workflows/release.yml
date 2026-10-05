@@ -1,0 +1,127 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm-community'
+          cache: 'maven'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check the tag matches the project version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          project="$(./mvnw -q -B -ntp help:evaluate -Dexpression=project.version -DforceStdout)"
+          [ "$project" = "$version" ] || { echo "tag $GITHUB_REF_NAME does not match project version $project"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          ./mvnw -B -ntp -DskipTests install
+          ./mvnw -B -ntp -Pnative -DskipTests package -pl server
+      - name: Package
+        run: |
+          mkdir dist
+          linux="hstore-$VERSION-linux-amd64"
+          mkdir "$linux"
+          cp server/target/hstore LICENSE README.md "$linux/"
+          tar -czf "dist/$linux.tar.gz" "$linux"
+          jvm="hstore-$VERSION-jvm"
+          mkdir -p "$jvm/lib" "$jvm/bin"
+          cp "engine/target/hstore-engine-$VERSION.jar" "database/target/hstore-db-$VERSION.jar" \
+            "server/target/hstore-server-$VERSION.jar" "$jvm/lib/"
+          printf '#!/bin/sh\nexec java -p "$(dirname "$0")/../lib" -m io.hstore.server "$@"\n' > "$jvm/bin/hstore"
+          chmod +x "$jvm/bin/hstore"
+          cp LICENSE README.md "$jvm/"
+          tar -czf "dist/$jvm.tar.gz" "$jvm"
+      - name: Smoke test
+        run: |
+          data="$RUNNER_TEMP/hstore"
+          "hstore-$VERSION-linux-amd64/hstore" init "$data" --superuser admin --password ci
+          "hstore-$VERSION-linux-amd64/hstore" exec "$data" examples/clinical-claims.hql > /dev/null
+          "hstore-$VERSION-jvm/bin/hstore" check "$data"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-amd64
+          labels: |
+            org.opencontainers.image.title=HStore
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Start the container and wait for health
+        run: |
+          docker run -d --name hstore -e HSTORE_PASSWORD=ci -p 7480:7480 "$IMAGE:$VERSION-amd64"
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' hstore)" = healthy ] && break
+            sleep 2
+          done
+          docker inspect -f '{{.State.Health.Status}}' hstore | grep -q healthy
+          curl -fsS http://127.0.0.1:7480/api/info
+          docker stop hstore
+      - name: Push and tag the release
+        run: |
+          docker push "$IMAGE:$VERSION-amd64"
+          sources="$IMAGE:$VERSION-amd64"
+          if docker buildx imagetools inspect "$IMAGE:$VERSION-arm64" > /dev/null 2>&1; then
+            sources="$sources $IMAGE:$VERSION-arm64"
+          fi
+          tags=(-t "$IMAGE:$VERSION")
+          if [[ "$VERSION" != *-* ]]; then
+            tags+=(-t "$IMAGE:${VERSION%.*}" -t "$IMAGE:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" $sources
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [binaries, image]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          (cd dist && sha256sum * > SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "HStore ${GITHUB_REF_NAME#v}" --generate-notes

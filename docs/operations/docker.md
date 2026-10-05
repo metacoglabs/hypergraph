@@ -22,6 +22,21 @@ Inside the container, `hstore connect` takes the password from `HSTORE_PASSWORD`
 environment, so no prompt appears. The user comes from `--user` or `HSTORE_USER`. When `HSTORE_USER` was passed
 to `docker run`, `docker exec -it hstore hstore connect 127.0.0.1:7432` needs no options at all.
 
+## Getting the image
+
+Releases are published as `ghcr.io/metacoglabs/hypergraph`, for linux/amd64 and linux/arm64:
+
+| Tag | Points at |
+|---|---|
+| `0.1.0` | that exact release |
+| `0.1` | the newest `0.1.x` release |
+| `latest` | the newest release |
+| `0.1.0-amd64`, `0.1.0-arm64` | the single-architecture images behind `0.1.0` |
+
+While the repository is private, the package is private too: `docker login ghcr.io` with a personal access token
+that has `read:packages`. The examples on this page use the name `hstore`, which is what `docker build -t hstore .`
+produces. Substitute the registry name to use a released image.
+
 ## Image layout
 
 | Path / item | Value |
