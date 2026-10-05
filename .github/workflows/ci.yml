@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -73,7 +73,7 @@ jobs:
           load: true
           tags: hstore:ci
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
       - name: Start container and wait for health
         run: |
           docker run -d --name hstore -e HSTORE_PASSWORD=ci -p 7432:7432 -p 7480:7480 hstore:ci
