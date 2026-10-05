@@ -22,7 +22,7 @@ sequenceDiagram
   TM->>CF: append CommitEvent(generation g, members, slots)
   CF-->>MV: onCommit(event) on main with member changes
   MV->>MV: for each CONTINUOUS view: refresh(name)
-  MV->>CF: replay(lastGeneration) up to feed.lastGeneration
+  MV->>CF: replay(lastGeneration) up to min(feed.lastGeneration, own snapshot)
   MV->>TM: write txn: apply deltas to view-data, lastGeneration := g
   TM->>CF: append slot-only event (no member changes, ignored by onCommit)
 ```

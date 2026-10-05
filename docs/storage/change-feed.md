@@ -43,18 +43,19 @@ sequenceDiagram
     TM->>WAL: Commit(txn, g)
     TM->>G: submit(Pending g)
     G->>G: makeDurable (fsync data and WAL under SYNC)
+    G->>G: current = g, history
     G->>CF: append(event)
     CF-->>S: signal "appended"
-    G->>G: current = g, history (CATALOG_PUBLISH)
+    G->>G: CATALOG_PUBLISH
     S->>CF: replay(acknowledged) and consume
 ```
 
 Two copies exist:
 
 1. The **WAL `Feed` record** (type 5), written inside the commit before the `Commit` record. It is the durable copy and is covered by the commit's atomicity.
-2. The **feed segments**, appended by the group-commit flusher during publication: after the commit is durable (under `SYNC`) and **immediately before** the generation becomes `current`. Appends happen on the single flusher thread in queue order, so the feed is in generation order.
+2. The **feed segments**, appended by the group-commit flusher during publication: after the commit is durable (under `SYNC`) and **immediately after** the generation becomes `current`. Appends happen on the single flusher thread in queue order, so the feed is in generation order.
 
-Appending before `current.set(next)` establishes the invariant that any reader which observes generation `g` as current also observes `feed.lastGeneration()` covering every non-empty commit `<= g`. A subscriber may therefore briefly see an event for generation `g` while `current` is still `g - 1`; the commit is already durable at that point, so the event will never be rolled back by a process crash.
+Appending after `current.set(next)` guarantees that a subscriber told about generation `g` can read it: any transaction it starts sees `g` or later. Subscribers such as `MaterializedViews` look up the atoms an event mentions, so an event that arrived before its commit was visible would make them skip changes they can't yet see. The opposite direction is not guaranteed: a reader whose snapshot is `g` may find `feed.lastGeneration()` still at `g - 1` while `g` is being published. Code that combines a snapshot with the feed replays only up to `min(snapshot, feed.lastGeneration())` (`SemanticPlane`, `MaterializedViews.refresh`) and picks up the rest from the next event. A committing client is acknowledged only after both steps, so its own commit is always in the feed by then. The commit is durable before either step, so an event is never rolled back by a process crash.
 
 The feed is *not* forced on every append. The active segment is forced by `ChangeFeed.sync()` during every checkpoint (before the catalog image is published) and on `close()`; a segment is also forced when the feed rolls past it. After a crash, recovery re-appends the `Feed` records of every replayed commit (`ChangeFeed.append` ignores any generation `<= lastGeneration`, so events already present are not duplicated), then `truncateAfter(recovered generation)` removes events for commits that did not survive, and forces the active segment. The checkpoint ordering (`feed.sync()` before the catalog image that moves the WAL start) guarantees that events older than the checkpoint LSN are already durable in the feed when their WAL records are truncated.
 
