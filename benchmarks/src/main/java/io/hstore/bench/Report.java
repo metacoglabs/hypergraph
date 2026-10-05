@@ -71,13 +71,15 @@ final class Report {
         return out.toString();
     }
 
-    private record Metric(String key, String name, boolean perOperation, boolean showZero, DoubleFunction<String> format) {
+    private record Metric(String key, String name, boolean perOperation, boolean showZero, boolean higherIsBetter, DoubleFunction<String> format) {
     }
 
-    private static final List<Metric> METRICS = List.of(new Metric("bytesWritten", "bytes written per operation", true, false, Report::bytes),
-            new Metric("allocated", "heap allocated per operation", true, false, Report::bytes),
-            new Metric("gcMillis", "GC pause time", false, false, value -> "%,.0f ms".formatted(value)),
-            new Metric("lost", "acknowledged nodes lost", false, true, value -> "%,.0f".formatted(value)));
+    private static final List<Metric> METRICS = List.of(new Metric("bytesWritten", "bytes written per operation", true, false, false, Report::bytes),
+            new Metric("allocated", "heap allocated per operation", true, false, false, Report::bytes),
+            new Metric("gcMillis", "GC pause time", false, false, false, value -> "%,.0f ms".formatted(value)),
+            new Metric("lost", "acknowledged nodes lost", false, true, false, value -> "%,.0f".formatted(value)),
+            new Metric("compactionMillis", "compaction time", false, true, false, value -> "%,.0f ms".formatted(value)),
+            new Metric("reclaimed", "disk space reclaimed", false, true, true, Report::bytes));
 
     private static void resources(StringBuilder out, List<Run> subjects, List<Run> baselines) {
         List<Run> all = Stream.concat(subjects.stream(), baselines.stream()).toList();
@@ -90,7 +92,7 @@ final class Report {
                     if (mine == 0 && theirs == 0 && !metric.showZero()) {
                         continue;
                     }
-                    double ratio = theirs / mine;
+                    double ratio = metric.higherIsBetter() ? (mine > 0 && theirs > 0 ? mine / theirs : Double.NaN) : theirs / mine;
                     rows.append("| `%s` | %s | %s | %s | %s |%n".formatted(workload, metric.name(), metric.format().apply(mine),
                             metric.format().apply(theirs), Double.isFinite(ratio) ? "**%.2f×**".formatted(ratio) : "n/a"));
                 }
@@ -127,10 +129,12 @@ final class Report {
     }
 
     private static String bytes(double value) {
-        if (value < 1024) {
-            return "%.0f B".formatted(value);
+        double size = Math.abs(value);
+        String sign = value < 0 ? "-" : "";
+        if (size < 1024) {
+            return sign + "%.0f B".formatted(size);
         }
-        return value < 1 << 20 ? "%.1f KiB".formatted(value / 1024) : "%,.1f MiB".formatted(value / (1 << 20));
+        return sign + (size < 1 << 20 ? "%.1f KiB".formatted(size / 1024) : "%,.1f MiB".formatted(size / (1 << 20)));
     }
 
     private static void latency(StringBuilder out, List<Run> subjects, List<Run> baselines) {
