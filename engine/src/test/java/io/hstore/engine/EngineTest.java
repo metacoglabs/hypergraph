@@ -17,6 +17,7 @@ import io.hstore.engine.tree.TreeAlgebra;
 import io.hstore.engine.tree.TreeSchema;
 import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.txn.CommitResult;
+import io.hstore.engine.txn.Durability;
 import io.hstore.engine.txn.IncidentEdge;
 import io.hstore.engine.txn.Isolation;
 import io.hstore.engine.txn.Snapshot;
@@ -37,6 +38,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
 import java.util.stream.LongStream;
@@ -143,6 +145,45 @@ class EngineTest {
         try (StorageEngine engine = StorageEngine.open(directory, options)) {
             assertEquals(last, engine.feed().lastGeneration());
             assertEquals(10, engine.feed().replay(last - 10).count());
+        }
+    }
+
+    @Test
+    void subscribersSeeTheCommitTheyAreToldAbout() throws InterruptedException {
+        try (StorageEngine engine = StorageEngine.open(directory, small().withDurability(Durability.ASYNC))) {
+            long edge = engine.write(txn -> txn.createEdge(EDGE, EdgeKind.SET));
+            long start = engine.transactions().current().id();
+            List<Long> early = new CopyOnWriteArrayList<>();
+            List<AtomicLong> delivered = new ArrayList<>();
+            List<ChangeFeed.Subscription> subscriptions = new ArrayList<>();
+            for (int s = 0; s < 4; s++) {
+                AtomicLong seen = new AtomicLong();
+                delivered.add(seen);
+                subscriptions.add(engine.feed().subscribe(start, event -> {
+                    if (engine.transactions().current().id() < event.generation()) {
+                        early.add(event.generation());
+                    }
+                    seen.set(event.generation());
+                }));
+            }
+            try {
+                for (int i = 0; i < 500; i++) {
+                    int index = i;
+                    engine.write(txn -> {
+                        txn.insert(edge, txn.createNode(NODE, "v" + index));
+                        return null;
+                    });
+                }
+                long last = engine.transactions().current().id();
+                long deadline = System.currentTimeMillis() + 5000;
+                while (delivered.stream().anyMatch(seen -> seen.get() < last) && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(10);
+                }
+                delivered.forEach(seen -> assertEquals(last, seen.get()));
+                assertEquals(List.of(), early);
+            } finally {
+                subscriptions.forEach(ChangeFeed.Subscription::close);
+            }
         }
     }
 

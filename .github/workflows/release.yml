@@ -85,7 +85,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
       - name: Start the container and wait for health
         run: |
           docker run -d --name hstore -e HSTORE_PASSWORD=ci -p 7480:7480 "$IMAGE:$VERSION-amd64"
