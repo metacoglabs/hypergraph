@@ -38,14 +38,15 @@ final class HStoreStore implements Store {
     private final int cachedNodes;
     private final long cacheBytes;
 
-    HStoreStore(Path directory, boolean sync, int history, long cacheBytes, boolean create) {
+    HStoreStore(Path directory, boolean sync, int history, long cacheBytes, double liveRatio, int pagesPerSegment, boolean create) {
         this.directory = directory;
         this.history = history;
         this.cacheBytes = cacheBytes;
         EngineOptions engine = EngineOptions.defaults();
         this.cachedNodes = cacheBytes > 0 ? Math.toIntExact(cacheBytes / engine.pageSize()) : CACHED_NODES;
         this.options = DatabaseOptions.defaults().withEngine(engine
-                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withCachedNodes(cachedNodes).withHistoryLimit(history));
+                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withCachedNodes(cachedNodes).withHistoryLimit(history)
+                .withCompactionLiveRatio(liveRatio).withPagesPerSegment(pagesPerSegment > 0 ? pagesPerSegment : engine.pagesPerSegment()));
         this.database = HypergraphDatabase.open(directory, options);
         if (create) {
             database.write(writer -> {

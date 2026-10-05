@@ -1,6 +1,7 @@
 package io.hstore.bench;
 
 import io.hstore.db.value.Json;
+import io.hstore.engine.EngineOptions;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -83,7 +84,7 @@ public final class Comparison {
             case "report" -> IO.println(Report.markdown(args));
             default -> {
                 IO.println("""
-                        usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] [--cache-mb N] --out FILE
+                        usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] [--cache-mb N] [--compaction-live-ratio R] [--pages-per-segment N] --out FILE
                                Comparison crash --store hstore|hypergraphdb --dir DIRECTORY (used by run; ingests until killed)
                                Comparison report FILE... (runs of two stores; cells show the median and range)""");
                 System.exit(2);
@@ -206,7 +207,9 @@ public final class Comparison {
         boolean sync = options.getOrDefault("durability", "async").equals("sync");
         long cacheBytes = Long.parseLong(options.getOrDefault("cache-mb", "0")) << 20;
         return switch (options.getOrDefault("store", "hstore")) {
-            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes, create);
+            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes,
+                    Double.parseDouble(options.getOrDefault("compaction-live-ratio", String.valueOf(EngineOptions.defaults().compactionLiveRatio()))),
+                    Integer.parseInt(options.getOrDefault("pages-per-segment", "0")), create);
             case "hypergraphdb" -> new HyperGraphDbStore(directory, sync, cacheBytes);
             case String other -> throw new IllegalArgumentException("unknown store " + other);
         };
@@ -228,7 +231,7 @@ public final class Comparison {
         command.add(ProcessHandle.current().info().command().orElse("java"));
         command.addAll(ManagementFactory.getRuntimeMXBean().getInputArguments());
         command.addAll(List.of("-cp", System.getProperty("java.class.path"), Comparison.class.getName(), "crash", "--dir", directory.toString()));
-        for (String option : List.of("store", "scale", "durability", "history", "cache-mb")) {
+        for (String option : List.of("store", "scale", "durability", "history", "cache-mb", "compaction-live-ratio", "pages-per-segment")) {
             if (options.containsKey(option)) {
                 command.addAll(List.of("--" + option, options.get(option)));
             }
