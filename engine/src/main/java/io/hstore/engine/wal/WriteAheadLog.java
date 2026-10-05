@@ -69,7 +69,7 @@ public final class WriteAheadLog implements AutoCloseable {
             }
             Map.Entry<Long, Path> last = segments.lastEntry();
             long validEnd = last.getKey();
-            for (Positioned positioned : (Iterable<Positioned>) () -> new Reader(last.getKey())) {
+            for (Positioned positioned : (Iterable<Positioned>) () -> new Reader(last.getKey(), false)) {
                 validEnd = positioned.next();
             }
             activeStart = last.getKey();
@@ -184,7 +184,7 @@ public final class WriteAheadLog implements AutoCloseable {
     }
 
     public Stream<Positioned> read(long from) {
-        return StreamSupport.stream(Spliterators.spliteratorUnknownSize(new Reader(from),
+        return StreamSupport.stream(Spliterators.spliteratorUnknownSize(new Reader(from, true),
                 Spliterator.ORDERED | Spliterator.NONNULL), false);
     }
 
@@ -240,8 +240,12 @@ public final class WriteAheadLog implements AutoCloseable {
         private long lsn;
         private Positioned next;
         private boolean finished;
+        private final ByteBuffer header = ByteBuffer.allocate(HEADER);
+        private final boolean decode;
+        private ByteBuffer body = ByteBuffer.allocate(4096);
 
-        Reader(long from) {
+        Reader(long from, boolean decode) {
+            this.decode = decode;
             Long floor = segments.floorKey(from);
             this.files = segments.tailMap(floor == null ? Long.MIN_VALUE : floor, true).entrySet().iterator();
             this.lsn = from;
@@ -293,7 +297,7 @@ public final class WriteAheadLog implements AutoCloseable {
 
         private Positioned readFrame() {
             try {
-                ByteBuffer header = ByteBuffer.allocate(HEADER);
+                header.clear();
                 if (!readFully(header, lsn - segmentStart)) {
                     return header.position() == 0 ? null : damaged("frame header is truncated");
                 }
@@ -306,7 +310,11 @@ public final class WriteAheadLog implements AutoCloseable {
                 if (payload < 0 || payload > MAX_RECORD || frameLsn != lsn) {
                     return damaged("frame header is invalid");
                 }
-                ByteBuffer body = ByteBuffer.allocate(HEADER - 8 + payload);
+                int size = HEADER - 8 + payload;
+                if (body.capacity() < size) {
+                    body = ByteBuffer.allocate(Math.max(size, body.capacity() * 2));
+                }
+                body.clear().limit(size);
                 body.put(header.position(8));
                 if (!readFully(body, lsn - segmentStart + HEADER)) {
                     return damaged("frame is truncated");
@@ -315,7 +323,7 @@ public final class WriteAheadLog implements AutoCloseable {
                 if (Checksums.crc32c(frame) != crc) {
                     return damaged("frame checksum does not match");
                 }
-                WalRecord record = WalRecord.readPayload(type, txnId, ByteCursor.over(frame).position(HEADER - 8));
+                WalRecord record = decode ? WalRecord.readPayload(type, txnId, ByteCursor.over(frame).position(HEADER - 8)) : null;
                 long start = lsn;
                 lsn += HEADER + payload;
                 return new Positioned(start, lsn, record);
