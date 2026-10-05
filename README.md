@@ -5,7 +5,7 @@ number of atoms, carries roles, weights, validity intervals and properties, and 
 other hyperedges. HStore stores this structure directly instead of reifying it into pairwise edges or
 relational join tables.
 
-The engine implements the design of *Native Persistent Hypergraph Storage Engine* (VLDB) together with its
+The engine implements the design of *Native Persistent Hypergraph Storage Engine* together with its
 higher-order extension. Membership and incidence are copy-on-write counted B+trees with monoid summaries.
 Commits are atomic root swaps. The database layer adds a query language (HQL), hypergraph relational operators,
 a semantic plane, multi-tenancy and a web console.
