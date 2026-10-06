@@ -476,7 +476,7 @@ public final class Studio implements AutoCloseable {
                         .put("segmentBytes", (long) configured.pagesPerSegment() * configured.pageSize())
                         .put("durability", configured.durability().name())
                         .put("walMode", configured.walMode().name())
-                        .put("cachedNodes", configured.cachedNodes())
+                        .put("cacheBytes", configured.cacheBytes())
                         .put("historyLimit", configured.historyLimit())
                         .put("checkpointWalBytes", configured.checkpointWalBytes())
                         .build())

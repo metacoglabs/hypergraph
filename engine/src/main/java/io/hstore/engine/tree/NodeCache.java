@@ -1,6 +1,5 @@
 package io.hstore.engine.tree;
 
-import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
@@ -8,13 +7,14 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class NodeCache {
 
     private static final int SHARDS = 16;
+    private static final long MIN_SHARD_BYTES = 64 * 1024;
 
     private final Shard[] shards = new Shard[SHARDS];
     private final LongAdder hits = new LongAdder();
     private final LongAdder misses = new LongAdder();
 
-    public NodeCache(int capacity) {
-        int perShard = Math.max(16, capacity / SHARDS);
+    public NodeCache(long capacityBytes) {
+        long perShard = Math.max(MIN_SHARD_BYTES, capacityBytes / SHARDS);
         for (int i = 0; i < SHARDS; i++) {
             shards[i] = new Shard(perShard);
         }
@@ -26,8 +26,8 @@ public final class NodeCache {
         return node;
     }
 
-    public void put(long pageId, Node node) {
-        shard(pageId).put(pageId, node);
+    public void put(long pageId, Node node, int bytes) {
+        shard(pageId).put(pageId, node, bytes);
     }
 
     public void clear() {
@@ -44,6 +44,14 @@ public final class NodeCache {
         return misses.sum();
     }
 
+    public long residentBytes() {
+        long total = 0;
+        for (Shard shard : shards) {
+            total += shard.bytes;
+        }
+        return total;
+    }
+
     private Shard shard(long pageId) {
         return shards[(int) (Hashing.mix(pageId) >>> 60) & (SHARDS - 1)];
     }
@@ -51,23 +59,27 @@ public final class NodeCache {
     private static final class Slot {
         final long pageId;
         final Node node;
+        final int bytes;
         volatile boolean referenced;
+        Slot previous;
+        Slot next;
 
-        Slot(long pageId, Node node) {
+        Slot(long pageId, Node node, int bytes) {
             this.pageId = pageId;
             this.node = node;
+            this.bytes = bytes;
         }
     }
 
     private static final class Shard {
-        private final ConcurrentHashMap<Long, Slot> entries;
-        private final Slot[] ring;
+        private final ConcurrentHashMap<Long, Slot> entries = new ConcurrentHashMap<>();
         private final ReentrantLock admission = new ReentrantLock();
-        private int hand;
+        private final long budget;
+        private volatile long bytes;
+        private Slot hand;
 
-        Shard(int capacity) {
-            this.entries = new ConcurrentHashMap<>(capacity * 4 / 3 + 1);
-            this.ring = new Slot[capacity];
+        Shard(long budget) {
+            this.budget = budget;
         }
 
         Node get(long pageId) {
@@ -81,45 +93,76 @@ public final class NodeCache {
             return slot.node;
         }
 
-        void put(long pageId, Node node) {
+        void put(long pageId, Node node, int weight) {
             admission.lock();
             try {
                 Slot existing = entries.get(pageId);
                 if (existing != null && existing.node == node) {
                     return;
                 }
-                Slot slot = new Slot(pageId, node);
                 if (existing != null) {
-                    for (int i = 0; i < ring.length; i++) {
-                        if (ring[i] == existing) {
-                            ring[i] = slot;
-                            break;
-                        }
-                    }
-                    entries.put(pageId, slot);
+                    unlink(existing);
+                    entries.remove(pageId, existing);
+                }
+                if (weight > budget) {
                     return;
                 }
-                while (ring[hand] != null && ring[hand].referenced) {
-                    ring[hand].referenced = false;
-                    hand = (hand + 1) % ring.length;
+                while (bytes + weight > budget) {
+                    evict();
                 }
-                if (ring[hand] != null) {
-                    entries.remove(ring[hand].pageId, ring[hand]);
-                }
-                ring[hand] = slot;
+                Slot slot = new Slot(pageId, node, weight);
+                link(slot);
                 entries.put(pageId, slot);
-                hand = (hand + 1) % ring.length;
             } finally {
                 admission.unlock();
             }
+        }
+
+        private void evict() {
+            while (hand.referenced) {
+                hand.referenced = false;
+                hand = hand.next;
+            }
+            Slot victim = hand;
+            unlink(victim);
+            entries.remove(victim.pageId, victim);
+        }
+
+        private void link(Slot slot) {
+            if (hand == null) {
+                slot.previous = slot;
+                slot.next = slot;
+                hand = slot;
+            } else {
+                slot.next = hand;
+                slot.previous = hand.previous;
+                hand.previous.next = slot;
+                hand.previous = slot;
+            }
+            bytes += slot.bytes;
+        }
+
+        private void unlink(Slot slot) {
+            if (slot.next == slot) {
+                hand = null;
+            } else {
+                slot.previous.next = slot.next;
+                slot.next.previous = slot.previous;
+                if (hand == slot) {
+                    hand = slot.next;
+                }
+            }
+            slot.previous = null;
+            slot.next = null;
+            bytes -= slot.bytes;
         }
 
         void clear() {
             admission.lock();
             try {
                 entries.clear();
-                Arrays.fill(ring, null);
-                hand = 0;
+                hand = null;
+                bytes = 0;
             } finally {
                 admission.unlock();
             }

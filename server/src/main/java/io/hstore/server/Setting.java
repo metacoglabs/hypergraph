@@ -17,7 +17,7 @@ enum Setting {
     PAGE_SIZE("page_size", "16384", "page size in bytes, fixed when the data directory is initialised"),
     DURABILITY("durability", "sync", "sync waits for fsync before acknowledging commits; async does not"),
     WAL_MODE("wal_mode", "references", "references logs page checksums and syncs data first; images logs full page images"),
-    CACHE_NODES("cache_nodes", "65536", "decoded tree nodes kept in the page cache"),
+    CACHE_MB("cache_mb", "256", "megabytes of decoded tree nodes kept in memory, each counted at the size of its page"),
     CHECKPOINT_WAL_MB("checkpoint_wal_mb", "256", "write-ahead log volume that triggers a background checkpoint"),
     HISTORY_LIMIT("history_limit", "64", "committed generations retained for time travel"),
     COMPACTION_LIVE_RATIO("compaction_live_ratio", "0.5", "sealed segments whose live node images fall below this ratio are compacted"),
