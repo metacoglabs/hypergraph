@@ -141,7 +141,7 @@ Errors use one JSON shape:
 | `GET /api/graph` | yes | Hypergraph neighbourhood for visualisation; see below. |
 | `GET /api/schema` | yes | Types visible to the session: `id`, `name`, `kind`, `version`, `count`, `roles`, `properties[{name,type,indexed,required}]`, `jsonIndexes[{path,type}]`, plus `branches`. |
 | `GET /api/history` | yes | `{"current": G, "generations": [{"id","wallTime","txnId"}]}` for the retained generations. |
-| `GET /api/stats` | ADMIN | Engine counters, segments (`id`, `state`, `pages` = node images, `bytes`, `live`), recovery outcome, configuration (`pageSize`, `segmentBytes`, `durability`, `walMode`, `cachedNodes`, `historyLimit`, `checkpointWalBytes`), semantic index generation, Studio session count, branches. |
+| `GET /api/stats` | ADMIN | Engine counters, segments (`id`, `state`, `pages` = node images, `bytes`, `live`), recovery outcome, configuration (`pageSize`, `segmentBytes`, `durability`, `walMode`, `cacheBytes`, `historyLimit`, `checkpointWalBytes`), semantic index generation, Studio session count, branches. |
 
 Example `GET /api/info`:
 
