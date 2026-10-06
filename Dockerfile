@@ -18,6 +18,10 @@ RUN --mount=type=cache,target=/root/.m2 \
  && cp server/target/hstore /hstore
 
 FROM debian:bookworm-slim
+LABEL org.opencontainers.image.title="HStore" \
+      org.opencontainers.image.vendor="Metacog Labs" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.source="https://github.com/metacoglabs/hypergraph"
 ARG UID=999
 ARG GID=999
 RUN groupadd --system --gid ${GID} hstore \
