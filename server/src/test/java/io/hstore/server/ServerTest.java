@@ -111,6 +111,18 @@ class ServerTest {
     }
 
     @Test
+    void cacheIsSizedInMegabytesAndTheOldNodeCountIsRejected(@TempDir Path data) throws Exception {
+        assertEquals(64L << 20, ServerConfig.load(Optional.empty(), Map.of("HSTORE_CACHE_MB", "64"), Map.of()).engineOptions().cacheBytes());
+        assertEquals(256L << 20, ServerConfig.load(Optional.empty(), Map.of(), Map.of()).engineOptions().cacheBytes());
+        Files.writeString(data.resolve(ServerConfig.FILE), "cache_nodes = 4096\n");
+        List<IllegalArgumentException> failures = List.of(
+                assertThrows(IllegalArgumentException.class, () -> ServerConfig.load(Optional.of(data), Map.of(), Map.of())),
+                assertThrows(IllegalArgumentException.class, () -> ServerConfig.load(Optional.empty(), Map.of("HSTORE_CACHE_NODES", "4096"), Map.of())),
+                assertThrows(IllegalArgumentException.class, () -> ServerConfig.load(Optional.empty(), Map.of(), Map.of("cache-nodes", "4096"))));
+        failures.forEach(failure -> assertTrue(failure.getMessage().contains("cache_mb"), failure.getMessage()));
+    }
+
+    @Test
     void tlsWithoutACertificateIsRejectedAtStartup() {
         ServerConfig config = ServerConfig.load(Optional.empty(), Map.of(), Map.of("tls", "on"));
         IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, config::serverTls);

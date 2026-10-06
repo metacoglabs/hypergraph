@@ -1,5 +1,9 @@
 package io.hstore.server;
 
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
 enum Setting {
     LISTEN_ADDRESS("listen_address", "127.0.0.1", "interface the TCP server binds; use 0.0.0.0 inside containers"),
     PORT("port", "7432", "TCP port of the HQL wire protocol"),
@@ -17,7 +21,7 @@ enum Setting {
     PAGE_SIZE("page_size", "16384", "page size in bytes, fixed when the data directory is initialised"),
     DURABILITY("durability", "sync", "sync waits for fsync before acknowledging commits; async does not"),
     WAL_MODE("wal_mode", "references", "references logs page checksums and syncs data first; images logs full page images"),
-    CACHE_NODES("cache_nodes", "65536", "decoded tree nodes kept in the page cache"),
+    CACHE_MB("cache_mb", "256", "megabytes of decoded tree nodes kept in memory, each counted at the size of its page"),
     CHECKPOINT_WAL_MB("checkpoint_wal_mb", "256", "write-ahead log volume that triggers a background checkpoint"),
     HISTORY_LIMIT("history_limit", "64", "committed generations retained for time travel"),
     COMPACTION_LIVE_RATIO("compaction_live_ratio", "0.5", "sealed segments whose live node images fall below this ratio are compacted"),
@@ -36,6 +40,9 @@ enum Setting {
     LOG_DIRECTORY("log_directory", "", "directory for rotating log files in addition to stderr; empty disables"),
     LOG_ROTATION_MB("log_rotation_mb", "64", "size of one log file before rotation"),
     LOG_FILE_COUNT("log_file_count", "8", "number of rotated log files kept");
+
+    private static final Map<String, String> REMOVED = Map.of(
+            "cache_nodes", "cache_nodes is no longer supported: the node cache is now sized in megabytes. Remove cache_nodes and set cache_mb instead");
 
     private final String key;
     private final String fallback;
@@ -63,8 +70,23 @@ enum Setting {
         return "HSTORE_" + key.toUpperCase();
     }
 
+    static Optional<String> removed(String key) {
+        return Optional.ofNullable(REMOVED.get(normalize(key)));
+    }
+
+    static Map<String, String> removedVariables() {
+        return REMOVED.entrySet().stream().collect(Collectors.toMap(entry -> "HSTORE_" + entry.getKey().toUpperCase(), Map.Entry::getValue));
+    }
+
+    private static String normalize(String key) {
+        return key.toLowerCase().replace('-', '_');
+    }
+
     static Setting of(String key) {
-        String normalized = key.toLowerCase().replace('-', '_');
+        String normalized = normalize(key);
+        removed(normalized).ifPresent(message -> {
+            throw new IllegalArgumentException(message);
+        });
         for (Setting setting : values()) {
             if (setting.key.equals(normalized)) {
                 return setting;

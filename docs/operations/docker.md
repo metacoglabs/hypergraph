@@ -76,7 +76,7 @@ Without a password and without `HSTORE_AUTHENTICATION=off`, the container refuse
 ### Server settings
 
 Every [setting](configuration.md) is available as `HSTORE_<SETTING>`, for example `HSTORE_DURABILITY=async`,
-`HSTORE_LOG_STATEMENT=ddl`, `HSTORE_LOG_MIN_DURATION_MS=250`, `HSTORE_CACHE_NODES=262144`,
+`HSTORE_LOG_STATEMENT=ddl`, `HSTORE_LOG_MIN_DURATION_MS=250`, `HSTORE_CACHE_MB=1024`,
 `HSTORE_STUDIO=off`, `HSTORE_EMBEDDING_PROVIDER=ollama`. Environment variables override
 `/var/lib/hstore/data/hstore.conf`. Flags appended to the `docker run` command line override both:
 

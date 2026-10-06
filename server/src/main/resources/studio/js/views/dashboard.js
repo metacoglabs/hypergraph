@@ -120,7 +120,7 @@ export class DashboardPage {
             pair('Page size', bytes(configuration.pageSize)),
             pair('Durability', configuration.durability),
             pair('WAL mode', configuration.walMode),
-            pair('Node cache', `${count(configuration.cachedNodes)} nodes`),
+            pair('Node cache', bytes(configuration.cacheBytes)),
             pair('History limit', `${count(configuration.historyLimit)} generations`),
             pair('Checkpoint after', bytes(configuration.checkpointWalBytes)),
             pair('Change feed', bytes(engine.feedBytes)),

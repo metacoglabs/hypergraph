@@ -215,7 +215,7 @@ Most nodes fit in 4 KiB, so most reads are a single 4 KiB `pread`. A short read 
 The cache stores **decoded, frozen** `Node` objects, not bytes. A hit therefore costs no decoding and no allocation. The cache has 16 shards; a node goes to shard `mix(pageId) >>> 60`. Each shard has:
 
 * a `ConcurrentHashMap<Long, Slot>` from page id to `Slot(pageId, node, volatile referenced)`;
-* a `Slot[] ring` of capacity `max(16, cache_nodes / 16)` with a CLOCK hand;
+* a byte budget of `max(64 KiB, cache_mb / 16)` and a circular, doubly linked ring of slots with a CLOCK hand. Each slot weighs its page: header plus payload when it was read, the image size when the commit wrote it;
 * a `ReentrantLock` taken only for admission.
 
 **Reads are lock-free.** `get` is a `ConcurrentHashMap.get`, plus setting `referenced = true` if it was clear. The check avoids a redundant volatile write on hot entries.
@@ -223,8 +223,10 @@ The cache stores **decoded, frozen** `Node` objects, not bytes. A hit therefore 
 **Admission (`put`) uses CLOCK second-chance eviction under the shard lock:**
 
 * An entry already holding the same node is left alone.
-* An entry for the same page with a different node is replaced in its ring slot.
-* Otherwise the hand advances, clearing `referenced` bits, until it finds an empty slot or an unreferenced one. That victim is removed from the map, conditionally on the identity of its `Slot`, the new slot takes its place, and the hand moves on.
+* An entry for the same page with a different node is unlinked first, and its bytes are released.
+* A node larger than the shard's whole budget isn't cached.
+* While the new node doesn't fit in the budget, the hand advances, clearing `referenced` bits, until it reaches an unreferenced slot. That victim is unlinked and removed from the map, conditionally on the identity of its `Slot`.
+* The new slot is linked just behind the hand, so it gets a full sweep before it can be evicted.
 
 This approximates LRU. Readers never contend with each other, and they contend with writers only on the map's internal bins.
 

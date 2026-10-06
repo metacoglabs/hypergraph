@@ -49,6 +49,14 @@ final class ServerConfig {
             }
             properties.forEach((key, value) -> config.set(Setting.of(key.toString()), value.toString().strip(), Source.FILE));
         });
+        Setting.removedVariables().forEach((variable, message) -> {
+            if (environment.containsKey(variable)) {
+                throw new IllegalArgumentException(variable + ": " + message);
+            }
+        });
+        commandLine.keySet().forEach(key -> Setting.removed(key).ifPresent(message -> {
+            throw new IllegalArgumentException(message);
+        }));
         for (Setting setting : Setting.values()) {
             Optional.ofNullable(environment.get(setting.environmentVariable()))
                     .ifPresent(value -> config.set(setting, value, Source.ENVIRONMENT));
@@ -104,7 +112,7 @@ final class ServerConfig {
                 .withPageSize(integer(Setting.PAGE_SIZE))
                 .withDurability(Durability.valueOf(string(Setting.DURABILITY).toUpperCase()))
                 .withWalMode(string(Setting.WAL_MODE).equalsIgnoreCase("images") ? WalMode.PAGE_IMAGES : WalMode.PAGE_REFERENCES)
-                .withCachedNodes(integer(Setting.CACHE_NODES))
+                .withCacheBytes(number(Setting.CACHE_MB) << 20)
                 .withCheckpointWalBytes(number(Setting.CHECKPOINT_WAL_MB) << 20)
                 .withHistoryLimit(integer(Setting.HISTORY_LIMIT))
                 .withCompactionLiveRatio(Double.parseDouble(string(Setting.COMPACTION_LIVE_RATIO)))
