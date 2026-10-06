@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 const SAMPLES = 10;
 const UNIT = Array.from({ length: SAMPLES }, (_, index) => {
   const angle = (index / SAMPLES) * Math.PI * 2;

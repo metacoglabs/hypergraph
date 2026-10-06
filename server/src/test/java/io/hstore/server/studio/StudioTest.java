@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 package io.hstore.server.studio;
 
 import io.hstore.db.DatabaseOptions;

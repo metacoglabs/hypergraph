@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 import { button, h, toast } from './dom.js';
 import { count, kind } from './format.js';
 import { typeColor } from './palette.js';

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 const SVG = 'http://www.w3.org/2000/svg';
 
 const ICONS = {

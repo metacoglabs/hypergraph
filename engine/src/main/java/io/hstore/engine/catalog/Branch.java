@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 package io.hstore.engine.catalog;
 
 public record Branch(int id, String name, int parent, long baseGeneration, long createdAt, State state, RootVector roots) {
