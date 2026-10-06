@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 import { api, hql, identifier } from '../api.js';
 import { button, clear, confirmDialog, fill, h, toast } from '../dom.js';
 import { count } from '../format.js';

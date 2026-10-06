@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 import { api } from './api.js';
 import { fill, h, icon, logo, storage, toast } from './dom.js';
 import { AdminPage } from './views/admin.js';

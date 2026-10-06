@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 export class ApiError extends Error {
   constructor(status, code, message, retryable = false) {
     super(message);

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 import { alpha, theme, typeColor } from '../palette.js';
 import { area, contains, paddedHull, traceSmooth } from './geometry.js';
 import { ForceLayout } from './layout.js';

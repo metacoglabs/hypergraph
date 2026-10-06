@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 module io.hstore.db {
     requires transitive io.hstore.engine;
     requires java.net.http;

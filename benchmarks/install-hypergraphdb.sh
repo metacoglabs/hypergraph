@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Metacog Labs
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 set -Eeuo pipefail
 
 commit=99485a1fa52e532351e8418b4f8153d97c72c959

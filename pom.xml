@@ -9,6 +9,20 @@
     <version>0.1.0</version>
     <packaging>pom</packaging>
     <name>HStore</name>
+    <url>https://github.com/metacoglabs/hypergraph</url>
+
+    <organization>
+        <name>Metacog Labs</name>
+        <url>https://github.com/metacoglabs</url>
+    </organization>
+
+    <licenses>
+        <license>
+            <name>PolyForm-Noncommercial-1.0.0</name>
+            <url>https://polyformproject.org/licenses/noncommercial/1.0.0/</url>
+            <comments>Commercial use needs a license from Metacog Labs: krish@getmetacognition.com</comments>
+        </license>
+    </licenses>
 
     <modules>
         <module>engine</module>
@@ -90,6 +104,18 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-jar-plugin</artifactId>
                     <version>3.5.1</version>
+                    <configuration>
+                        <archive>
+                            <manifestEntries>
+                                <Implementation-Title>${project.artifactId}</Implementation-Title>
+                                <Implementation-Version>${project.version}</Implementation-Version>
+                                <Implementation-Vendor>Metacog Labs</Implementation-Vendor>
+                                <License>PolyForm-Noncommercial-1.0.0</License>
+                                <License-Contact>krish@getmetacognition.com</License-Contact>
+                                <Source>https://github.com/metacoglabs/hypergraph</Source>
+                            </manifestEntries>
+                        </archive>
+                    </configuration>
                 </plugin>
                 <plugin>
                     <groupId>org.graalvm.buildtools</groupId>

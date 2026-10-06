@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 const THETA_SQUARED = 0.81;
 const MAX_DEPTH = 24;
 

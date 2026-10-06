@@ -182,5 +182,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 HStore is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE)
-(SPDX: `PolyForm-Noncommercial-1.0.0`). You may use, modify and share it for any noncommercial purpose.
-Commercial use is not covered by this license; contact the maintainers if you need it.
+(SPDX: `PolyForm-Noncommercial-1.0.0`). You may use, modify and share it for any noncommercial purpose as that
+license defines it.
+
+**Commercial use needs a separate commercial license from Metacog Labs.** Anything the noncommercial license
+doesn't cover can be licensed commercially: write to krish@getmetacognition.com. The server prints this notice at
+startup and in `hstore version`.

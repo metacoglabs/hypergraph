@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 package io.hstore.server;
 
 import io.hstore.db.HypergraphDatabase;
@@ -28,6 +31,7 @@ import javax.net.ssl.SSLContext;
 public final class Main {
 
     static final String VERSION = "0.1.0";
+    static final String NOTICE = "Licensed under PolyForm Noncommercial 1.0.0. Commercial use needs a license from Metacog Labs: krish@getmetacognition.com";
 
     private static final String USAGE = """
             usage: hstore <command> [options]
@@ -180,6 +184,7 @@ public final class Main {
             }
             case Command.Version _ -> {
                 IO.println("hstore " + VERSION + " (Java " + Runtime.version() + ")");
+                IO.println(NOTICE);
                 yield 0;
             }
             case Command.Config(Optional<Path> directory) -> {
@@ -282,6 +287,7 @@ public final class Main {
         Logging.configure(config);
         System.Logger log = System.getLogger("hstore.main");
         log.log(System.Logger.Level.INFO, "starting hstore {0} on Java {1}", VERSION, Runtime.version());
+        log.log(System.Logger.Level.INFO, NOTICE);
         String overrides = config.describe();
         if (!overrides.isEmpty()) {
             log.log(System.Logger.Level.INFO, "configuration: {0}", overrides);

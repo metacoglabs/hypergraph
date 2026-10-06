@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Metacog Labs
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 set -Eeuo pipefail
 
 cd "$(dirname "$0")"

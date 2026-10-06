@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 package io.hstore.engine.tree;
 
 public record TreeSchema<V>(int id, String name, FingerprintMode fingerprint, ValueCodec<V> codec, EntryMeasure<V> measure) {

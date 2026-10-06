@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 const HUES = [
   '#6d83f2', '#f2a33a', '#2fbf8f', '#ef5f7f', '#a17cf0', '#2fb3d6',
   '#e676c2', '#8cc34b', '#ff8a4c', '#4fc4b0', '#d0a72a', '#8d9bb5'

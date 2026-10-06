@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 const integer = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 const decimal = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
