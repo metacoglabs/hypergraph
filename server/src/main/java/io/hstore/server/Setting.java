@@ -1,5 +1,9 @@
 package io.hstore.server;
 
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
 enum Setting {
     LISTEN_ADDRESS("listen_address", "127.0.0.1", "interface the TCP server binds; use 0.0.0.0 inside containers"),
     PORT("port", "7432", "TCP port of the HQL wire protocol"),
@@ -37,6 +41,9 @@ enum Setting {
     LOG_ROTATION_MB("log_rotation_mb", "64", "size of one log file before rotation"),
     LOG_FILE_COUNT("log_file_count", "8", "number of rotated log files kept");
 
+    private static final Map<String, String> REMOVED = Map.of(
+            "cache_nodes", "cache_nodes is no longer supported: the node cache is now sized in megabytes. Remove cache_nodes and set cache_mb instead");
+
     private final String key;
     private final String fallback;
     private final String description;
@@ -63,8 +70,23 @@ enum Setting {
         return "HSTORE_" + key.toUpperCase();
     }
 
+    static Optional<String> removed(String key) {
+        return Optional.ofNullable(REMOVED.get(normalize(key)));
+    }
+
+    static Map<String, String> removedVariables() {
+        return REMOVED.entrySet().stream().collect(Collectors.toMap(entry -> "HSTORE_" + entry.getKey().toUpperCase(), Map.Entry::getValue));
+    }
+
+    private static String normalize(String key) {
+        return key.toLowerCase().replace('-', '_');
+    }
+
     static Setting of(String key) {
-        String normalized = key.toLowerCase().replace('-', '_');
+        String normalized = normalize(key);
+        removed(normalized).ifPresent(message -> {
+            throw new IllegalArgumentException(message);
+        });
         for (Setting setting : values()) {
             if (setting.key.equals(normalized)) {
                 return setting;

@@ -49,6 +49,14 @@ final class ServerConfig {
             }
             properties.forEach((key, value) -> config.set(Setting.of(key.toString()), value.toString().strip(), Source.FILE));
         });
+        Setting.removedVariables().forEach((variable, message) -> {
+            if (environment.containsKey(variable)) {
+                throw new IllegalArgumentException(variable + ": " + message);
+            }
+        });
+        commandLine.keySet().forEach(key -> Setting.removed(key).ifPresent(message -> {
+            throw new IllegalArgumentException(message);
+        }));
         for (Setting setting : Setting.values()) {
             Optional.ofNullable(environment.get(setting.environmentVariable()))
                     .ifPresent(value -> config.set(setting, value, Source.ENVIRONMENT));
