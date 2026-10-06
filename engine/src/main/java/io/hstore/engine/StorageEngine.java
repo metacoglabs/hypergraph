@@ -288,7 +288,7 @@ public final class StorageEngine implements AutoCloseable {
     public EngineStats stats() {
         TransactionManager.Statistics txn = transactions.statistics();
         return new EngineStats(transactions.current().id(), txn.commits(), txn.rebases(), txn.conflicts(),
-                pages.pagesRead(), pages.pagesWritten(), pages.bytesWritten(), cache.hits(), cache.misses(),
+                pages.pagesRead(), pages.pagesWritten(), pages.bytesWritten(), pages.bytesRead(), cache.hits(), cache.misses(),
                 wal.bytesAppended(), wal.segmentCount(), feed.size(), pages.segments());
     }
 
