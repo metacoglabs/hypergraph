@@ -5,6 +5,7 @@ import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.CommitEvent;
 import io.hstore.engine.page.ByteCursor;
+import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageId;
 import io.hstore.engine.page.SegmentInfo;
 import io.hstore.engine.topology.EdgeKind;
@@ -564,6 +565,26 @@ class EngineTest {
         }
         try (StorageEngine engine = StorageEngine.open(directory, options)) {
             assertEquals(100L, (long) engine.read(snapshot -> snapshot.atomsOfType(0, EDGE).mapToObj(snapshot::requireEdge).mapToLong(Hyperedge::size).sum()));
+        }
+    }
+
+    @Test
+    void bytesReadCountWhatComesOffTheSegmentFiles() {
+        try (StorageEngine engine = StorageEngine.open(directory, small())) {
+            long edge = engine.write(txn -> txn.createEdge(EDGE, EdgeKind.SET));
+            engine.write(txn -> {
+                for (int i = 0; i < 2_000; i++) {
+                    txn.insert(edge, txn.createNode(NODE, "read-" + i));
+                }
+                return null;
+            });
+        }
+        try (StorageEngine engine = StorageEngine.open(directory, small())) {
+            assertEquals(2_000, (long) engine.read(snapshot -> snapshot.atomsOfType(0, EDGE).mapToObj(snapshot::requireEdge).mapToLong(Hyperedge::size).sum()));
+            EngineStats stats = engine.stats();
+            assertTrue(stats.pagesRead() > 0);
+            assertTrue(stats.dataBytesRead() >= stats.pagesRead() * PageHeader.SIZE, "bytes " + stats.dataBytesRead() + " for " + stats.pagesRead() + " pages");
+            assertTrue(stats.dataBytesRead() <= stats.pagesRead() * (long) engine.options().pageSize(), "bytes " + stats.dataBytesRead() + " for " + stats.pagesRead() + " pages");
         }
     }
 

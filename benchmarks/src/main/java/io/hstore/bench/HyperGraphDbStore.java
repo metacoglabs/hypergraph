@@ -33,6 +33,7 @@ final class HyperGraphDbStore implements Store {
     private HGPersistentHandle[] edges;
     private HGPersistentHandle large;
     private long writtenBeforeReopen;
+    private long readBeforeReopen;
 
     private final long cacheBytes;
 
@@ -288,8 +289,15 @@ final class HyperGraphDbStore implements Store {
     }
 
     @Override
+    public long bytesRead() {
+        EnvironmentStats stats = environment().getStats(new StatsConfig());
+        return readBeforeReopen + stats.getNSequentialReadBytes() + stats.getNRandomReadBytes();
+    }
+
+    @Override
     public void reopen(Runnable whileClosed) {
         writtenBeforeReopen = bytesWritten();
+        readBeforeReopen = bytesRead();
         graph.close();
         whileClosed.run();
         graph = HGEnvironment.get(directory.toString(), configuration);

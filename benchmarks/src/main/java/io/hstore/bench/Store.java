@@ -59,6 +59,8 @@ interface Store extends AutoCloseable {
 
     long bytesWritten();
 
+    long bytesRead();
+
     Path directory();
 
     @Override

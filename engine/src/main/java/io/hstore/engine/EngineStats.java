@@ -12,6 +12,7 @@ public record EngineStats(
         long pagesRead,
         long pagesWritten,
         long dataBytesWritten,
+        long dataBytesRead,
         long cacheHits,
         long cacheMisses,
         long walBytes,
