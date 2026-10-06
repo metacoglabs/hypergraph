@@ -1,6 +1,5 @@
 package io.hstore.engine.maintenance;
 
-import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.catalog.SlotRegistry;
 import io.hstore.engine.page.PageId;
@@ -8,7 +7,6 @@ import io.hstore.engine.page.PageStore;
 import io.hstore.engine.page.SegmentInfo;
 import io.hstore.engine.page.SegmentState;
 import io.hstore.engine.tree.TreeWalker;
-import io.hstore.engine.tree.WriteScope;
 import io.hstore.engine.txn.TransactionManager;
 
 import java.util.Comparator;
@@ -69,16 +67,9 @@ public final class Compactor {
         victims.forEach(id -> pages.transition(id, SegmentState.COMPACTING, 0));
         Set<Integer> victimSet = Set.copyOf(victims);
         LongPredicate moving = pageId -> victimSet.contains(PageId.segmentOf(pageId));
-        TreeWalker walker = new TreeWalker(transactions.source());
-        List<Integer> branches = transactions.current().branches().values().stream()
-                .filter(Branch::isActive).map(Branch::id).toList();
-        for (int branch : branches) {
-            generation = transactions.rewrite(branch, roots -> roots.map((slot, ref) ->
-                    walker.relocate(ref, slots.slot(slot).schema(), moving, new WriteScope())));
-        }
-        long retiredAt = generation;
+        long retiredAt = transactions.relocate(moving);
         victims.forEach(id -> pages.transition(id, SegmentState.RETIRED, retiredAt));
-        return new Report(live, victims, generation);
+        return new Report(live, victims, retiredAt);
     }
 
     public List<Integer> reclaim() {

@@ -26,7 +26,7 @@ record CommitEvent(long generation, long txnId, long wallTime, int branch,
 * `members` is the workspace's `memberChanges()` list in emission order: `MemberChange.Added(edge, incidence, locator)`, `Removed(edge, incidence, locator)`, `Updated(edge, before, after, locatorBefore, locatorAfter)`. The locator is the member id for `SET` edges and the order label (position key in the order tree) for `ORDERED` edges (`Hyperedge.locator`).
 * `slots` is the workspace's `slotChanges()`: one `SlotChange(slot, key, before, after)` per effective write to a **primary** slot (`Workspace.write` records nothing when `before.equals(after)` and nothing for derived slots). Derived indexes are not in the feed; consumers that need them recompute or read the tree.
 
-`CommitEvent.isEmpty()` is true when both lists are empty. Empty events are never logged: `createBranch`, `closeBranch` and compaction (`rewrite`) commits advance the generation but leave no feed entry. Consumers must therefore treat generation numbers in the feed as **increasing, not contiguous**.
+`CommitEvent.isEmpty()` is true when both lists are empty. Empty events are never logged: `createBranch`, `closeBranch` and compaction (`relocate`) commits advance the generation but leave no feed entry. Consumers must therefore treat generation numbers in the feed as **increasing, not contiguous**.
 
 ## 2. When events are written
 

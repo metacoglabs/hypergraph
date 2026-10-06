@@ -87,14 +87,14 @@ Liveness is exposed as `StorageEngine.liveness()` (live bytes per segment). The 
 
 `Compactor.compact(liveThreshold)` (default threshold `compaction_live_ratio = 0.5`):
 
-1. **Choose victims.** A victim is a `SEALED` segment, not the active one, with `live bytes < allocated bytes × threshold`, so the ratio is *live bytes / bytes written*. Candidates are ordered from emptiest to fullest. The background pass takes only the first one (`compact(threshold, 1)`), which bounds how long a single relocation holds the commit lock; `COMPACT` takes all of them. If there are no victims, it reports and returns.
+1. **Choose victims.** A victim is a `SEALED` segment, not the active one, with `live bytes < allocated bytes × threshold`, so the ratio is *live bytes / bytes written*. Candidates are ordered from emptiest to fullest. The background pass takes only the first one (`compact(threshold, 1)`); `COMPACT` takes all of them. If there are no victims, it reports and returns.
 2. Mark the victims `COMPACTING`.
-3. **Relocate.** For every **active** branch of the current generation, call `transactions.rewrite(branch, roots -> roots.map(relocate))`. `TreeWalker.relocate(ref, schema, moving, scope)` rebuilds as a fresh `Ref.Pending` copy:
-   * every stored node whose page id lies in a victim segment;
-   * every ancestor of such a node;
-   * every leaf whose nested trees changed.
+3. **Relocate** (`TransactionManager.relocate(moving)`), in three steps so that commits keep going while pages are copied:
+   1. **Snapshot**, under the commit lock for a moment: take the latest appended generation and reserve a transaction id.
+   2. **Copy**, without the commit lock. For every **active** branch of the snapshot, `TreeWalker.relocate(ref, schema, moving, scope, reached)` rebuilds as a fresh `Ref.Pending` copy every stored node whose page id lies in a victim segment, every ancestor of such a node, and every leaf whose nested trees changed. Subtrees that touch no victim are returned unchanged and stay shared, and every page the walk reaches is recorded. The copies are materialized and written to the active segment right away, with their WAL records kept for later under the reserved transaction id. `TreeWalker.pairMoves` then walks old and new trees side by side to map each old page id to its copy.
+   3. **Swap**, under the commit lock, one branch at a time. `TreeWalker.adopt` walks the branch's **latest** roots: a page with a copy is replaced by the copy; a page that existed at the snapshot without a copy is kept as it is, since nothing below it moved; and a page written after the snapshot, by a commit that ran during the copy, is descended into and rebuilt if anything below it moved. Only that last kind costs work under the lock, and there are only as many as commits wrote during the copy. The result is committed like any other commit, carrying the copies' WAL records, and `relocationFence` moves to its generation. Branches created during the copy are swapped the same way.
 
-   Subtrees that touch no victim are returned unchanged and stay shared. `rewrite` publishes the new root vector as a normal commit: it takes the commit lock, materializes the pending nodes into the active segment, appends the WAL records and goes through the group-commit barrier. It also sets `relocationFence` to the new generation id.
+   Without the swap, a crash leaves the copies as unreferenced pages in the active segment, which a later compaction reclaims; the data is unchanged.
 4. Mark the victims `RETIRED` with `retiredAt = generation`. Retained history is **not** truncated. Generations older than `retiredAt` keep pointing at the old images in the victims, which stay on disk and readable, so `AT GENERATION` and `AS OF` keep working across a compaction. The victims are reclaimed once `history_limit` has rolled past `retiredAt`.
 
 `StorageEngine.compact()` then checkpoints, which persists the new segment states and roots, and calls `reclaim()`.

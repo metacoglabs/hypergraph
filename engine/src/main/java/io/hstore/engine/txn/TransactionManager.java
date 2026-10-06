@@ -21,6 +21,7 @@ import io.hstore.engine.tree.PagedNodeSource;
 import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeSchema;
+import io.hstore.engine.tree.TreeWalker;
 import io.hstore.engine.tree.WriteScope;
 import io.hstore.engine.wal.WalRecord;
 import io.hstore.engine.wal.WriteAheadLog;
@@ -29,11 +30,14 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -41,8 +45,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.LongPredicate;
 import java.util.function.Supplier;
-import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 public final class TransactionManager {
@@ -305,22 +309,61 @@ public final class TransactionManager {
         return new WalRecord.BranchMeta(txn, branch.id(), branch.name(), branch.parent(), branch.baseGeneration(), branch.createdAt(), branch.state());
     }
 
-    public long rewrite(int branchId, UnaryOperator<RootVector> rewrite) {
-        Appended appended;
+    public long relocate(LongPredicate moving) {
+        Generation snapshot;
+        long txnId;
         commitLock.lock();
         try {
-            Generation latest = head.get();
-            Branch branch = latest.branch(branchId);
-            RootVector roots = rewrite.apply(branch.roots());
-            if (roots.sameAs(branch.roots())) {
-                return latest.id();
-            }
-            appended = append(latest, branch.withRoots(roots), txns.getAndIncrement(), List.of(), List.of(), List.of(), Long.MAX_VALUE);
-            relocationFence = appended.pending().generation().id();
+            snapshot = head.get();
+            txnId = txns.getAndIncrement();
         } finally {
             commitLock.unlock();
         }
-        return committer.await(appended.pending()).id();
+        TreeWalker walker = new TreeWalker(storage.source());
+        Set<Long> reached = new HashSet<>();
+        Map<Long, Ref> moved = new HashMap<>();
+        List<WalRecord> records = new ArrayList<>();
+        List<PageWrite> writes = new ArrayList<>();
+        Materializer materializer = materializer(snapshot.id() + 1, txnId, records, writes);
+        WriteScope copies = new WriteScope();
+        snapshot.branches().values().stream().filter(Branch::isActive).forEach(branch -> branch.roots().roots().forEach((slot, ref) -> {
+            TreeSchema<?> schema = storage.slots().slot(slot).schema();
+            Ref copy = materializer.materialize(walker.relocate(ref, schema, moving, copies, reached::add), schema);
+            walker.pairMoves(ref, copy, schema, moved);
+        }));
+        writes.forEach(write -> storage.pages().write(write.pageId(), write.image()));
+        pagesWritten.add(materializer.pagesWritten());
+        Set<Integer> swapped = new HashSet<>();
+        List<WalRecord> unlogged = records;
+        long generation = snapshot.id();
+        while (true) {
+            Appended appended = null;
+            commitLock.lock();
+            try {
+                Generation latest = head.get();
+                Branch branch = latest.branches().values().stream()
+                        .filter(Branch::isActive).filter(candidate -> !swapped.contains(candidate.id()))
+                        .findFirst().orElse(null);
+                if (branch == null) {
+                    return generation;
+                }
+                swapped.add(branch.id());
+                WriteScope merge = new WriteScope();
+                RootVector roots = branch.roots().map((slot, ref) ->
+                        walker.adopt(ref, storage.slots().slot(slot).schema(), moved, reached::contains, merge));
+                if (!roots.sameAs(branch.roots())) {
+                    appended = append(latest, branch.withRoots(roots), unlogged.isEmpty() ? txns.getAndIncrement() : txnId,
+                            List.of(), List.of(), unlogged, Long.MAX_VALUE);
+                    unlogged = List.of();
+                    relocationFence = appended.pending().generation().id();
+                }
+            } finally {
+                commitLock.unlock();
+            }
+            if (appended != null) {
+                generation = committer.await(appended.pending()).id();
+            }
+        }
     }
 
     public <T> T exclusive(Supplier<T> action) {
