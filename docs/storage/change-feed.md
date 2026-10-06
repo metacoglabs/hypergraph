@@ -35,7 +35,7 @@ sequenceDiagram
     autonumber
     participant TM as TransactionManager.append (commit lock)
     participant WAL as WriteAheadLog
-    participant G as GroupCommitter flusher
+    participant G as GroupCommitter leader
     participant CF as ChangeFeed
     participant S as Subscribers
     TM->>TM: event = CommitEvent(g, txn, wallTime, branch, members, slots)
@@ -53,7 +53,7 @@ sequenceDiagram
 Two copies exist:
 
 1. The **WAL `Feed` record** (type 5), written inside the commit before the `Commit` record. It is the durable copy and is covered by the commit's atomicity.
-2. The **feed segments**, appended by the group-commit flusher during publication: after the commit is durable (under `SYNC`) and **immediately after** the generation becomes `current`. Appends happen on the single flusher thread in queue order, so the feed is in generation order.
+2. The **feed segments**, appended during publication by the committer leading the batch: after the commit is durable (under `SYNC`) and **immediately after** the generation becomes `current`. Only one leader runs at a time and it publishes in queue order, so the feed is in generation order.
 
 Appending after `current.set(next)` guarantees that a subscriber told about generation `g` can read it: any transaction it starts sees `g` or later. Subscribers such as `MaterializedViews` look up the atoms an event mentions, so an event that arrived before its commit was visible would make them skip changes they can't yet see. The opposite direction is not guaranteed: a reader whose snapshot is `g` may find `feed.lastGeneration()` still at `g - 1` while `g` is being published. Code that combines a snapshot with the feed replays only up to `min(snapshot, feed.lastGeneration())` (`SemanticPlane`, `MaterializedViews.refresh`) and picks up the rest from the next event. A committing client is acknowledged only after both steps, so its own commit is always in the feed by then. The commit is durable before either step, so an event is never rolled back by a process crash.
 

@@ -116,8 +116,8 @@ keep the matrix green. Add a `CrashPoint` when you introduce a new durability st
 * Prefer records for data, sealed interfaces for closed hierarchies, and exhaustive `switch` with pattern
   matching and record deconstruction. Use `_` for unused bindings.
 * Streams and small pure functions where natural. Clear loops on hot paths.
-* Virtual threads for request handling. Platform threads only where blocking I/O must not pin a carrier,
-  as in the group-commit flusher.
+* Virtual threads for request handling. Platform threads only for long-running background work, such as
+  the maintenance thread.
 * **Deterministic hashing.** Every fingerprint, summary or hash that is persisted or compared across
   processes must be computed from explicit field values. Never use `Enum.hashCode()`, `Record.hashCode()`,
   `Object.hashCode()` or `String.hashCode()` of a record's `toString` in an `EntryMeasure`, a summary or an

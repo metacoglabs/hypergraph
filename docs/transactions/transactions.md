@@ -223,7 +223,7 @@ Under `SNAPSHOT` both commits succeed (R replays `Insert(p)` into B, which L nev
 |---|---|
 | Read `head`, duplicate-request check | Executing the transaction's operations (concurrent, lock-free) |
 | Fast/slow decision, read validation, replay | Spilling bulk-loaded subtrees |
-| Materialization of new nodes into page images (`Materializer`) | `fsync` of data segments and WAL (`GroupCommitter` flusher) |
+| Materialization of new nodes into page images (`Materializer`) | `fsync` of data segments and WAL (`GroupCommitter` leader) |
 | WAL append of `Begin`, `Page`/`PageRef`, `Root`, `BranchMeta`, `Feed` records | Publication: feed append, `current.set`, `history.put` |
 | Data page writes into the OS page cache | Waking the committing thread |
 | WAL append of `Commit`, `head.set(next)`, `committer.submit(pending)` | |
@@ -234,7 +234,7 @@ Because the lock is released before waiting for durability, the next committer c
 
 ## 9. Group commit
 
-`GroupCommitter` owns one platform daemon thread named `hstore-group-commit` and a FIFO `Deque<Pending>`.
+`GroupCommitter` has no thread of its own. It keeps a FIFO `Deque<Pending>`, and the committers waiting on it take turns leading.
 
 ```text
 Pending(generation, publication: Runnable, published: boolean)
@@ -243,22 +243,23 @@ Barrier.makeDurable(batchSize)    -- TransactionManager.makeDurable
 
 Protocol:
 
-1. `submit(pending)` (called inside the commit lock, so queue order equals WAL commit order) appends to the queue and signals `submitted`.
-2. The flusher waits until the queue is non-empty, copies **the whole queue** as the batch, releases the lock, and calls `barrier.makeDurable(batch.size())` once.
-3. It then runs each batch member's `publication` in order: `feed.append(event)` for non-empty events, then `current.set(next)`, `history.put`, `trimHistory()`, and `CrashPoint.CATALOG_PUBLISH`. Appending to the feed **before** making the generation current gives readers an invariant: any thread that observes `current == g` also observes `feed.lastGeneration()` covering every non-empty commit up to `g`. The semantic plane relies on this for `FRESH` queries (see [change feed](../storage/change-feed.md#5-consumers)).
-4. Under the lock it marks the batch `published`, pops it from the queue, updates `batches`/`flushedCommits`, and `signalAll`s `progressed`.
-5. `await(pending)` blocks (uninterruptibly) until its own `published` flag is set.
+1. `submit(pending)` (called inside the commit lock, so queue order equals WAL commit order) appends to the queue.
+2. `await(pending)` loops until its own `published` flag is set. If another committer is leading, it waits (uninterruptibly) on `progressed`. Otherwise it becomes the **leader**: it copies **the whole queue** as the batch, releases the lock, and calls `barrier.makeDurable(batch.size())` once.
+3. The leader then runs each batch member's `publication` in order: `current.set(next)`, `history.put`, then `feed.append(event)` for non-empty events, `trimHistory()`, and `CrashPoint.CATALOG_PUBLISH`. Making the generation current **before** appending to the feed means a subscriber can always read the commit it is told about (see [change feed](../storage/change-feed.md#2-when-events-are-written)).
+4. It retakes the lock, marks the batch `published`, pops it from the queue, updates `batches`/`flushedCommits`, stops leading, and `signalAll`s `progressed`. A waiter whose commit wasn't in that batch becomes the next leader.
 
-`makeDurable` for `Durability.SYNC`: if `walMode == PAGE_REFERENCES`, `pages.sync()` (force every dirty data segment); reach `DATA_SYNC`; `wal.sync()`; reach `WAL_SYNC`. For `Durability.ASYNC` it returns immediately: publication still happens in order on the flusher thread, but nothing is forced. A single `wal.sync()` covers every commit record appended so far, including records appended after the batch was copied; those commits are simply published in the next batch.
+A lone committer therefore finishes on its own thread, with no hand-off to another thread. Committers that arrive while a leader is syncing queue up and are published together by the next leader, sharing one `fsync`. Only one leader runs at a time, so publication stays in generation order. The durability step runs on the committing thread, which in the server is usually a virtual thread; the JDK compensates for virtual threads blocked in file I/O by adding a carrier thread temporarily.
 
-Failure handling: any `Throwable` from the barrier or a publication is stored in `failure`, logged at `ERROR`, and `progressed` is signalled; the flusher exits. Two checks consult it:
+`makeDurable` for `Durability.SYNC`: if `walMode == PAGE_REFERENCES`, `pages.sync()` (force every dirty data segment); reach `DATA_SYNC`; `wal.sync()`; reach `WAL_SYNC`. For `Durability.ASYNC` it returns immediately: the leader still publishes in order, but nothing is forced. A single `wal.sync()` covers every commit record appended so far, including records appended after the batch was copied; those commits are simply published in the next batch.
+
+Failure handling: any `Throwable` from the barrier or a publication is stored in `failure`, logged at `ERROR`, and `progressed` is signalled. The leader rethrows it, and every waiting and later committer gets it too. Two checks consult it:
 
 | Check | Used by | Fails when |
 |---|---|---|
 | `failIfFailed()` | `await`, `drain` | a durability failure was recorded: rethrows an `Error` as-is (this is how `CrashPoint.SimulatedCrash` reaches the committing thread in tests), wraps anything else in `RETRYABLE_IO` |
 | `failIfBroken()` | `submit` | `failIfFailed()` fails, or the committer is closed (`IllegalStateException: the commit pipeline is closed`) |
 
-`close()` sets `closed`, wakes the flusher, and joins it. The flusher drains the remaining queue before exiting because its wait condition is `queue.isEmpty() && !closed`. Because `await` does not treat `closed` as an error, a commit that was submitted before shutdown is reported to its caller exactly as it ends up on disk: published and acknowledged, never "failed but durable". `submit` still rejects work after `close()`. It runs inside the commit lock after the `Commit` record has been appended and `head` advanced, so a commit rejected there is in the WAL and recovery would replay it (the same "outcome unknown" case as a crash at `COMMIT_APPEND`, see [WAL and recovery](wal-and-recovery.md#10-what-the-crash-tests-prove)). `TransactionManager.shutdown()` closes the committer while holding the commit lock, so no commit can reach `submit` after close through the normal paths; `StorageEngine.requireOpen()` rejects new transactions once the engine is closed.
+`close()` sets `closed` and leads until the queue is empty, unless the pipeline has already failed. `drain()` leads the same way. Because `await` does not treat `closed` as an error, a commit that was submitted before shutdown is reported to its caller exactly as it ends up on disk: published and acknowledged, never "failed but durable". `submit` still rejects work after `close()`. It runs inside the commit lock after the `Commit` record has been appended and `head` advanced, so a commit rejected there is in the WAL and recovery would replay it (the same "outcome unknown" case as a crash at `COMMIT_APPEND`, see [WAL and recovery](wal-and-recovery.md#10-what-the-crash-tests-prove)). `TransactionManager.shutdown()` closes the committer while holding the commit lock, so no commit can reach `submit` after close through the normal paths; `StorageEngine.requireOpen()` rejects new transactions once the engine is closed.
 
 `averageBatch()` (`flushedCommits / batches`) is exported as `Statistics.averageGroupCommit` and appears on the Studio dashboard.
 
@@ -271,7 +272,7 @@ sequenceDiagram
     participant TM as TransactionManager (commitLock)
     participant W as WriteAheadLog
     participant D as PageStore
-    participant G as GroupCommitter flusher
+    participant G as GroupCommitter leader
     participant F as ChangeFeed
     C->>TM: commit(txn)
     activate TM
@@ -298,7 +299,7 @@ sequenceDiagram
     participant A as Txn A
     participant B as Txn B
     participant L as commitLock
-    participant G as flusher
+    participant G as commit leader
     participant Disk as fsync
     A->>L: lock, append records + Commit(g1), submit(g1), unlock
     A->>G: await(g1)
