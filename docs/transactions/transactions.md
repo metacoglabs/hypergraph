@@ -228,7 +228,7 @@ Under `SNAPSHOT` both commits succeed (R replays `Insert(p)` into B, which L nev
 | Data page writes into the OS page cache | Waking the committing thread |
 | WAL append of `Commit`, `head.set(next)`, `committer.submit(pending)` | |
 
-The same lock guards `system(...)` (internal writes such as the dictionary), `createBranch`, `closeBranch` and `rewrite` (compaction). `exclusive(action)` takes the lock **and** drains the committer, which is how `Checkpointer.checkpoint()` obtains a quiescent point where `current == head` and every appended commit is durable and published.
+The same lock guards `system(...)` (internal writes such as the dictionary), `createBranch`, `closeBranch` and the swap step of `relocate` (compaction), which holds it only to point the latest roots at the already-written copies. `exclusive(action)` takes the lock **and** drains the committer, which is how `Checkpointer.checkpoint()` obtains a quiescent point where `current == head` and every appended commit is durable and published.
 
 Because the lock is released before waiting for durability, the next committer can append while the previous batch is being synced. This pipelining is what lets group commit amortise `fsync`.
 
@@ -344,10 +344,10 @@ Had T2 also touched `m1`, or had `E` been an `ORDERED` edge, the overlap check w
 
 ## 10. Branch operations and internal writes
 
-`system(branchId, work)`, `createBranch`, `closeBranch` and `rewrite` reuse `append` and the group committer, so they are durable and ordered exactly like user commits:
+`system(branchId, work)`, `createBranch`, `closeBranch` and `relocate` reuse `append` and the group committer, so they are durable and ordered exactly like user commits:
 
 * `createBranch` appends a `BranchMeta` record and a branch whose roots are the parent's current roots (copy-on-write makes this O(number of slots)). Names must be unique among active branches; the new id is one past the largest existing id.
 * `closeBranch` (`MERGED` or `DROPPED`, never for `MAIN`) empties the root vector so the branch's pages become unreachable.
-* `rewrite` (compaction) replaces roots without member or slot changes and sets the relocation fence.
+* `relocate` (compaction) copies pages outside the lock, then replaces roots without member or slot changes and sets the relocation fence ([maintenance.md](../storage/maintenance.md#compaction)).
 
 These commits carry no member or slot changes, so their `CommitEvent` is empty and nothing is written to the change feed (see [change feed](../storage/change-feed.md)).
