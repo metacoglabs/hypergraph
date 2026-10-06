@@ -35,18 +35,16 @@ final class GroupCommitter implements AutoCloseable {
 
     private final Barrier barrier;
     private final ReentrantLock lock = new ReentrantLock();
-    private final Condition submitted = lock.newCondition();
     private final Condition progressed = lock.newCondition();
     private final Deque<Pending> queue = new ArrayDeque<>();
-    private final Thread flusher;
     private Throwable failure;
     private boolean closed;
+    private boolean leading;
     private long batches;
     private long flushedCommits;
 
     GroupCommitter(Barrier barrier) {
         this.barrier = barrier;
-        this.flusher = Thread.ofPlatform().name("hstore-group-commit").daemon().start(this::flushLoop);
     }
 
     void submit(Pending pending) {
@@ -54,7 +52,6 @@ final class GroupCommitter implements AutoCloseable {
         try {
             failIfBroken();
             queue.addLast(pending);
-            submitted.signal();
         } finally {
             lock.unlock();
         }
@@ -64,8 +61,7 @@ final class GroupCommitter implements AutoCloseable {
         lock.lock();
         try {
             while (!pending.published) {
-                failIfFailed();
-                progressed.awaitUninterruptibly();
+                advance();
             }
             return pending.generation;
         } finally {
@@ -77,8 +73,7 @@ final class GroupCommitter implements AutoCloseable {
         lock.lock();
         try {
             while (!queue.isEmpty()) {
-                failIfFailed();
-                progressed.awaitUninterruptibly();
+                advance();
             }
             failIfFailed();
         } finally {
@@ -93,6 +88,40 @@ final class GroupCommitter implements AutoCloseable {
         } finally {
             lock.unlock();
         }
+    }
+
+    private void advance() {
+        failIfFailed();
+        if (leading || queue.isEmpty()) {
+            progressed.awaitUninterruptibly();
+            return;
+        }
+        leading = true;
+        List<Pending> batch = new ArrayList<>(queue);
+        Throwable broken = null;
+        lock.unlock();
+        try {
+            barrier.makeDurable(batch.size());
+            batch.forEach(pending -> pending.publication.run());
+        } catch (Throwable thrown) {
+            broken = thrown;
+        } finally {
+            lock.lock();
+        }
+        leading = false;
+        if (broken != null) {
+            LOG.log(System.Logger.Level.ERROR, "commit pipeline failed; the engine must be restarted", broken);
+            failure = broken;
+        } else {
+            batch.forEach(pending -> {
+                pending.published = true;
+                queue.removeFirst();
+            });
+            batches++;
+            flushedCommits += batch.size();
+        }
+        progressed.signalAll();
+        failIfFailed();
     }
 
     private void failIfBroken() {
@@ -111,63 +140,20 @@ final class GroupCommitter implements AutoCloseable {
         }
     }
 
-    private void flushLoop() {
-        while (true) {
-            List<Pending> batch;
-            lock.lock();
-            try {
-                while (queue.isEmpty() && !closed) {
-                    submitted.awaitUninterruptibly();
-                }
-                if (queue.isEmpty()) {
-                    return;
-                }
-                batch = new ArrayList<>(queue);
-            } finally {
-                lock.unlock();
-            }
-            try {
-                barrier.makeDurable(batch.size());
-                batch.forEach(pending -> pending.publication.run());
-            } catch (Throwable broken) {
-                LOG.log(System.Logger.Level.ERROR, "commit pipeline failed; the engine must be restarted", broken);
-                lock.lock();
-                try {
-                    failure = broken;
-                    progressed.signalAll();
-                } finally {
-                    lock.unlock();
-                }
-                return;
-            }
-            lock.lock();
-            try {
-                batch.forEach(pending -> {
-                    pending.published = true;
-                    queue.removeFirst();
-                });
-                batches++;
-                flushedCommits += batch.size();
-                progressed.signalAll();
-            } finally {
-                lock.unlock();
-            }
-        }
-    }
-
     @Override
     public void close() {
         lock.lock();
         try {
             closed = true;
-            submitted.signalAll();
+            while (!queue.isEmpty() && failure == null) {
+                try {
+                    advance();
+                } catch (RuntimeException | Error stopped) {
+                    return;
+                }
+            }
         } finally {
             lock.unlock();
-        }
-        try {
-            flusher.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         }
     }
 }
