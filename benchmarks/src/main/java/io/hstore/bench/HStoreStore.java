@@ -250,7 +250,7 @@ final class HStoreStore implements Store {
 
     @Override
     public long bytesRead() {
-        return readBeforeReopen + database.engine().stats().pagesRead() * options.engine().pageSize();
+        return readBeforeReopen + database.engine().stats().dataBytesRead();
     }
 
     @Override

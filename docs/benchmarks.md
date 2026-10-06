@@ -137,8 +137,8 @@ aren't counted.
 | write amplification | bytes written (above) | 8 bytes per id plus the value: `node-<i>` for a new node, 24 bytes for an updated value, `(cardinality + 1) × 8` for a new or deleted hyperedge, 16 bytes for a removed member |
 | read amplification | bytes read from storage | 8 bytes per id the workload returned (its checksum counts them) |
 
-HStore always reads whole pages, so its bytes read are pages read times the page size. JE reports sequential plus
-random read bytes. Reads served from a cache read nothing from storage, so read amplification mostly shows up for
+HStore counts the bytes it reads from segment files (`EngineStats.dataBytesRead`): a first read of up to 4 KiB,
+then the rest of the page image if it's bigger. JE reports sequential plus random read bytes. Reads served from a cache read nothing from storage, so read amplification mostly shows up for
 cold reads and with a small `CACHE_MB`. The logical sizes are rough estimates; compare the two stores against each
 other rather than reading the ratios as absolute numbers.
 
