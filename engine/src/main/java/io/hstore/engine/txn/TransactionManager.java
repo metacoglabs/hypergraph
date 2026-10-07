@@ -337,10 +337,11 @@ public final class TransactionManager {
             pairings.add(() -> walker.pairMoves(ref, copy, schema, moved));
         }));
         writes.forEach(write -> storage.pages().write(write.pageId(), write.image()));
+        storage.wal().append(records);
         pairings.forEach(Runnable::run);
         pagesWritten.add(materializer.pagesWritten());
         Set<Integer> swapped = new HashSet<>();
-        List<WalRecord> unlogged = records;
+        boolean committed = false;
         long generation = snapshot.id();
         while (true) {
             Appended appended = null;
@@ -351,6 +352,9 @@ public final class TransactionManager {
                         .filter(Branch::isActive).filter(candidate -> !swapped.contains(candidate.id()))
                         .findFirst().orElse(null);
                 if (branch == null) {
+                    if (!committed && !records.isEmpty()) {
+                        logAbort(txnId);
+                    }
                     return generation;
                 }
                 swapped.add(branch.id());
@@ -358,9 +362,9 @@ public final class TransactionManager {
                 RootVector roots = branch.roots().map((slot, ref) ->
                         walker.adopt(ref, storage.slots().slot(slot).schema(), moved, reached::contains, merge));
                 if (!roots.sameAs(branch.roots())) {
-                    appended = append(latest, branch.withRoots(roots), unlogged.isEmpty() ? txns.getAndIncrement() : txnId,
-                            List.of(), List.of(), unlogged, Long.MAX_VALUE);
-                    unlogged = List.of();
+                    appended = append(latest, branch.withRoots(roots), committed ? txns.getAndIncrement() : txnId,
+                            List.of(), List.of(), List.of(), Long.MAX_VALUE);
+                    committed = true;
                     relocationFence = appended.pending().generation().id();
                 }
             } finally {
