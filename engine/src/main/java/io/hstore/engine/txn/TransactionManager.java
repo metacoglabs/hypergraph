@@ -322,7 +322,7 @@ public final class TransactionManager {
         } finally {
             commitLock.unlock();
         }
-        TreeWalker walker = new TreeWalker(storage.source());
+        TreeWalker walker = new TreeWalker(storage.source().scanning());
         VisitedPages reached = new VisitedPages();
         Map<Long, Ref> moved = new HashMap<>();
         List<WalRecord> records = new ArrayList<>();

@@ -12,6 +12,7 @@ import io.hstore.engine.page.SegmentState;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.tree.Leaf;
+import io.hstore.engine.tree.NodeCache;
 import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.TreeWalker;
 import io.hstore.engine.txn.CrashPoint;
@@ -129,6 +130,20 @@ class CompactionTest {
             Map<Integer, Long> expected = new TreeMap<>();
             pages.forEach((pageId, units) -> expected.merge(PageId.segmentOf(pageId), (long) units * PageId.UNIT_BYTES, Long::sum));
             assertEquals(expected, engine.liveness());
+        }
+    }
+
+    @Test
+    void livenessWalkLeavesTheNodeCacheAsItWas() {
+        try (StorageEngine engine = StorageEngine.open(directory, options())) {
+            Map<Long, TreeSet<Long>> oracle = load(engine);
+            churn(engine, Branch.MAIN, oracle, RandomGeneratorFactory.of("L64X128MixRandom").create(7), 10);
+            NodeCache cache = engine.transactions().source().cache();
+            cache.clear();
+            Map<Integer, Long> first = engine.liveness();
+            long hits = cache.hits();
+            assertEquals(first, engine.liveness());
+            assertEquals(hits, cache.hits());
         }
     }
 
