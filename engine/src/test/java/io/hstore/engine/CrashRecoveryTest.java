@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.channels.FileChannel;
@@ -121,6 +122,39 @@ class CrashRecoveryTest {
             }
             assertEquals(400L, (long) engine.read(snapshot -> snapshot.countOfType(0, EngineTest.NODE)));
             assertTrue(engine.transactions().statistics().averageGroupCommit() >= 1.0);
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(WalMode.class)
+    void checkpointsTakenWhileCommitsRunLoseNothing(WalMode mode) throws Exception {
+        EngineOptions options = EngineTest.small().withWalMode(mode);
+        StorageEngine engine = StorageEngine.open(directory, options);
+        long edge = engine.write(txn -> txn.createEdge(EngineTest.EDGE, EdgeKind.ORDERED));
+        Thread writer = Thread.ofPlatform().start(() -> {
+            for (int i = 0; i < 2_000; i++) {
+                int n = i;
+                engine.write(txn -> {
+                    txn.append(edge, Incidence.of(txn.createNode(EngineTest.NODE, "n" + n)));
+                    return null;
+                });
+            }
+        });
+        int checkpoints = 0;
+        while (writer.isAlive()) {
+            engine.checkpoint();
+            checkpoints++;
+        }
+        writer.join();
+        engine.halt();
+        assertTrue(checkpoints > 1, "only " + checkpoints + " checkpoints overlapped the writer");
+        try (StorageEngine recovered = StorageEngine.open(directory, options)) {
+            recovered.read(snapshot -> {
+                assertEquals(2_000, snapshot.requireEdge(edge).size());
+                assertEquals(2_000L, snapshot.countOfType(0, EngineTest.NODE));
+                snapshot.requireEdge(edge).stream().forEach(member -> assertEquals(1, snapshot.degree(member.member())));
+                return null;
+            });
         }
     }
 
