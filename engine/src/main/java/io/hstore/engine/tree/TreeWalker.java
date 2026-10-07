@@ -17,29 +17,50 @@ public final class TreeWalker {
         this.source = source;
     }
 
-    public void visit(Ref root, TreeSchema<?> schema, Map<Long, Integer> visited) {
-        visit(root, schema, UNKNOWN_HEIGHT, visited);
+    @FunctionalInterface
+    private interface FirstVisit {
+        boolean first(long pageId, int units);
     }
 
-    private void visit(Ref ref, TreeSchema<?> schema, int height, Map<Long, Integer> visited) {
-        if (!(ref instanceof Ref.Stored(long pageId, int units, Summary _)) || visited.putIfAbsent(pageId, units) != null) {
-            return;
+    public void visit(Ref root, TreeSchema<?> schema, Map<Long, Integer> visited) {
+        new Walk((pageId, units) -> visited.putIfAbsent(pageId, units) == null).walk(root, schema, UNKNOWN_HEIGHT);
+    }
+
+    public void visit(Ref root, TreeSchema<?> schema, VisitedPages visited) {
+        new Walk(visited::add).walk(root, schema, UNKNOWN_HEIGHT);
+    }
+
+    private final class Walk implements ValueCodec.RefVisitor {
+        private final FirstVisit visited;
+
+        Walk(FirstVisit visited) {
+            this.visited = visited;
         }
-        if (height == 0 && !schema.codec().holdsRefs()) {
-            return;
+
+        @Override
+        public void visit(Ref ref, TreeSchema<?> schema) {
+            walk(ref, schema, UNKNOWN_HEIGHT);
         }
-        switch (source.load(pageId, schema)) {
-            case Leaf leaf -> {
-                for (int i = 0; i < leaf.size(); i++) {
-                    mapNested(schema, leaf.value(i), (nested, nestedSchema) -> {
-                        visit(nested, nestedSchema, UNKNOWN_HEIGHT, visited);
-                        return nested;
-                    });
-                }
+
+        void walk(Ref ref, TreeSchema<?> schema, int height) {
+            if (!(ref instanceof Ref.Stored(long pageId, int units, Summary _)) || !visited.first(pageId, units)) {
+                return;
             }
-            case Branch branch -> {
-                for (int i = 0; i < branch.size(); i++) {
-                    visit(branch.child(i), schema, branch.height() - 1, visited);
+            if (height == 0 && !schema.codec().holdsRefs()) {
+                return;
+            }
+            switch (source.load(pageId, schema)) {
+                case Leaf leaf -> {
+                    if (schema.codec().holdsRefs()) {
+                        for (int i = 0; i < leaf.size(); i++) {
+                            forEachNested(schema, leaf.value(i), this);
+                        }
+                    }
+                }
+                case Branch branch -> {
+                    for (int i = 0; i < branch.size(); i++) {
+                        walk(branch.child(i), schema, branch.height() - 1);
+                    }
                 }
             }
         }
@@ -94,7 +115,11 @@ public final class TreeWalker {
         if (height == 0 && !schema.codec().holdsRefs()) {
             return;
         }
-        switch (source.load(oldId, schema)) {
+        Node original = source.load(oldId, schema);
+        if (original instanceof Leaf && !schema.codec().holdsRefs()) {
+            return;
+        }
+        switch (original) {
             case Branch branch -> {
                 Branch copy = (Branch) source.load(newId, schema);
                 for (int i = 0; i < branch.size(); i++) {
@@ -107,15 +132,11 @@ public final class TreeWalker {
                     List<Ref> oldRefs = new ArrayList<>();
                     List<Ref> newRefs = new ArrayList<>();
                     List<TreeSchema<?>> schemas = new ArrayList<>();
-                    mapNested(schema, leaf.value(i), (nested, nestedSchema) -> {
+                    forEachNested(schema, leaf.value(i), (nested, nestedSchema) -> {
                         oldRefs.add(nested);
                         schemas.add(nestedSchema);
-                        return nested;
                     });
-                    mapNested(schema, copy.value(i), (nested, _) -> {
-                        newRefs.add(nested);
-                        return nested;
-                    });
+                    forEachNested(schema, copy.value(i), (nested, _) -> newRefs.add(nested));
                     for (int k = 0; k < oldRefs.size(); k++) {
                         pairMoves(oldRefs.get(k), newRefs.get(k), schemas.get(k), UNKNOWN_HEIGHT, moved);
                     }
@@ -173,6 +194,12 @@ public final class TreeWalker {
                         : ref;
             }
         };
+    }
+
+    private static <V> void forEachNested(TreeSchema<V> schema, Object value, ValueCodec.RefVisitor visitor) {
+        if (schema.codec().holdsRefs()) {
+            schema.codec().forEachRef(schema.cast(value), visitor);
+        }
     }
 
     private static <V> Object mapNested(TreeSchema<V> schema, Object value, ValueCodec.RefMapper mapper) {

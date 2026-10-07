@@ -7,17 +7,16 @@ import io.hstore.engine.page.PageStore;
 import io.hstore.engine.page.SegmentInfo;
 import io.hstore.engine.page.SegmentState;
 import io.hstore.engine.tree.TreeWalker;
+import io.hstore.engine.tree.VisitedPages;
 import io.hstore.engine.txn.TransactionManager;
 
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.LongPredicate;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public final class Compactor {
@@ -36,14 +35,17 @@ public final class Compactor {
     }
 
     public Map<Integer, Long> liveness() {
-        Map<Long, Integer> visited = new HashMap<>();
+        VisitedPages visited = new VisitedPages(pages.segments().stream().mapToLong(SegmentInfo::pages).sum());
         TreeWalker walker = new TreeWalker(transactions.source());
         Stream.concat(transactions.history().stream(), Stream.of(transactions.current()))
                 .flatMap(generation -> generation.branches().values().stream())
                 .forEach(branch -> branch.roots().roots().forEach((slot, ref) ->
                         walker.visit(ref, slots.slot(slot).schema(), visited)));
-        return visited.entrySet().stream().collect(Collectors.groupingBy(entry -> PageId.segmentOf(entry.getKey()), TreeMap::new,
-                Collectors.summingLong(entry -> (long) entry.getValue() * PageId.UNIT_BYTES)));
+        Map<Integer, long[]> bySegment = new TreeMap<>();
+        visited.forEach((pageId, units) -> bySegment.computeIfAbsent(PageId.segmentOf(pageId), _ -> new long[1])[0] += (long) units * PageId.UNIT_BYTES);
+        Map<Integer, Long> live = new TreeMap<>();
+        bySegment.forEach((segment, bytes) -> live.put(segment, bytes[0]));
+        return live;
     }
 
     public Report compact(double liveThreshold) {

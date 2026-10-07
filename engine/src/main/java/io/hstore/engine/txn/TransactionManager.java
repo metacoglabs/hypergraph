@@ -24,6 +24,7 @@ import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeSchema;
 import io.hstore.engine.tree.TreeWalker;
+import io.hstore.engine.tree.VisitedPages;
 import io.hstore.engine.tree.WriteScope;
 import io.hstore.engine.wal.WalRecord;
 import io.hstore.engine.wal.WriteAheadLog;
@@ -322,7 +323,7 @@ public final class TransactionManager {
             commitLock.unlock();
         }
         TreeWalker walker = new TreeWalker(storage.source());
-        Set<Long> reached = new HashSet<>();
+        VisitedPages reached = new VisitedPages();
         Map<Long, Ref> moved = new HashMap<>();
         List<WalRecord> records = new ArrayList<>();
         List<PageWrite> writes = new ArrayList<>();
@@ -331,7 +332,7 @@ public final class TransactionManager {
         List<Runnable> pairings = new ArrayList<>();
         snapshot.branches().values().stream().filter(Branch::isActive).forEach(branch -> branch.roots().roots().forEach((slot, ref) -> {
             TreeSchema<?> schema = storage.slots().slot(slot).schema();
-            Ref copy = materializer.materialize(walker.relocate(ref, schema, moving, copies, reached::add,
+            Ref copy = materializer.materialize(walker.relocate(ref, schema, moving, copies, pageId -> reached.add(pageId, 0),
                     leaf -> copyPage(leaf, snapshot.id() + 1, txnId, records, writes)), schema);
             pairings.add(() -> walker.pairMoves(ref, copy, schema, moved));
         }));
