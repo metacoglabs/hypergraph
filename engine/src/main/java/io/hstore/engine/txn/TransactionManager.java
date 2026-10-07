@@ -334,7 +334,7 @@ public final class TransactionManager {
         snapshot.branches().values().stream().filter(Branch::isActive).forEach(branch -> branch.roots().roots().forEach((slot, ref) -> {
             TreeSchema<?> schema = storage.slots().slot(slot).schema();
             Ref copy = materializer.materialize(walker.relocate(ref, schema, moving, copies, pageId -> reached.add(pageId, 0),
-                    leaf -> copyPage(leaf, snapshot.id() + 1, txnId, records, writes)), schema);
+                    leaf -> copyPage(leaf, snapshot.id() + 1, txnId, records, writes), materializer::materialize), schema);
             pairings.add(() -> walker.pairMoves(ref, copy, schema, moved));
         }));
         storage.wal().append(records);
