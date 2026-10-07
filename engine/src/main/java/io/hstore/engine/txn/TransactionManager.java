@@ -12,6 +12,8 @@ import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.CommitEvent;
 import io.hstore.engine.feed.FeedCodec;
 import io.hstore.engine.page.Checksums;
+import io.hstore.engine.page.PageHeader;
+import io.hstore.engine.page.PageId;
 import io.hstore.engine.page.PageStore;
 import io.hstore.engine.topology.MemberChange;
 import io.hstore.engine.tree.Hashing;
@@ -326,12 +328,15 @@ public final class TransactionManager {
         List<PageWrite> writes = new ArrayList<>();
         Materializer materializer = materializer(snapshot.id() + 1, txnId, records, writes);
         WriteScope copies = new WriteScope();
+        List<Runnable> pairings = new ArrayList<>();
         snapshot.branches().values().stream().filter(Branch::isActive).forEach(branch -> branch.roots().roots().forEach((slot, ref) -> {
             TreeSchema<?> schema = storage.slots().slot(slot).schema();
-            Ref copy = materializer.materialize(walker.relocate(ref, schema, moving, copies, reached::add), schema);
-            walker.pairMoves(ref, copy, schema, moved);
+            Ref copy = materializer.materialize(walker.relocate(ref, schema, moving, copies, reached::add,
+                    leaf -> copyPage(leaf, snapshot.id() + 1, txnId, records, writes)), schema);
+            pairings.add(() -> walker.pairMoves(ref, copy, schema, moved));
         }));
         writes.forEach(write -> storage.pages().write(write.pageId(), write.image()));
+        pairings.forEach(Runnable::run);
         pagesWritten.add(materializer.pagesWritten());
         Set<Integer> swapped = new HashSet<>();
         List<WalRecord> unlogged = records;
@@ -409,13 +414,29 @@ public final class TransactionManager {
 
             @Override
             public void accept(long pageId, MemorySegment image, Node frozen) {
-                records.add(storage.walMode() == WalMode.PAGE_IMAGES
-                        ? new WalRecord.Page(txnId, pageId, image.toArray(ValueLayout.JAVA_BYTE))
-                        : new WalRecord.PageRef(txnId, pageId, Math.toIntExact(image.byteSize()), Checksums.crc32c(image)));
-                writes.add(new PageWrite(pageId, image));
+                stage(txnId, pageId, image, records, writes);
                 storage.source().admit(pageId, frozen);
             }
         }, epoch, storage.pages().pageSize());
+    }
+
+    private void stage(long txnId, long pageId, MemorySegment image, List<WalRecord> records, List<PageWrite> writes) {
+        records.add(storage.walMode() == WalMode.PAGE_IMAGES
+                ? new WalRecord.Page(txnId, pageId, image.toArray(ValueLayout.JAVA_BYTE))
+                : new WalRecord.PageRef(txnId, pageId, Math.toIntExact(image.byteSize()), Checksums.crc32c(image)));
+        writes.add(new PageWrite(pageId, image));
+    }
+
+    private Ref.Stored copyPage(Ref.Stored stored, long epoch, long txnId, List<WalRecord> records, List<PageWrite> writes) {
+        MemorySegment page = storage.pages().read(stored.pageId());
+        if (PageHeader.verify(page, stored.pageId()).height() != 0) {
+            return stored;
+        }
+        MemorySegment image = page.asSlice(0, PageHeader.SIZE + PageHeader.payloadLength(page));
+        long pageId = storage.pages().allocate(epoch, Math.toIntExact(image.byteSize()));
+        PageHeader.assign(image, pageId);
+        stage(txnId, pageId, image, records, writes);
+        return new Ref.Stored(pageId, PageId.unitsFor(image.byteSize()), stored.summary());
     }
 
     private Appended append(Generation latest, Branch changed, long txnId, List<MemberChange> members,
