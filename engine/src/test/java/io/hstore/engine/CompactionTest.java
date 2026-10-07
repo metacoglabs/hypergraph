@@ -5,11 +5,14 @@ package io.hstore.engine;
 
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.maintenance.Compactor;
+import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageId;
 import io.hstore.engine.page.SegmentInfo;
 import io.hstore.engine.page.SegmentState;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Incidence;
+import io.hstore.engine.tree.Leaf;
+import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.TreeWalker;
 import io.hstore.engine.txn.CrashPoint;
 import io.hstore.engine.txn.Snapshot;
@@ -19,7 +22,10 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -235,6 +241,36 @@ class CompactionTest {
         try (StorageEngine engine = StorageEngine.open(directory, options())) {
             verify(engine, Branch.MAIN, main);
             verify(engine, branchId, side);
+        }
+    }
+
+    @Test
+    void aCorruptPageIsNotCopiedWithAFreshChecksum() throws Exception {
+        try (StorageEngine engine = StorageEngine.open(directory, options())) {
+            Map<Long, TreeSet<Long>> oracle = load(engine);
+            Set<Integer> sealed = engine.stats().segments().stream().filter(segment -> segment.state() == SegmentState.SEALED)
+                    .map(SegmentInfo::id).collect(Collectors.toSet());
+            long victim;
+            try (Snapshot snapshot = engine.snapshot(Branch.MAIN)) {
+                victim = oracle.keySet().stream()
+                        .map(edge -> snapshot.requireEdge(edge).membership().root())
+                        .filter(root -> root instanceof Ref.Stored(long pageId, int _, var _) && sealed.contains(PageId.segmentOf(pageId)))
+                        .mapToLong(root -> ((Ref.Stored) root).pageId())
+                        .filter(pageId -> engine.transactions().source().load(pageId, snapshot.requireEdge(oracle.keySet().iterator().next()).membership().schema()) instanceof Leaf)
+                        .findFirst().orElse(0L);
+            }
+            assertTrue(victim != 0, "no single-leaf membership tree in a sealed segment");
+            Path segment = directory.resolve("data").resolve("segments").resolve("%08x.seg".formatted(PageId.segmentOf(victim)));
+            try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                long at = (long) PageId.offsetOf(victim) * PageId.UNIT_BYTES + PageHeader.SIZE + 1;
+                ByteBuffer one = ByteBuffer.allocate(1);
+                channel.read(one, at);
+                channel.write(ByteBuffer.wrap(new byte[]{(byte) (one.get(0) ^ 0x5A)}), at);
+            }
+            int corrupted = PageId.segmentOf(victim);
+            HStoreException failure = assertThrows(HStoreException.class,
+                    () -> engine.transactions().relocate(pageId -> PageId.segmentOf(pageId) == corrupted));
+            assertTrue(failure.getMessage().toLowerCase().contains("checksum"), failure.getMessage());
         }
     }
 
