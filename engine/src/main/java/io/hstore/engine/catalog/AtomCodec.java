@@ -80,10 +80,20 @@ final class AtomCodec implements ValueCodec<AtomRecord> {
     public AtomRecord mapRefs(AtomRecord record, RefMapper mapper) {
         return switch (record) {
             case NodeRecord node -> node;
-            case EdgeRecord edge -> new EdgeRecord(edge.type(), edge.kind(),
-                    mapper.map(edge.members(), TopologySchemas.members(edge.kind())),
-                    mapper.map(edge.order(), TopologySchemas.ORDER_INDEX),
-                    edge.version(), edge.dataRef(), edge.tenant(), edge.isolation());
+            case EdgeRecord edge -> {
+                Ref members = mapper.map(edge.members(), TopologySchemas.members(edge.kind()));
+                Ref order = mapper.map(edge.order(), TopologySchemas.ORDER_INDEX);
+                yield members == edge.members() && order == edge.order() ? edge
+                        : new EdgeRecord(edge.type(), edge.kind(), members, order, edge.version(), edge.dataRef(), edge.tenant(), edge.isolation());
+            }
         };
+    }
+
+    @Override
+    public void forEachRef(AtomRecord record, RefVisitor visitor) {
+        if (record instanceof EdgeRecord edge) {
+            visitor.visit(edge.members(), TopologySchemas.members(edge.kind()));
+            visitor.visit(edge.order(), TopologySchemas.ORDER_INDEX);
+        }
     }
 }

@@ -89,6 +89,17 @@ final class PostingsCodec<P> implements ValueCodec<Postings<P>> {
 
     @Override
     public Postings<P> mapRefs(Postings<P> value, RefMapper mapper) {
-        return value instanceof Postings.Promoted<P>(Ref root) ? new Postings.Promoted<>(mapper.map(root, postings)) : value;
+        if (!(value instanceof Postings.Promoted<P>(Ref root))) {
+            return value;
+        }
+        Ref mapped = mapper.map(root, postings);
+        return mapped == root ? value : new Postings.Promoted<>(mapped);
+    }
+
+    @Override
+    public void forEachRef(Postings<P> value, RefVisitor visitor) {
+        if (value instanceof Postings.Promoted<P>(Ref root)) {
+            visitor.visit(root, postings);
+        }
     }
 }
