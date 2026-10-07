@@ -21,6 +21,7 @@ public record PageHeader(
     public static final int MAGIC = 0x47505348;
     public static final int FORMAT = 1;
     public static final int SIZE = 80;
+    public static final int NO_NESTED_REFS = 1;
     private static final int PAGE_ID_OFFSET = 8;
     private static final int PAYLOAD_LENGTH_OFFSET = 24;
     private static final int CHECKSUM_OFFSET = 72;
@@ -58,6 +59,28 @@ public record PageHeader(
     public static void seal(MemorySegment page, int payloadLength) {
         int checksum = Checksums.crc32c(page.asSlice(0, CHECKSUM_OFFSET), page.asSlice(SIZE, payloadLength));
         ByteCursor.over(page).position(CHECKSUM_OFFSET).putInt(checksum);
+    }
+
+    public static boolean isPlainLeaf(MemorySegment head, long expectedPageId) {
+        if (head.byteSize() < SIZE) {
+            throw HStoreException.corrupt(expectedPageId, "page header is truncated");
+        }
+        ByteCursor in = ByteCursor.over(head);
+        if (in.getInt() != MAGIC) {
+            throw HStoreException.corrupt(expectedPageId, "bad page magic");
+        }
+        int format = in.getUnsignedByte();
+        if (format != FORMAT) {
+            throw HStoreException.corrupt(expectedPageId, "unsupported page format " + format);
+        }
+        PageType type = PageType.of(in.getUnsignedByte());
+        in.getUnsignedByte();
+        int flags = in.getUnsignedByte();
+        long pageId = in.getLong();
+        if (pageId != expectedPageId) {
+            throw HStoreException.corrupt(expectedPageId, "page identity mismatch, found " + PageId.unpack(pageId));
+        }
+        return type == PageType.LEAF && (flags & NO_NESTED_REFS) != 0;
     }
 
     public static PageHeader verify(MemorySegment page, long expectedPageId) {

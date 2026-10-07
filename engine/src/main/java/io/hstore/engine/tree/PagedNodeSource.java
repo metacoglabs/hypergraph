@@ -2,6 +2,7 @@ package io.hstore.engine.tree;
 
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.page.IoTrace;
+import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageStore;
 
 public final class PagedNodeSource implements NodeSource {
@@ -29,21 +30,41 @@ public final class PagedNodeSource implements NodeSource {
             }
 
             @Override
+            public Node loadUnlessPlainLeaf(long pageId, TreeSchema<?> schema) {
+                Node cached = cached(pageId, schema);
+                return cached != null || PageHeader.isPlainLeaf(store.readHeader(pageId), pageId) ? cached : decode(pageId, schema, false);
+            }
+
+            @Override
             public Layout layout() {
                 return layout;
             }
         };
     }
 
+    @Override
+    public Node loadUnlessPlainLeaf(long pageId, TreeSchema<?> schema) {
+        Node cached = cached(pageId, schema);
+        return cached != null || PageHeader.isPlainLeaf(store.readHeader(pageId), pageId) ? cached : decode(pageId, schema, true);
+    }
+
     private Node load(long pageId, TreeSchema<?> schema, boolean admit) {
+        Node cached = cached(pageId, schema);
+        return cached != null ? cached : decode(pageId, schema, admit);
+    }
+
+    private Node cached(long pageId, TreeSchema<?> schema) {
         Node cached = cache.get(pageId);
         if (cached != null) {
             if (cached.schema.id() != schema.id()) {
                 throw HStoreException.corrupt(pageId, "cached page belongs to " + cached.schema + ", expected " + schema);
             }
             IoTrace.recordHit();
-            return cached;
         }
+        return cached;
+    }
+
+    private Node decode(long pageId, TreeSchema<?> schema, boolean admit) {
         IoTrace.recordRead();
         Node node = NodeCodec.decode(store.read(pageId), pageId, schema);
         if (admit) {

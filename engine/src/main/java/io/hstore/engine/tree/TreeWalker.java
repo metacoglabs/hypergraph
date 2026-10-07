@@ -50,7 +50,11 @@ public final class TreeWalker {
             if (height == 0 && !schema.codec().holdsRefs()) {
                 return;
             }
-            switch (source.load(pageId, schema)) {
+            Node node = height > 0 ? source.load(pageId, schema) : source.loadUnlessPlainLeaf(pageId, schema);
+            if (node == null) {
+                return;
+            }
+            switch (node) {
                 case Leaf leaf -> {
                     if (schema.codec().holdsRefs()) {
                         for (int i = 0; i < leaf.size(); i++) {

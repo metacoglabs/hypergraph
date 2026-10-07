@@ -6,6 +6,10 @@ public interface NodeSource {
 
     Layout layout();
 
+    default Node loadUnlessPlainLeaf(long pageId, TreeSchema<?> schema) {
+        return load(pageId, schema);
+    }
+
     static NodeSource ephemeral(int pageSize) {
         Layout layout = Layout.of(pageSize);
         return new NodeSource() {

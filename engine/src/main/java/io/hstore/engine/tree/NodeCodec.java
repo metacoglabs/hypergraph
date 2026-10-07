@@ -33,11 +33,27 @@ public final class NodeCodec {
         }
         int payloadLength = Math.toIntExact(out.position() - PageHeader.SIZE);
         PageType type = node instanceof Leaf ? PageType.LEAF : PageType.INTERNAL;
-        new PageHeader(type, node.schema.id(), 0, pageId, epoch, payloadLength, node.size(), summary.count(),
+        int flags = node instanceof Leaf leaf && !holdsNestedRefs(leaf) ? PageHeader.NO_NESTED_REFS : 0;
+        new PageHeader(type, node.schema.id(), flags, pageId, epoch, payloadLength, node.size(), summary.count(),
                 summary.min(), summary.max(), node.height(), summary.fingerprint()).writeTo(out);
         MemorySegment image = out.segment().asSlice(0, PageHeader.SIZE + payloadLength);
         PageHeader.seal(image, payloadLength);
         return image;
+    }
+
+    private static boolean holdsNestedRefs(Leaf leaf) {
+        if (!leaf.schema.codec().holdsRefs()) {
+            return false;
+        }
+        boolean[] found = {false};
+        for (int i = 0; i < leaf.size() && !found[0]; i++) {
+            visitRefs(leaf.schema, leaf.value(i), (ref, _) -> found[0] |= !(ref instanceof Ref.Empty));
+        }
+        return found[0];
+    }
+
+    private static <V> void visitRefs(TreeSchema<V> schema, Object value, ValueCodec.RefVisitor visitor) {
+        schema.codec().forEachRef(schema.cast(value), visitor);
     }
 
     private static void encodeLeaf(ByteCursor out, Leaf leaf) {

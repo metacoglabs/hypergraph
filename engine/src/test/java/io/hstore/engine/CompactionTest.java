@@ -11,9 +11,13 @@ import io.hstore.engine.page.SegmentInfo;
 import io.hstore.engine.page.SegmentState;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Incidence;
+import io.hstore.engine.tree.Layout;
 import io.hstore.engine.tree.Leaf;
+import io.hstore.engine.tree.Node;
 import io.hstore.engine.tree.NodeCache;
+import io.hstore.engine.tree.NodeSource;
 import io.hstore.engine.tree.Ref;
+import io.hstore.engine.tree.TreeSchema;
 import io.hstore.engine.tree.TreeWalker;
 import io.hstore.engine.txn.CrashPoint;
 import io.hstore.engine.txn.Snapshot;
@@ -122,14 +126,27 @@ class CompactionTest {
         try (StorageEngine engine = StorageEngine.open(directory, options())) {
             Map<Long, TreeSet<Long>> oracle = load(engine);
             churn(engine, Branch.MAIN, oracle, RandomGeneratorFactory.of("L64X128MixRandom").create(6), 30);
+            engine.transactions().source().cache().clear();
+            Map<Integer, Long> live = engine.liveness();
             Map<Long, Integer> pages = new HashMap<>();
-            TreeWalker walker = new TreeWalker(engine.transactions().source());
+            NodeSource decoding = new NodeSource() {
+                @Override
+                public Node load(long pageId, TreeSchema<?> schema) {
+                    return engine.transactions().source().load(pageId, schema);
+                }
+
+                @Override
+                public Layout layout() {
+                    return engine.transactions().source().layout();
+                }
+            };
+            TreeWalker walker = new TreeWalker(decoding);
             Stream.concat(engine.transactions().history().stream(), Stream.of(engine.transactions().current()))
                     .flatMap(generation -> generation.branches().values().stream())
                     .forEach(branch -> branch.roots().roots().forEach((slot, ref) -> walker.visit(ref, engine.slots().slot(slot).schema(), pages)));
             Map<Integer, Long> expected = new TreeMap<>();
             pages.forEach((pageId, units) -> expected.merge(PageId.segmentOf(pageId), (long) units * PageId.UNIT_BYTES, Long::sum));
-            assertEquals(expected, engine.liveness());
+            assertEquals(expected, live);
         }
     }
 

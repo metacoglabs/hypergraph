@@ -129,6 +129,14 @@ public final class PageStore implements AutoCloseable {
         return file.read((long) PageId.offsetOf(pageId) * PageId.UNIT_BYTES, pageSize);
     }
 
+    public MemorySegment readHeader(long pageId) {
+        SegmentFile file = files.get(PageId.segmentOf(pageId));
+        if (file == null) {
+            throw HStoreException.corrupt(pageId, "segment does not exist");
+        }
+        return file.read((long) PageId.offsetOf(pageId) * PageId.UNIT_BYTES, PageHeader.SIZE);
+    }
+
     public void sync() {
         files.values().forEach(SegmentFile::force);
     }
