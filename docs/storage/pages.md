@@ -193,14 +193,37 @@ Compared with fixed page slots, packing removes almost all internal fragmentatio
 
 ### Reading (`SegmentFile.read(position, maximum)`)
 
-The length of an image is not known before its header is read, so a read takes at most two system calls:
+Each segment file has a read-only memory map. If the map covers the image, `read` copies exactly
+`80 + payloadLength` bytes out of it into a new heap array and returns that. There is no system call, and the raw
+bytes stay in the OS page cache rather than on the Java heap, which only holds the decoded nodes in `NodeCache`.
 
-1. Allocate one buffer of `min(pageSize, 4096)` bytes and read it at `offset × 64`. This is the only allocation for most images.
-2. If at least 80 bytes arrived, compute `length = 80 + payloadLength` from header offset 24:
-   * if `length` is already covered by the first read, or exceeds `pageSize` (a corrupt header), return the first buffer; `verify` then decides;
-   * otherwise, and only then, allocate a second buffer of exactly `length` bytes, copy the first read into it, and read the remainder.
+The copy is deliberate. `ByteCursor` reads one byte at a time through `MemorySegment`, and the JIT only makes that
+fast when every segment it sees is the same kind. Decoding straight from the map, while the WAL, catalog and
+feed decode from heap arrays, made decoding two to five times slower everywhere in a microbenchmark. Copying a
+page costs well under a microsecond and keeps every decoder on heap memory.
 
-Most nodes fit in 4 KiB, so most reads are a single 4 KiB `pread`. A short read at end of file returns whatever arrived, and the header check then rejects it.
+If the image ends past the map, the file may need mapping again:
+
+* A sealed segment is remapped at its current size right away. The store seals a segment when it rolls to the
+  next one, and seals every segment except the active one when it opens.
+* The active segment is remapped only after the file has grown 4 MiB past the map. Until then, reads near the end
+  of the file use `pread`. This keeps a segment that is still filling up from being remapped on every new page.
+
+Maps are created in `Arena.ofAuto()` and are unmapped once nothing references them, so a thread that is copying a
+page when compaction deletes its segment still finishes the copy. `Arena.ofShared()` is not used, because closing
+one in a Native Image build needs the experimental `-H:+SharedArenaSupport`. Segment files are only ever appended to
+or deleted, never truncated, so a map can't end up pointing past the end of its file.
+
+`pread` doesn't know how long an image is until it has the header, so it takes one or two system calls:
+
+1. Allocate a buffer of `min(pageSize, 4096)` bytes and read it at `offset × 64`.
+2. If at least 80 bytes came back, compute `length = 80 + payloadLength` from header offset 24:
+   * if `length` is larger than `pageSize`, the header is corrupt; return the buffer and let `verify` fail it;
+   * if the first read already has `length` bytes, return those;
+   * otherwise allocate a buffer of exactly `length` bytes, copy in what was read, and read the rest.
+
+A short read at the end of the file returns what it got, and the header check rejects it. Both paths return
+read-only memory, so nothing can write into a stored image through a read.
 
 ## Caching and I/O accounting
 
