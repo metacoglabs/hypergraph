@@ -61,15 +61,18 @@ final class SegmentFile implements AutoCloseable {
         ByteBuffer first = ByteBuffer.allocate(Math.min(maximum, FIRST_READ));
         fill(first, position);
         if (first.position() < PageHeader.SIZE) {
-            return MemorySegment.ofBuffer(first.flip());
+            return MemorySegment.ofBuffer(first.flip()).asReadOnly();
         }
         int length = PageHeader.SIZE + PageHeader.payloadLength(MemorySegment.ofArray(first.array()));
-        if (length <= first.position() || length > maximum) {
-            return MemorySegment.ofBuffer(first.flip());
+        if (length < PageHeader.SIZE || length > maximum) {
+            return MemorySegment.ofBuffer(first.flip()).asReadOnly();
+        }
+        if (length <= first.position()) {
+            return MemorySegment.ofBuffer(first.flip()).asSlice(0, length).asReadOnly();
         }
         ByteBuffer whole = ByteBuffer.allocate(length).put(first.flip());
         fill(whole, position);
-        return MemorySegment.ofBuffer(whole.flip());
+        return MemorySegment.ofBuffer(whole.flip()).asReadOnly();
     }
 
     private void fill(ByteBuffer buffer, long position) {
