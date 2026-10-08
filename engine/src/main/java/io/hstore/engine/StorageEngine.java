@@ -76,7 +76,7 @@ public final class StorageEngine implements AutoCloseable {
         FeedCodec codec = new FeedCodec(slots);
         this.feed = ChangeFeed.open(directory.resolve("feed"), codec, options.walSegmentBytes());
         this.recovery = Recovery.recover(checkpoint, wal, pages, feed, codec);
-        this.cache = new NodeCache(options.cacheBytes());
+        this.cache = new NodeCache(options.nodeCacheBytes());
         PagedNodeSource source = new PagedNodeSource(pages, cache);
         TransactionManager.Storage storage = new TransactionManager.Storage(pages, source, wal, feed, codec, slots,
                 options.derivations(), options.durability(), options.walMode(), options.faults(), options.historyLimit());

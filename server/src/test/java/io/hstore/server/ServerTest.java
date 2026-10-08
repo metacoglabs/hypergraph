@@ -112,8 +112,8 @@ class ServerTest {
 
     @Test
     void cacheIsSizedInMegabytesAndTheOldNodeCountIsRejected(@TempDir Path data) throws Exception {
-        assertEquals(64L << 20, ServerConfig.load(Optional.empty(), Map.of("HSTORE_CACHE_MB", "64"), Map.of()).engineOptions().cacheBytes());
-        assertEquals(256L << 20, ServerConfig.load(Optional.empty(), Map.of(), Map.of()).engineOptions().cacheBytes());
+        assertEquals(64L << 20, ServerConfig.load(Optional.empty(), Map.of("HSTORE_CACHE_MB", "64"), Map.of()).engineOptions().nodeCacheBytes());
+        assertEquals(256L << 20, ServerConfig.load(Optional.empty(), Map.of(), Map.of()).engineOptions().nodeCacheBytes());
         Files.writeString(data.resolve(ServerConfig.FILE), "cache_nodes = 4096\n");
         List<IllegalArgumentException> failures = List.of(
                 assertThrows(IllegalArgumentException.class, () -> ServerConfig.load(Optional.of(data), Map.of(), Map.of())),
