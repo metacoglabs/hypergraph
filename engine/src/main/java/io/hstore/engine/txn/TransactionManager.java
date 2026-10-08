@@ -432,7 +432,7 @@ public final class TransactionManager {
         if (PageHeader.verify(page, stored.pageId()).height() != 0) {
             return stored;
         }
-        MemorySegment image = page.asSlice(0, PageHeader.SIZE + PageHeader.payloadLength(page));
+        MemorySegment image = MemorySegment.ofArray(page.asSlice(0, PageHeader.SIZE + PageHeader.payloadLength(page)).toArray(ValueLayout.JAVA_BYTE));
         long pageId = storage.pages().allocate(epoch, Math.toIntExact(image.byteSize()));
         PageHeader.assign(image, pageId);
         stage(txnId, pageId, image, records, writes);
