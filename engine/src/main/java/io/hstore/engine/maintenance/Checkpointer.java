@@ -40,22 +40,22 @@ public final class Checkpointer {
     }
 
     public Result checkpoint() {
-        return transactions.exclusive(() -> {
-            pages.sync();
-            feed.sync();
+        CatalogImage image = transactions.exclusive(() -> {
             Generation current = transactions.current();
-            long lsn = wal.end();
             List<Generation> history = transactions.history().stream()
                     .filter(generation -> generation.id() != current.id())
                     .sorted((a, b) -> Long.compare(b.id(), a.id()))
                     .limit(historyLimit)
                     .toList();
-            catalog.publish(new CatalogImage(current, history, pages.segments(), lsn, feed.size()));
-            wal.append(new WalRecord.Checkpoint(0, current.id(), lsn));
-            wal.sync();
-            wal.truncateBefore(lsn);
-            lastLsn = lsn;
-            return new Result(current.id(), lsn, wal.segmentCount());
+            return new CatalogImage(current, history, pages.segments(), wal.end(), feed.size());
         });
+        pages.sync();
+        feed.sync();
+        catalog.publish(image);
+        wal.append(new WalRecord.Checkpoint(0, image.current().id(), image.checkpointLsn()));
+        wal.sync();
+        wal.truncateBefore(image.checkpointLsn());
+        lastLsn = image.checkpointLsn();
+        return new Result(image.current().id(), image.checkpointLsn(), wal.segmentCount());
     }
 }

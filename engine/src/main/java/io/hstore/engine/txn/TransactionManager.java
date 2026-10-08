@@ -47,6 +47,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongPredicate;
 import java.util.function.Supplier;
@@ -322,25 +323,25 @@ public final class TransactionManager {
         } finally {
             commitLock.unlock();
         }
-        TreeWalker walker = new TreeWalker(storage.source());
+        TreeWalker walker = new TreeWalker(storage.source().scanning());
         VisitedPages reached = new VisitedPages();
         Map<Long, Ref> moved = new HashMap<>();
         List<WalRecord> records = new ArrayList<>();
-        List<PageWrite> writes = new ArrayList<>();
-        Materializer materializer = materializer(snapshot.id() + 1, txnId, records, writes);
+        Consumer<PageWrite> writes = write -> storage.pages().write(write.pageId(), write.image());
+        Materializer materializer = materializer(snapshot.id() + 1, txnId, records, writes, false);
         WriteScope copies = new WriteScope();
         List<Runnable> pairings = new ArrayList<>();
         snapshot.branches().values().stream().filter(Branch::isActive).forEach(branch -> branch.roots().roots().forEach((slot, ref) -> {
             TreeSchema<?> schema = storage.slots().slot(slot).schema();
             Ref copy = materializer.materialize(walker.relocate(ref, schema, moving, copies, pageId -> reached.add(pageId, 0),
-                    leaf -> copyPage(leaf, snapshot.id() + 1, txnId, records, writes)), schema);
+                    leaf -> copyPage(leaf, snapshot.id() + 1, txnId, records, writes), materializer::materialize), schema);
             pairings.add(() -> walker.pairMoves(ref, copy, schema, moved));
         }));
-        writes.forEach(write -> storage.pages().write(write.pageId(), write.image()));
+        storage.wal().append(records);
         pairings.forEach(Runnable::run);
         pagesWritten.add(materializer.pagesWritten());
         Set<Integer> swapped = new HashSet<>();
-        List<WalRecord> unlogged = records;
+        boolean committed = false;
         long generation = snapshot.id();
         while (true) {
             Appended appended = null;
@@ -351,6 +352,9 @@ public final class TransactionManager {
                         .filter(Branch::isActive).filter(candidate -> !swapped.contains(candidate.id()))
                         .findFirst().orElse(null);
                 if (branch == null) {
+                    if (!committed && !records.isEmpty()) {
+                        logAbort(txnId);
+                    }
                     return generation;
                 }
                 swapped.add(branch.id());
@@ -358,9 +362,9 @@ public final class TransactionManager {
                 RootVector roots = branch.roots().map((slot, ref) ->
                         walker.adopt(ref, storage.slots().slot(slot).schema(), moved, reached::contains, merge));
                 if (!roots.sameAs(branch.roots())) {
-                    appended = append(latest, branch.withRoots(roots), unlogged.isEmpty() ? txns.getAndIncrement() : txnId,
-                            List.of(), List.of(), unlogged, Long.MAX_VALUE);
-                    unlogged = List.of();
+                    appended = append(latest, branch.withRoots(roots), committed ? txns.getAndIncrement() : txnId,
+                            List.of(), List.of(), List.of(), Long.MAX_VALUE);
+                    committed = true;
                     relocationFence = appended.pending().generation().id();
                 }
             } finally {
@@ -398,7 +402,7 @@ public final class TransactionManager {
     Ref spill(long txnId, Ref ref, TreeSchema<?> schema) {
         List<WalRecord> records = new ArrayList<>();
         List<PageWrite> writes = new ArrayList<>();
-        Materializer materializer = materializer(head.get().id() + 1, txnId, records, writes);
+        Materializer materializer = materializer(head.get().id() + 1, txnId, records, writes::add, true);
         Ref stored = materializer.materialize(ref, schema);
         writes.forEach(write -> storage.pages().write(write.pageId(), write.image()));
         storage.wal().append(records);
@@ -406,7 +410,7 @@ public final class TransactionManager {
         return stored;
     }
 
-    private Materializer materializer(long epoch, long txnId, List<WalRecord> records, List<PageWrite> writes) {
+    private Materializer materializer(long epoch, long txnId, List<WalRecord> records, Consumer<PageWrite> writes, boolean admit) {
         return new Materializer(new Materializer.Sink() {
             @Override
             public long allocate(int length) {
@@ -416,19 +420,21 @@ public final class TransactionManager {
             @Override
             public void accept(long pageId, MemorySegment image, Node frozen) {
                 stage(txnId, pageId, image, records, writes);
-                storage.source().admit(pageId, frozen);
+                if (admit) {
+                    storage.source().admit(pageId, frozen);
+                }
             }
         }, epoch, storage.pages().pageSize());
     }
 
-    private void stage(long txnId, long pageId, MemorySegment image, List<WalRecord> records, List<PageWrite> writes) {
+    private void stage(long txnId, long pageId, MemorySegment image, List<WalRecord> records, Consumer<PageWrite> writes) {
         records.add(storage.walMode() == WalMode.PAGE_IMAGES
                 ? new WalRecord.Page(txnId, pageId, image.toArray(ValueLayout.JAVA_BYTE))
                 : new WalRecord.PageRef(txnId, pageId, Math.toIntExact(image.byteSize()), Checksums.crc32c(image)));
-        writes.add(new PageWrite(pageId, image));
+        writes.accept(new PageWrite(pageId, image));
     }
 
-    private Ref.Stored copyPage(Ref.Stored stored, long epoch, long txnId, List<WalRecord> records, List<PageWrite> writes) {
+    private Ref.Stored copyPage(Ref.Stored stored, long epoch, long txnId, List<WalRecord> records, Consumer<PageWrite> writes) {
         MemorySegment page = storage.pages().read(stored.pageId());
         if (PageHeader.verify(page, stored.pageId()).height() != 0) {
             return stored;
@@ -452,7 +458,7 @@ public final class TransactionManager {
         List<WalRecord> records = new ArrayList<>();
         List<PageWrite> writes = new ArrayList<>();
         records.add(new WalRecord.Begin(txnId, changed.id(), latest.id()));
-        Materializer materializer = materializer(generationId, txnId, records, writes);
+        Materializer materializer = materializer(generationId, txnId, records, writes::add, true);
         RootVector stored = changed.roots().map((slot, ref) -> materializer.materialize(ref, storage.slots().slot(slot).schema()));
         storage.faults().reach(CrashPoint.PAGE);
         Branch previous = latest.branches().get(changed.id());

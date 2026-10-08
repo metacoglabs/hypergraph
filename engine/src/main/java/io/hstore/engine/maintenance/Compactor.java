@@ -36,7 +36,7 @@ public final class Compactor {
 
     public Map<Integer, Long> liveness() {
         VisitedPages visited = new VisitedPages(pages.segments().stream().mapToLong(SegmentInfo::pages).sum());
-        TreeWalker walker = new TreeWalker(transactions.source());
+        TreeWalker walker = new TreeWalker(transactions.source().scanning());
         Stream.concat(transactions.history().stream(), Stream.of(transactions.current()))
                 .flatMap(generation -> generation.branches().values().stream())
                 .forEach(branch -> branch.roots().roots().forEach((slot, ref) ->

@@ -3,6 +3,7 @@ package io.hstore.engine.tree;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiFunction;
 import java.util.function.LongConsumer;
 import java.util.function.LongPredicate;
 import java.util.function.UnaryOperator;
@@ -49,7 +50,11 @@ public final class TreeWalker {
             if (height == 0 && !schema.codec().holdsRefs()) {
                 return;
             }
-            switch (source.load(pageId, schema)) {
+            Node node = height > 0 ? source.load(pageId, schema) : source.loadUnlessPlainLeaf(pageId, schema);
+            if (node == null) {
+                return;
+            }
+            switch (node) {
                 case Leaf leaf -> {
                     if (schema.codec().holdsRefs()) {
                         for (int i = 0; i < leaf.size(); i++) {
@@ -72,16 +77,16 @@ public final class TreeWalker {
     }
 
     public Ref relocate(Ref root, TreeSchema<?> schema, LongPredicate moving, WriteScope scope, LongConsumer reached) {
-        return relocate(root, schema, moving, scope, reached, leaf -> leaf);
+        return relocate(root, schema, moving, scope, reached, leaf -> leaf, (ref, _) -> ref);
     }
 
     public Ref relocate(Ref root, TreeSchema<?> schema, LongPredicate moving, WriteScope scope, LongConsumer reached,
-                        UnaryOperator<Ref.Stored> copyLeaf) {
-        return relocate(root, schema, UNKNOWN_HEIGHT, moving, scope, reached, copyLeaf);
+                        UnaryOperator<Ref.Stored> copyLeaf, BiFunction<Ref, TreeSchema<?>, Ref> settle) {
+        return relocate(root, schema, UNKNOWN_HEIGHT, moving, scope, reached, copyLeaf, settle);
     }
 
     private Ref relocate(Ref ref, TreeSchema<?> schema, int height, LongPredicate inVictim, WriteScope scope, LongConsumer reached,
-                         UnaryOperator<Ref.Stored> copyLeaf) {
+                         UnaryOperator<Ref.Stored> copyLeaf, BiFunction<Ref, TreeSchema<?>, Ref> settle) {
         if (!(ref instanceof Ref.Stored stored)) {
             return ref;
         }
@@ -99,8 +104,8 @@ public final class TreeWalker {
                 }
             }
         }
-        return rebuild(ref, pageId, schema, moving, scope, (child, childSchema, childHeight) ->
-                relocate(child, childSchema, childHeight, inVictim, scope, reached, copyLeaf));
+        return settle.apply(rebuild(ref, pageId, schema, moving, scope, (child, childSchema, childHeight) ->
+                relocate(child, childSchema, childHeight, inVictim, scope, reached, copyLeaf, settle)), schema);
     }
 
     public void pairMoves(Ref before, Ref after, TreeSchema<?> schema, Map<Long, Ref> moved) {
