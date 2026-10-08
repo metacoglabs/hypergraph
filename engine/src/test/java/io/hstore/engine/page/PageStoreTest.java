@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -49,6 +50,9 @@ class PageStoreTest {
         }
         try (PageStore reopened = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, segments)) {
             written.forEach((pageId, image) -> assertArrayEquals(image, bytes(reopened.read(pageId))));
+            long first = ids.getFirst();
+            reopened.read(first);
+            assertTrue(reopened.mappedBytes(PageId.segmentOf(first)) > 0);
         }
     }
 
@@ -62,6 +66,25 @@ class PageStoreTest {
                 MemorySegment page = store.read(pageId);
                 assertThrows(IllegalArgumentException.class, () -> page.set(ValueLayout.JAVA_BYTE, 0, (byte) 1));
             }
+        }
+    }
+
+    @Test
+    void finishedSegmentsAreMappedAndTheGrowingOneIsNotUntilItGrows() {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+            long finished = write(store, PAGE_SIZE);
+            fillPastOneSegment(store);
+            long growing = write(store, PAGE_SIZE);
+            store.read(finished);
+            store.read(growing);
+            assertTrue(store.mappedBytes(PageId.segmentOf(finished)) >= (long) PAGES_PER_SEGMENT * PAGE_SIZE - PAGE_SIZE);
+            assertEquals(0, store.mappedBytes(PageId.segmentOf(growing)));
+            for (int i = 0; i < 1100; i++) {
+                write(store, PAGE_SIZE);
+            }
+            long later = write(store, PAGE_SIZE);
+            store.read(later);
+            assertTrue(store.mappedBytes(PageId.segmentOf(later)) > 4L << 20);
         }
     }
 

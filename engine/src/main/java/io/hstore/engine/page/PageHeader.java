@@ -3,6 +3,8 @@ package io.hstore.engine.page;
 import io.hstore.engine.HStoreException;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 
 public record PageHeader(
         PageType type,
@@ -24,6 +26,7 @@ public record PageHeader(
     private static final int PAGE_ID_OFFSET = 8;
     private static final int PAYLOAD_LENGTH_OFFSET = 24;
     private static final int CHECKSUM_OFFSET = 72;
+    private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     public void writeTo(ByteCursor page) {
         page.position(0)
@@ -53,6 +56,10 @@ public record PageHeader(
 
     public static int payloadLength(MemorySegment page) {
         return ByteCursor.over(page).position(PAYLOAD_LENGTH_OFFSET).getInt();
+    }
+
+    static int payloadLengthAt(MemorySegment file, long position) {
+        return file.get(INT, position + PAYLOAD_LENGTH_OFFSET);
     }
 
     public static void seal(MemorySegment page, int payloadLength) {
