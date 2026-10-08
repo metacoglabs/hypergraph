@@ -27,6 +27,13 @@ public interface ValueCodec<V> {
         return value;
     }
 
+    default void forEachRef(V value, RefVisitor visitor) {
+        mapRefs(value, (ref, schema) -> {
+            visitor.visit(ref, schema);
+            return ref;
+        });
+    }
+
     static <V> ValueCodec<V> rows(ToIntFunction<V> size, BiConsumer<ByteCursor, V> writer, Function<ByteCursor, V> reader) {
         return new ValueCodec<>() {
             @Override
@@ -51,5 +58,9 @@ public interface ValueCodec<V> {
     @FunctionalInterface
     interface RefMapper {
         Ref map(Ref ref, TreeSchema<?> schema);
+    }
+
+    interface RefVisitor {
+        void visit(Ref ref, TreeSchema<?> schema);
     }
 }

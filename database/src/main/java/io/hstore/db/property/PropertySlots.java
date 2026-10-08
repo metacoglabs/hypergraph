@@ -54,7 +54,13 @@ public final class PropertySlots {
 
                 @Override
                 public IndexRoot mapRefs(IndexRoot value, RefMapper mapper) {
-                    return new IndexRoot(mapper.map(value.root(), VALUE_POSTINGS.schema()));
+                    Ref mapped = mapper.map(value.root(), VALUE_POSTINGS.schema());
+                    return mapped == value.root() ? value : new IndexRoot(mapped);
+                }
+
+                @Override
+                public void forEachRef(IndexRoot value, RefVisitor visitor) {
+                    visitor.visit(value.root(), VALUE_POSTINGS.schema());
                 }
             },
             EntryMeasure.keyed(root -> root.root().summary().fingerprint()));
