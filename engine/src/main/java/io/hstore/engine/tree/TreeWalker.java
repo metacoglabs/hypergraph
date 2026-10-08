@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.LongConsumer;
 import java.util.function.LongPredicate;
+import java.util.function.UnaryOperator;
 
 public final class TreeWalker {
 
@@ -50,20 +51,35 @@ public final class TreeWalker {
     }
 
     public Ref relocate(Ref root, TreeSchema<?> schema, LongPredicate moving, WriteScope scope, LongConsumer reached) {
-        return relocate(root, schema, UNKNOWN_HEIGHT, moving, scope, reached);
+        return relocate(root, schema, moving, scope, reached, leaf -> leaf);
     }
 
-    private Ref relocate(Ref ref, TreeSchema<?> schema, int height, LongPredicate inVictim, WriteScope scope, LongConsumer reached) {
-        if (!(ref instanceof Ref.Stored(long pageId, int _, Summary _))) {
+    public Ref relocate(Ref root, TreeSchema<?> schema, LongPredicate moving, WriteScope scope, LongConsumer reached,
+                        UnaryOperator<Ref.Stored> copyLeaf) {
+        return relocate(root, schema, UNKNOWN_HEIGHT, moving, scope, reached, copyLeaf);
+    }
+
+    private Ref relocate(Ref ref, TreeSchema<?> schema, int height, LongPredicate inVictim, WriteScope scope, LongConsumer reached,
+                         UnaryOperator<Ref.Stored> copyLeaf) {
+        if (!(ref instanceof Ref.Stored stored)) {
             return ref;
         }
+        long pageId = stored.pageId();
         reached.accept(pageId);
         boolean moving = inVictim.test(pageId);
-        if (height == 0 && !moving && !schema.codec().holdsRefs()) {
-            return ref;
+        if (!schema.codec().holdsRefs()) {
+            if (height == 0 && !moving) {
+                return ref;
+            }
+            if (moving && height <= 0) {
+                Ref.Stored copy = copyLeaf.apply(stored);
+                if (copy != stored) {
+                    return copy;
+                }
+            }
         }
         return rebuild(ref, pageId, schema, moving, scope, (child, childSchema, childHeight) ->
-                relocate(child, childSchema, childHeight, inVictim, scope, reached));
+                relocate(child, childSchema, childHeight, inVictim, scope, reached, copyLeaf));
     }
 
     public void pairMoves(Ref before, Ref after, TreeSchema<?> schema, Map<Long, Ref> moved) {
