@@ -41,7 +41,7 @@ public record EngineOptions(
     }
 
     public static EngineOptions defaults() {
-        return new EngineOptions(16 * 1024, 16 * 1024, 64L << 20, 256L << 20, Durability.SYNC, WalMode.PAGE_REFERENCES, 64,
+        return new EngineOptions(16 * 1024, 16 * 1024, 64L << 20, 64L << 20, Durability.SYNC, WalMode.PAGE_REFERENCES, 64,
                 256L << 20, 0.5, 100_000, List.of(), List.of(), CrashPoint.Injector.NONE);
     }
 

@@ -113,8 +113,8 @@ class ServerTest {
 
     @Test
     void nodeCacheIsSizedInMegabytesAndOldNamesAreRejected(@TempDir Path data) throws Exception {
-        assertEquals(64L << 20, ServerConfig.load(Optional.empty(), Map.of("HSTORE_NODE_CACHE_MB", "64"), Map.of()).engineOptions().nodeCacheBytes());
-        assertEquals(256L << 20, ServerConfig.load(Optional.empty(), Map.of(), Map.of()).engineOptions().nodeCacheBytes());
+        assertEquals(512L << 20, ServerConfig.load(Optional.empty(), Map.of("HSTORE_NODE_CACHE_MB", "512"), Map.of()).engineOptions().nodeCacheBytes());
+        assertEquals(64L << 20, ServerConfig.load(Optional.empty(), Map.of(), Map.of()).engineOptions().nodeCacheBytes());
         List<IllegalArgumentException> failures = new ArrayList<>();
         for (String old : List.of("cache_nodes", "cache_mb")) {
             Files.writeString(data.resolve(ServerConfig.FILE), old + " = 4096\n");
