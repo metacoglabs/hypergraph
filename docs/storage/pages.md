@@ -215,7 +215,7 @@ Most nodes fit in 4 KiB, so most reads are a single 4 KiB `pread`. A short read 
 The cache stores **decoded, frozen** `Node` objects, not bytes. A hit therefore costs no decoding and no allocation. The cache has 16 shards; a node goes to shard `mix(pageId) >>> 60`. Each shard has:
 
 * a `ConcurrentHashMap<Long, Slot>` from page id to `Slot(pageId, node, volatile referenced)`;
-* a byte budget of `max(64 KiB, cache_mb / 16)` and a circular, doubly linked ring of slots with a CLOCK hand. Each slot weighs its page: header plus payload when it was read, the image size when the commit wrote it;
+* a byte budget of `max(64 KiB, node_cache_mb / 16)` and a circular, doubly linked ring of slots with a CLOCK hand. Each slot weighs its page: header plus payload when it was read, the image size when the commit wrote it;
 * a `ReentrantLock` taken only for admission.
 
 **Reads are lock-free.** `get` is a `ConcurrentHashMap.get`, plus setting `referenced = true` if it was clear. The check avoids a redundant volatile write on hot entries.
