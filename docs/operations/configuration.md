@@ -91,7 +91,7 @@ max_connections          = 200
 | `page_size` | `HSTORE_PAGE_SIZE` | `16384` | Page size in bytes. Must be a power of two from 1 KiB to 1 MiB. It is recorded in `<data>/FORMAT` at creation, and opening with a different value fails with `database uses N byte pages, options request M`. |
 | `durability` | `HSTORE_DURABILITY` | `sync` | `sync`: a commit is acknowledged after the group-commit barrier has `fsync`ed it. `async`: acknowledged once appended, so a crash can lose a suffix of acknowledged commits but never corrupts the database. |
 | `wal_mode` | `HSTORE_WAL_MODE` | `references` | `references`: the WAL logs `PageRef(pageId, length, crc32c)` records and data pages are synced before the WAL. `images`: the WAL logs full page images. See [WAL and recovery](../transactions/wal-and-recovery.md). |
-| `node_cache_mb` | `HSTORE_NODE_CACHE_MB` | `64` | Megabytes of decoded tree nodes kept on the Java heap, each counted at the size of its page. |
+| `node_cache_mb` | `HSTORE_NODE_CACHE_MB` | `64` | Megabytes of Java heap for decoded tree nodes, each counted at an estimate of the memory it takes. |
 | `checkpoint_wal_mb` | `HSTORE_CHECKPOINT_WAL_MB` | `256` | WAL volume since the last checkpoint that triggers a background checkpoint. |
 | `history_limit` | `HSTORE_HISTORY_LIMIT` | `64` | Committed generations kept addressable for `AT GENERATION`, `AS OF`, `HISTORY` and the Studio time slider. |
 | `compaction_live_ratio` | `HSTORE_COMPACTION_LIVE_RATIO` | `0.5` | Sealed segments whose live bytes fall below this fraction of their allocated bytes are relocated by compaction: one segment (the emptiest) per background pass after every `checkpoint_wal_mb` of written node images, or all of them with `COMPACT`. Time-travel history is preserved; retired segments are deleted once `history_limit` has rolled past them. Must satisfy 0 < r < 1; other values fail at startup. |
@@ -141,8 +141,10 @@ for analytics over giant hyperedges. The value cannot be changed after `init`.
 
 **`node_cache_mb`.** This is the only cache HStore sizes itself, and it holds *decoded* nodes on the Java heap.
 Raw pages are cached by the operating system like any other file data, in memory the OS can take back when it
-needs to. Each node counts as the size of its page on disk (at most `page_size`), so the setting is a byte budget.
-The heap it really uses is somewhat higher, because a decoded node takes more memory than its page.
+needs to. Each node is counted at an estimate of its size on the heap, worked out from its entry count and the
+encoded size of its values, so the setting is close to the heap the cache really takes. Measured against the
+heap it was 10 to 40% low, never above. A decoded node is three to six times the size of its page, so a cache
+counted in page bytes would have used several times its setting.
 
 The server binary uses the serial collector, and every full collection walks everything this cache holds, so a
 bigger cache means longer pauses. Size it for what every lookup touches: the interior nodes, about 2% of the data,
