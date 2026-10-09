@@ -1,53 +1,46 @@
 package io.hstore.engine.page;
 
-public record PageId(int segment, int offset, int generation) {
+public record PageId(long index, int reuse) {
 
-    static final int SEGMENT_BITS = 24;
-    static final int OFFSET_BITS = 24;
-    static final int GENERATION_BITS = 16;
+    static final int REUSE_BITS = 16;
 
     public static final long NONE = 0L;
     public static final int UNIT_BYTES = 64;
-    public static final int MAX_SEGMENT = (1 << SEGMENT_BITS) - 1;
-    public static final int MAX_OFFSET = (1 << OFFSET_BITS) - 1;
+    public static final long MAX_INDEX = (1L << (Long.SIZE - REUSE_BITS)) - 1;
 
     public PageId {
-        if (segment < 1 || segment > MAX_SEGMENT || offset < 0 || offset > MAX_OFFSET) {
-            throw new IllegalArgumentException("page address out of range: " + segment + ":" + offset);
+        if (index < 1 || index > MAX_INDEX) {
+            throw new IllegalArgumentException("page number out of range: " + index);
         }
-        generation &= (1 << GENERATION_BITS) - 1;
+        reuse &= (1 << REUSE_BITS) - 1;
     }
 
     public static int unitsFor(long bytes) {
         return Math.toIntExact((bytes + UNIT_BYTES - 1) / UNIT_BYTES);
     }
 
-    public static long pack(int segment, int offset, long epoch) {
-        return new PageId(segment, offset, (int) epoch).pack();
+    public static long pack(long index, int reuse) {
+        return new PageId(index, reuse).pack();
     }
 
     public static PageId unpack(long packed) {
-        return new PageId(segmentOf(packed), offsetOf(packed), generationOf(packed));
+        return new PageId(indexOf(packed), reuseOf(packed));
     }
 
-    public static int segmentOf(long packed) {
-        return (int) (packed >>> (OFFSET_BITS + GENERATION_BITS));
+    public static long indexOf(long packed) {
+        return packed >>> REUSE_BITS;
     }
 
-    public static int offsetOf(long packed) {
-        return (int) (packed >>> GENERATION_BITS) & MAX_OFFSET;
-    }
-
-    public static int generationOf(long packed) {
-        return (int) packed & ((1 << GENERATION_BITS) - 1);
+    public static int reuseOf(long packed) {
+        return (int) packed & ((1 << REUSE_BITS) - 1);
     }
 
     public long pack() {
-        return ((long) segment << (OFFSET_BITS + GENERATION_BITS)) | ((long) offset << GENERATION_BITS) | generation;
+        return (index << REUSE_BITS) | reuse;
     }
 
     @Override
     public String toString() {
-        return segment + ":" + offset + "@" + generation;
+        return reuse == 0 ? "#" + index : "#" + index + "." + reuse;
     }
 }

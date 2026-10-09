@@ -24,7 +24,7 @@ flowchart LR
 
 | Package | Contents |
 |---|---|
-| `engine.page` | Segment files, 80-byte page header with CRC32C, `PageId` (segment 24 / offset 24 / generation 16 bits), page store and cache |
+| `engine.page` | Segment files, 80-byte page header with CRC32C, `PageId` page numbers, `PageAddress` (segment 24 / offset 24 / units 16 bits), the `pages.dir` page directory, page store and cache |
 | `engine.tree` | Copy-on-write counted B+tree, monoid summaries, write scopes, cursors, `TreeAlgebra` (leapfrog intersection, synchronized traversal), `TreeDiff`, `TreeVerifier` |
 | `engine.topology` | Hyperedge membership and incidence encodings, `Incidence`, `Validity` |
 | `engine.catalog` | Slots, root vectors, branches, generations, dictionary |

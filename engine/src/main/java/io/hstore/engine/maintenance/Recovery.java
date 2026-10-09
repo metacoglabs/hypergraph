@@ -56,6 +56,7 @@ public final class Recovery {
                 continue;
             }
             List<WalRecord> body = records == null ? List.of() : records;
+            body.forEach(record -> place(record, pages));
             if (discarded > 0 || !intact(body, pages)) {
                 if (discarded == 0) {
                     LOG.log(System.Logger.Level.WARNING, "durable prefix ends before generation {0}: transaction {1} references pages that never reached storage",
@@ -77,9 +78,18 @@ public final class Recovery {
         return new Outcome(recovered, replayed, pending.size(), discarded);
     }
 
+    private static void place(WalRecord record, PageStore pages) {
+        switch (record) {
+            case WalRecord.Page page -> pages.place(page.pageId(), page.address());
+            case WalRecord.PageRef ref -> pages.place(ref.pageId(), ref.address());
+            default -> {
+            }
+        }
+    }
+
     private static boolean intact(List<WalRecord> records, PageStore pages) {
         for (WalRecord record : records) {
-            if (record instanceof WalRecord.PageRef(long _, long pageId, int length, int checksum)) {
+            if (record instanceof WalRecord.PageRef(long _, long pageId, long _, int length, int checksum)) {
                 try {
                     MemorySegment page = pages.read(pageId);
                     PageHeader.verify(page, pageId);
@@ -99,7 +109,7 @@ public final class Recovery {
         Map<Integer, Branch> branches = new TreeMap<>(base.branches());
         for (WalRecord record : records) {
             switch (record) {
-                case WalRecord.Page(long _, long pageId, byte[] image) -> pages.write(pageId, MemorySegment.ofArray(image));
+                case WalRecord.Page(long _, long pageId, long _, byte[] image) -> pages.write(pageId, MemorySegment.ofArray(image));
                 case WalRecord.BranchMeta(long _, int id, String name, int parent, long baseGeneration, long created, Branch.State state) -> {
                     RootVector roots = branches.containsKey(id) ? branches.get(id).roots() : RootVector.EMPTY;
                     branches.put(id, new Branch(id, name, parent, baseGeneration, created, state, roots));

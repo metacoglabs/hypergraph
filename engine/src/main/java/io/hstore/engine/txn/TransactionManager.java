@@ -361,14 +361,14 @@ public final class TransactionManager {
         return new Materializer(new Materializer.Sink() {
             @Override
             public long allocate(int length) {
-                return storage.pages().allocate(epoch, length);
+                return storage.pages().allocate(length);
             }
 
             @Override
             public void accept(long pageId, MemorySegment image, Node frozen) {
                 records.add(storage.walMode() == WalMode.PAGE_IMAGES
-                        ? new WalRecord.Page(txnId, pageId, image.toArray(ValueLayout.JAVA_BYTE))
-                        : new WalRecord.PageRef(txnId, pageId, Math.toIntExact(image.byteSize()), Checksums.crc32c(image)));
+                        ? new WalRecord.Page(txnId, pageId, storage.pages().addressOf(pageId), image.toArray(ValueLayout.JAVA_BYTE))
+                        : new WalRecord.PageRef(txnId, pageId, storage.pages().addressOf(pageId), Math.toIntExact(image.byteSize()), Checksums.crc32c(image)));
                 writes.add(new PageWrite(pageId, image));
                 storage.source().admit(pageId, frozen);
             }

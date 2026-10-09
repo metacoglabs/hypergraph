@@ -44,7 +44,7 @@ public final class Compactor {
                 .flatMap(generation -> generation.branches().values().stream())
                 .forEach(branch -> branch.roots().roots().forEach((slot, ref) ->
                         walker.visit(ref, slots.slot(slot).schema(), visited)));
-        return visited.entrySet().stream().collect(Collectors.groupingBy(entry -> PageId.segmentOf(entry.getKey()), TreeMap::new,
+        return visited.entrySet().stream().collect(Collectors.groupingBy(entry -> pages.segmentOf(entry.getKey()), TreeMap::new,
                 Collectors.summingLong(entry -> (long) entry.getValue() * PageId.UNIT_BYTES)));
     }
 
@@ -68,7 +68,7 @@ public final class Compactor {
         }
         victims.forEach(id -> pages.transition(id, SegmentState.COMPACTING, 0));
         Set<Integer> victimSet = Set.copyOf(victims);
-        LongPredicate moving = pageId -> victimSet.contains(PageId.segmentOf(pageId));
+        LongPredicate moving = pageId -> victimSet.contains(pages.segmentOf(pageId));
         TreeWalker walker = new TreeWalker(transactions.source());
         List<Integer> branches = transactions.current().branches().values().stream()
                 .filter(Branch::isActive).map(Branch::id).toList();

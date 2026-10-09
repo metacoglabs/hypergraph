@@ -27,13 +27,14 @@ public final class PageStore implements AutoCloseable {
     private final AtomicLong pagesWritten = new AtomicLong();
     private final AtomicLong bytesWritten = new AtomicLong();
     private final AtomicLong pagesRead = new AtomicLong();
+    private PageDirectory addresses;
     private int activeSegment;
     private int nextUnit;
 
     private PageStore(Path directory, int pageSize, int pagesPerSegment) {
         this.directory = directory;
         this.pageSize = pageSize;
-        this.segmentUnits = (int) Math.min(PageId.MAX_OFFSET + 1L, (long) pagesPerSegment * pageSize / PageId.UNIT_BYTES);
+        this.segmentUnits = (int) Math.min(PageAddress.MAX_OFFSET + 1L, (long) pagesPerSegment * pageSize / PageId.UNIT_BYTES);
     }
 
     public static PageStore open(Path directory, int pageSize, int pagesPerSegment, Collection<SegmentInfo> known) {
@@ -45,6 +46,7 @@ public final class PageStore implements AutoCloseable {
     private void restore(Collection<SegmentInfo> known) {
         try {
             Files.createDirectories(directory);
+            addresses = PageDirectory.open(directory.resolve(PageDirectory.FILE));
             Map<Integer, SegmentInfo> byId = new ConcurrentHashMap<>();
             known.forEach(info -> byId.put(info.id(), info));
             try (Stream<Path> listing = Files.list(directory)) {
@@ -78,7 +80,7 @@ public final class PageStore implements AutoCloseable {
         return pageSize;
     }
 
-    public long allocate(long epoch, int length) {
+    public long allocate(int length) {
         if (length > pageSize) {
             throw new IllegalArgumentException("page image exceeds page size: " + length);
         }
@@ -91,7 +93,9 @@ public final class PageStore implements AutoCloseable {
             int offset = nextUnit;
             nextUnit += units;
             segments.computeIfPresent(activeSegment, (_, info) -> info.withAllocation(info.pages() + 1, Math.max(info.units(), offset + (long) units)));
-            return PageId.pack(activeSegment, offset, epoch);
+            long index = addresses.allocate();
+            addresses.put(index, new PageAddress(activeSegment, offset, units).pack());
+            return PageId.pack(index, 0);
         } finally {
             allocation.unlock();
         }
@@ -116,8 +120,12 @@ public final class PageStore implements AutoCloseable {
         if (image.byteSize() > pageSize) {
             throw new IllegalArgumentException("page image exceeds page size: " + image.byteSize());
         }
-        int segment = PageId.segmentOf(pageId);
-        int offset = PageId.offsetOf(pageId);
+        long address = locate(pageId);
+        if (PageId.unitsFor(image.byteSize()) > PageAddress.unitsOf(address)) {
+            throw new IllegalArgumentException("page image exceeds its allocation of " + PageAddress.unitsOf(address) + " units");
+        }
+        int segment = PageAddress.segmentOf(address);
+        int offset = PageAddress.offsetOf(address);
         SegmentFile file = files.computeIfAbsent(segment, id -> {
             segments.putIfAbsent(id, new SegmentInfo(id, SegmentState.SEALED, 0, 0, 0));
             return SegmentFile.open(id, SegmentFile.pathFor(directory, id));
@@ -135,16 +143,52 @@ public final class PageStore implements AutoCloseable {
     }
 
     public MemorySegment read(long pageId) {
-        SegmentFile file = files.get(PageId.segmentOf(pageId));
+        long address = locate(pageId);
+        SegmentFile file = files.get(PageAddress.segmentOf(address));
         if (file == null) {
             throw HStoreException.corrupt(pageId, "segment does not exist");
         }
         pagesRead.incrementAndGet();
-        return file.read((long) PageId.offsetOf(pageId) * PageId.UNIT_BYTES, pageSize);
+        return file.read((long) PageAddress.offsetOf(address) * PageId.UNIT_BYTES, PageAddress.unitsOf(address) * PageId.UNIT_BYTES);
+    }
+
+    public long addressOf(long pageId) {
+        return locate(pageId);
+    }
+
+    public int segmentOf(long pageId) {
+        return PageAddress.segmentOf(locate(pageId));
+    }
+
+    public void place(long pageId, long address) {
+        allocation.lock();
+        try {
+            long index = PageId.indexOf(pageId);
+            addresses.put(index, address);
+            addresses.reserve(index);
+            if (PageAddress.segmentOf(address) == activeSegment) {
+                nextUnit = Math.max(nextUnit, PageAddress.offsetOf(address) + PageAddress.unitsOf(address));
+            }
+        } finally {
+            allocation.unlock();
+        }
+    }
+
+    private long locate(long pageId) {
+        long address = addresses.get(PageId.indexOf(pageId));
+        if (address == PageAddress.NONE) {
+            throw HStoreException.corrupt(pageId, "page has no address");
+        }
+        return address;
     }
 
     public void sync() {
         files.values().forEach(SegmentFile::force);
+    }
+
+    public void checkpoint() {
+        sync();
+        addresses.force();
     }
 
     public List<SegmentInfo> segments() {
@@ -188,5 +232,6 @@ public final class PageStore implements AutoCloseable {
     public void close() {
         files.values().forEach(SegmentFile::close);
         files.clear();
+        addresses.close();
     }
 }
