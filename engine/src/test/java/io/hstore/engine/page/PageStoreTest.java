@@ -35,7 +35,7 @@ class PageStoreTest {
         try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
             for (int i = 0; i < 16_000; i++) {
                 byte[] image = image(random, PageHeader.SIZE + random.nextInt(PAGE_SIZE - PageHeader.SIZE + 1));
-                long pageId = store.allocate(1, image.length);
+                long pageId = store.allocate(image.length);
                 store.write(pageId, MemorySegment.ofArray(image));
                 written.put(pageId, image);
                 ids.add(pageId);
@@ -52,7 +52,7 @@ class PageStoreTest {
             written.forEach((pageId, image) -> assertArrayEquals(image, bytes(reopened.read(pageId))));
             long first = ids.getFirst();
             reopened.read(first);
-            assertTrue(reopened.mappedBytes(PageId.segmentOf(first)) > 0);
+            assertTrue(reopened.mappedBytes(reopened.segmentOf(first)) > 0);
         }
     }
 
@@ -77,20 +77,20 @@ class PageStoreTest {
             long growing = write(store, PAGE_SIZE);
             store.read(finished);
             store.read(growing);
-            assertTrue(store.mappedBytes(PageId.segmentOf(finished)) >= (long) PAGES_PER_SEGMENT * PAGE_SIZE - PAGE_SIZE);
-            assertEquals(0, store.mappedBytes(PageId.segmentOf(growing)));
+            assertTrue(store.mappedBytes(store.segmentOf(finished)) >= (long) PAGES_PER_SEGMENT * PAGE_SIZE - PAGE_SIZE);
+            assertEquals(0, store.mappedBytes(store.segmentOf(growing)));
             for (int i = 0; i < 1100; i++) {
                 write(store, PAGE_SIZE);
             }
             long later = write(store, PAGE_SIZE);
             store.read(later);
-            assertTrue(store.mappedBytes(PageId.segmentOf(later)) > 4L << 20);
+            assertTrue(store.mappedBytes(store.segmentOf(later)) > 4L << 20);
         }
     }
 
     private static long write(PageStore store, int length) {
         byte[] image = image(new Random(length), length);
-        long pageId = store.allocate(1, image.length);
+        long pageId = store.allocate(image.length);
         store.write(pageId, MemorySegment.ofArray(image));
         return pageId;
     }

@@ -21,9 +21,7 @@ final class MemoryPages implements NodeSource {
         Materializer materializer = new Materializer(new Materializer.Sink() {
             @Override
             public long allocate(int length) {
-                long pageId = PageId.pack(1, next, 1);
-                next += PageId.unitsFor(length);
-                return pageId;
+                return PageId.pack(++next, 0);
             }
 
             @Override

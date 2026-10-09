@@ -11,10 +11,10 @@ public sealed interface WalRecord {
     record Begin(long txnId, int branch, long baseGeneration) implements WalRecord {
     }
 
-    record Page(long txnId, long pageId, byte[] image) implements WalRecord {
+    record Page(long txnId, long pageId, long address, byte[] image) implements WalRecord {
     }
 
-    record PageRef(long txnId, long pageId, int length, int checksum) implements WalRecord {
+    record PageRef(long txnId, long pageId, long address, int length, int checksum) implements WalRecord {
     }
 
     record Root(long txnId, int branch, int slot, Ref root) implements WalRecord {
@@ -53,7 +53,7 @@ public sealed interface WalRecord {
     static void writePayload(ByteCursor out, WalRecord record) {
         switch (record) {
             case Begin(long _, int branch, long base) -> out.putVarInt(branch).putVarLong(base);
-            case Page(long _, long pageId, byte[] image) -> out.putLong(pageId).putBlob(image);
+            case Page(long _, long pageId, long address, byte[] image) -> out.putLong(pageId).putLong(address).putBlob(image);
             case Root(long _, int branch, int slot, Ref root) -> {
                 out.putVarInt(branch).putVarInt(slot);
                 Ref.write(out, root);
@@ -66,14 +66,14 @@ public sealed interface WalRecord {
             case Abort _ -> {
             }
             case Checkpoint(long _, long generation, long lsn) -> out.putVarLong(generation).putVarLong(lsn);
-            case PageRef(long _, long pageId, int length, int checksum) -> out.putLong(pageId).putVarInt(length).putInt(checksum);
+            case PageRef(long _, long pageId, long address, int length, int checksum) -> out.putLong(pageId).putLong(address).putVarInt(length).putInt(checksum);
         }
     }
 
     static WalRecord readPayload(int type, long txnId, ByteCursor in) {
         return switch (type) {
             case 1 -> new Begin(txnId, in.getVarInt(), in.getVarLong());
-            case 2 -> new Page(txnId, in.getLong(), in.getBlob());
+            case 2 -> new Page(txnId, in.getLong(), in.getLong(), in.getBlob());
             case 3 -> new Root(txnId, in.getVarInt(), in.getVarInt(), Ref.read(in));
             case 4 -> new BranchMeta(txnId, in.getVarInt(), in.getString(), in.getVarInt(), in.getVarLong(), in.getVarLong(),
                     Branch.State.values()[in.getUnsignedByte()]);
@@ -81,7 +81,7 @@ public sealed interface WalRecord {
             case 6 -> new Commit(txnId, in.getVarLong(), in.getVarLong(), in.getVarLong(), in.getVarLong());
             case 7 -> new Abort(txnId);
             case 8 -> new Checkpoint(txnId, in.getVarLong(), in.getVarLong());
-            case 9 -> new PageRef(txnId, in.getLong(), in.getVarInt(), in.getInt());
+            case 9 -> new PageRef(txnId, in.getLong(), in.getLong(), in.getVarInt(), in.getInt());
             default -> throw new IllegalStateException("unknown WAL record type " + type);
         };
     }

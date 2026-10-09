@@ -126,7 +126,7 @@ class CrashRecoveryTest {
 
     private Path lastSegment() throws Exception {
         try (Stream<Path> files = Files.list(directory.resolve("data").resolve("segments"))) {
-            return files.max(Comparator.naturalOrder()).orElseThrow();
+            return files.filter(file -> file.getFileName().toString().endsWith(".seg")).max(Comparator.naturalOrder()).orElseThrow();
         }
     }
 }

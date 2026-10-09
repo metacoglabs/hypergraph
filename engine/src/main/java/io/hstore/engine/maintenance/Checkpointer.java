@@ -42,7 +42,7 @@ public final class Checkpointer {
     public Result checkpoint() {
         return transactions.exclusive(() -> {
             long lsn = wal.end();
-            pages.sync();
+            pages.checkpoint();
             feed.sync();
             Generation current = transactions.current();
             List<Generation> history = transactions.history().stream()
