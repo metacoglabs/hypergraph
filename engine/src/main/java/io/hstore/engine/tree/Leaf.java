@@ -8,6 +8,8 @@ import java.util.List;
 
 public final class Leaf extends Node {
 
+    private static final int ENTRY_HEAP_BYTES = 96;
+
     private long[] keys;
     private Object[] values;
     private int size;
@@ -51,6 +53,12 @@ public final class Leaf extends Node {
         for (int i = 0; i < size; i++) {
             valueBytes += schema.entryBytes(values[i]);
         }
+    }
+
+    @Override
+    int heapBytes() {
+        return NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + Integer.BYTES * values.length
+                + ENTRY_HEAP_BYTES * size + valueBytes;
     }
 
     int search(long key) {
