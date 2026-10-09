@@ -41,10 +41,10 @@ public final class Checkpointer {
 
     public Result checkpoint() {
         return transactions.exclusive(() -> {
+            long lsn = wal.end();
             pages.sync();
             feed.sync();
             Generation current = transactions.current();
-            long lsn = wal.end();
             List<Generation> history = transactions.history().stream()
                     .filter(generation -> generation.id() != current.id())
                     .sorted((a, b) -> Long.compare(b.id(), a.id()))
