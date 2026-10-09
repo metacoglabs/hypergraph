@@ -83,7 +83,7 @@ The engine has no dependencies outside `java.base`. All three modules build into
 | Package | Purpose |
 |---|---|
 | `io.hstore.engine` | `StorageEngine` (open/close, maintenance thread, checkpoint/compact entry points), `EngineOptions`, `EngineStats`, `Dictionary` (interned role names and role sets), `HStoreException` (error codes, retryable conflicts). |
-| `engine.page` | Byte-level storage. `PageStore` and `SegmentFile` hold segment files and allocation. `PageHeader` is the 80-byte header and crc32c seal. `PageId` packs page addresses. `ByteCursor` provides little-endian and varint codecs over `MemorySegment`. `IoTrace` counts page visits per query through a `ScopedValue`. |
+| `engine.page` | Byte-level storage. `PageStore` and `SegmentFile` hold segment files and allocation. `PageHeader` is the 80-byte header and crc32c seal. `PageId` is a page's permanent number, `PageAddress` its place in a segment, and `PageDirectory` the memory-mapped `pages.dir` that maps one to the other. `ByteCursor` provides little-endian and varint codecs over `MemorySegment`. `IoTrace` counts page visits per query through a `ScopedValue`. |
 | `engine.tree` | The copy-on-write counted B+tree. `Tree` is the immutable handle and `TreeWriter` does path-copy updates. Nodes are `Leaf` and `Branch`, referenced by `Ref` (`Empty`, `Pending` or `Stored`). Also here: `Summary` (monoid annotations), `TreeCursor`, `TreeAlgebra` (leapfrog, set algebra), `TreeDiff`, `BulkBuilder`, `NodeCodec`, `NodeCache`, `Materializer`, `TreeWalker` and `TreeVerifier`. |
 | `engine.topology` | Hyperedge representation: `Hyperedge` (members tree plus order index), `Incidence` (one member's role set, weight, validity, payload and qualifier), `IncidenceCodec` (columnar leaf encoding), `MemberChange`, `Weight` (fixed point) and `Validity`. |
 | `engine.index` | `PostingIndex`, a two-level index from a key to a postings set. Small sets are inlined and large ones are promoted to their own tree. Used by the reverse incidence, type, canonical-key and symbol indexes. |
@@ -184,7 +184,7 @@ sequenceDiagram
     TM->>TM: fast path when base roots or touched slots are unchanged,<br/>otherwise validateReads and replay the op log on the latest roots (rebase)
     TM->>M: materialize each pending root (post-order)
     M->>M: encode node image (pageId 0)
-    M->>PS: allocate(epoch = generation, length): 64-byte units
+    M->>PS: allocate(length): next page number, 64-byte units, directory entry
     M->>M: PageHeader.assign: patch pageId, reseal crc32c
     M-->>TM: Stored refs, WAL Page / PageRef records, node images
     TM->>WAL: append Begin, Page/PageRef*, Root*, BranchMeta*, Feed
@@ -201,7 +201,7 @@ sequenceDiagram
     GC-->>TX: await() returns published generation
 ```
 
-The ordering above is what makes recovery safe. Under `PAGE_REFERENCES` the WAL carries only `(pageId, length, crc32c)` for each new page. The flusher therefore makes data pages durable *before* the log records that reference them. Recovery replays committed transactions in order and stops at the first commit whose referenced pages fail verification (the *durable-prefix* rule in `Recovery.intact`). The full protocol and the crash-point matrix are in [wal-and-recovery.md](../transactions/wal-and-recovery.md).
+The ordering above is what makes recovery safe. Under `PAGE_REFERENCES` the WAL carries only `(pageId, address, length, crc32c)` for each new page. The flusher therefore makes data pages durable *before* the log records that reference them. Recovery replays committed transactions in order and stops at the first commit whose referenced pages fail verification (the *durable-prefix* rule in `Recovery.intact`). The full protocol and the crash-point matrix are in [wal-and-recovery.md](../transactions/wal-and-recovery.md).
 
 ## Threading model
 
@@ -227,13 +227,14 @@ Readers take no locks at all.
 The following is real output from `hstore init` followed by loading `examples/clinical-claims.hql` and running `CHECKPOINT;` (default 16 KiB pages):
 
 ```text
-FORMAT                                   55 B  format=3, page-size=16384 (java.util.Properties)
+FORMAT                                   55 B  format=4, page-size=16384 (java.util.Properties)
 LOCK                                      0 B  FileChannel.tryLock() held while open
 hstore.conf                            2397 B  server configuration template written by `hstore init`
 catalog/manifest                         20 B  name of the latest catalog file
 catalog/generations/0000000000000000.cat 37 B  checkpoint of generation 0
 catalog/generations/000000000000009d.cat 49147 B  checkpoint of generation 157 (current + retained history)
 data/segments/00000001.seg           1210439 B  segment 1: packed node images
+data/segments/pages.dir              8388608 B  page directory, one 8 MiB chunk mapped so far (sparse)
 wal/segments/0000000000000000.wal      156180 B  WAL segment starting at LSN 0
 feed/0000000000000000.feed             29846 B  change feed segment starting at byte 0
 payload/000001.pay                        0 B  payload segment (database layer)
@@ -242,11 +243,12 @@ semantic/state                           53 B  persisted HNSW index state (datab
 
 | Path | Owner | Format |
 |---|---|---|
-| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=3` (packed extents, sized references) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
+| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=4` (page numbers resolved through a page directory) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
 | `LOCK` | `StorageEngine.open` | An exclusive OS file lock. A second process gets `database ... is opened by another process`. |
 | `catalog/generations/%016x.cat` | `CatalogStore.publish` | `int magic 0x54414348`, `int crc32c(payload)`, `long length`, then the `CatalogImage` payload. Written to `*.tmp`, fsynced, atomically renamed, and the directory fsynced. The three newest files are kept. |
 | `catalog/manifest` | `CatalogStore` | The file name of the latest `.cat`, written durably the same way. |
 | `data/segments/%08x.seg` | `PageStore` / `SegmentFile` | Append-only extents of node images packed at 64-byte alignment, up to 256 MiB per segment by default (1 GiB maximum); see [pages.md](../storage/pages.md). |
+| `data/segments/pages.dir` | `PageDirectory` | 64-byte header, then one `i64` address (segment, offset, units) per page number, memory-mapped in 8 MiB chunks; see [pages.md](../storage/pages.md#page-numbers-and-the-page-directory). |
 | `wal/segments/%016x.wal` | `WriteAheadLog` | Each segment is named by its starting LSN; see [wal-and-recovery.md](../transactions/wal-and-recovery.md). |
 | `feed/%016x.feed` | `ChangeFeed` | Segments (64 MiB, named by starting byte offset) of frames `int length`, `int crc32c`, `long generation`, `payload`, trimmed by retention after checkpoints; see [change-feed.md](../storage/change-feed.md). |
 | `payload/%06x.pay` | `db.payload.PayloadStore` | Append-only payload extents. |
