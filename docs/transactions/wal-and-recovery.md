@@ -275,7 +275,7 @@ The checkpoint LSN is the position of the `Checkpoint` record itself, so the nex
 |---|---|
 | Every open, right after recovery | `StorageEngine` constructor |
 | WAL grew by more than `checkpointWalBytes` (default 256 MiB) since the last checkpoint; checked every 500 ms | `StorageEngine.maintain` |
-| Compaction, between relocation and segment reclamation | `StorageEngine.compact` |
+| Compaction, after moving pages and before deleting segments | `StorageEngine.compact` |
 | Clean shutdown | `StorageEngine.close` |
 | On demand | `StorageEngine.checkpoint()`, HQL `CHECKPOINT` |
 

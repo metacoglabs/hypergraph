@@ -156,9 +156,9 @@ no image. The file is memory-mapped in 8 MiB chunks, and a new chunk is mapped w
 lookup is a load from the OS page cache and the directory takes no Java heap. A million pages need 8 MB of it.
 
 Nothing outside `PageStore` sees an address. Trees, nested references, `NodeCache`, `Ref` and the WAL all use
-numbers. That is what will let compaction move an image by changing one directory entry, without rewriting the nodes
-that point at it. It doesn't do that yet; it still rebuilds the paths to the pages it moves
-([maintenance.md](maintenance.md)).
+numbers. That is what lets compaction move an image by copying its bytes and changing one directory entry, without
+rewriting the nodes that point at it ([maintenance.md](maintenance.md#compaction)). Entries are written and read with
+release and acquire ordering, so a reader racing a move sees either the old address or the new one, never a mix.
 
 Page `#1234`, stored as 3 units at unit 1234 of segment 1:
 

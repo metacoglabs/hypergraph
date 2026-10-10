@@ -90,8 +90,8 @@ This is every message the server emits. Placeholders are in `{braces}`.
 
 | Severity | Component | Message |
 |---|---|---|
-| LOG | engine | `background compaction relocated segments {list}` (write-volume-triggered pass) |
-| LOG | engine | `compaction relocated segments {list} and reclaimed {list}` |
+| LOG | engine | `background compaction moved the live pages out of segments {list}` (write-volume-triggered pass) |
+| LOG | engine | `compaction moved the live pages out of segments {list} and reclaimed {list}` |
 | LOG | engine | `reclaimed retired segments {list}` |
 | WARNING | hstore | `background maintenance failed` (with DETAIL) |
 | LOG | txn | `created branch {name} (#{id}) from generation {g}` |

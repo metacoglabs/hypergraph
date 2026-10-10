@@ -124,7 +124,7 @@ for each flagged column, in that order:
 
 A column is flagged only when it differs from the default (`roleSet != NO_ROLES`, `weight != Weight.ONE`, `validFrom != Long.MIN_VALUE`, `validTo != Long.MAX_VALUE`, `dataRef != 0`, `qualifier != 0`), so a plain membership costs 1 byte of flags plus the member id.
 
-Slot values that contain tree references (codecs with `holdsRefs()`, for example an `EdgeRecord` with member and order roots) are **detached** before encoding: every embedded `Ref` is replaced with `Ref.EMPTY`. Feed events therefore never pin pages, and compaction may relocate or reclaim any page without invalidating the feed. Consumers that need the topology of an edge read it from a snapshot, or use the event's `members` list.
+Slot values that contain tree references (codecs with `holdsRefs()`, for example an `EdgeRecord` with member and order roots) are **detached** before encoding: every embedded `Ref` is replaced with `Ref.EMPTY`. Feed events therefore never pin pages, and compaction may move or reclaim any page without invalidating the feed. Consumers that need the topology of an edge read it from a snapshot, or use the event's `members` list.
 
 ### Example
 

@@ -100,7 +100,7 @@ Published generations are kept in `TransactionManager.history` (a `ConcurrentSki
 * `snapshotAt(generation, branch)` pins the generation and opens a snapshot over its root vector. A generation that has been trimmed fails with `generation N is no longer retained`.
 * `generationAsOf(wallTime)` returns the newest retained generation with `wallTime <= t`.
 
-Time travel needs no undo log. Copy-on-write never overwrites a page, so an old generation's root vector still points at valid pages, and reading the past is exactly as fast as reading the present. A historical page is only reclaimed once compaction has relocated the live data *and* both history trimming (`history_limit`) and every pinned reader have moved past the compaction generation ([maintenance.md](maintenance.md#reclaim)). Compaction therefore never shortens the time-travel window.
+Time travel needs no undo log. Copy-on-write never overwrites a page, so an old generation's root vector still points at valid pages, and reading the past is exactly as fast as reading the present. Compaction moves the pages a retained generation still needs and keeps their page numbers, so old root vectors stay valid after their segments are deleted ([maintenance.md](maintenance.md#reclaim)). Compaction therefore never shortens the time-travel window.
 
 The retained history is also persisted. `Checkpointer` writes up to `historyLimit` past generations into the catalog image, and `Recovery` appends every replayed generation, so time travel survives restarts.
 
@@ -124,7 +124,7 @@ Branches are named, independently writable lines of generations that share pages
 | merge | `markMerged(id)` → `closeBranch(id, MERGED)` | Sets the state to `MERGED` **and empties its roots**, so its pages are no longer reachable from the current generation. The actual three-way merge of contents happens in `db.temporal.BranchMerge` before this call. |
 | drop | `dropBranch(id)` → `closeBranch(id, DROPPED)` | The same, with state `DROPPED`. `Generation.branch` rejects a dropped id. |
 
-`main` (id 0) cannot be closed. `StorageEngine.branches()` lists only `ACTIVE` branches. Because closed branches carry empty root vectors, compaction only has to relocate the active ones.
+`main` (id 0) cannot be closed. `StorageEngine.branches()` lists only `ACTIVE` branches. Because closed branches carry empty root vectors, they keep no pages alive.
 
 ```sql
 CREATE BRANCH what_if;
