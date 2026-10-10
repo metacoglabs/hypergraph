@@ -7,7 +7,9 @@ public enum CrashPoint {
     COMMIT_APPEND,
     DATA_SYNC,
     WAL_SYNC,
-    CATALOG_PUBLISH;
+    CATALOG_PUBLISH,
+    COMPACTION_MOVE,
+    COMPACTION_RETIRE;
 
     @FunctionalInterface
     public interface Injector {

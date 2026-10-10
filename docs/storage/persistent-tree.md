@@ -20,7 +20,7 @@ This document describes the node structure, the write path, the summaries and th
 | `TreeCursor` | `TreeCursor.java` | Bidirectional cursor with seek and summary-based pruning. |
 | `TreeAlgebra`, `TreeDiff` | `TreeAlgebra.java`, `TreeDiff.java` | Intersection (leapfrog, synchronized descent, probing), union, difference, subset, equality and structural diff. |
 | `Materializer` | `Materializer.java` | Freezes and encodes pending nodes into pages, post-order. |
-| `TreeWalker`, `TreeVerifier` | | Reachability (liveness), relocation (compaction) and invariant checking. |
+| `TreeWalker`, `TreeVerifier` | | Reachability (liveness for compaction) and invariant checking. |
 
 ## Node structure
 

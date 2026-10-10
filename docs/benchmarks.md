@@ -229,7 +229,7 @@ not what drives HStore's footprint:
 * **Disk at scale 4 (0.54×).** Live data is comparable: about 1 GB of live node images in HStore against
   1.27 GB in JE. The difference is garbage that has not been reclaimed yet. Both engines are log-structured
   with a 50% minimum-utilisation cleaner: HStore's `compaction_live_ratio = 0.5`, JE's
-  `je.cleaner.minUtilization = 50`. A sealed HStore segment is only relocated once fewer than half of its
+  `je.cleaner.minUtilization = 50`. A sealed HStore segment is only compacted once fewer than half of its
   images are live, and the background pass runs after every `checkpoint_wal_mb` of writes
   ([maintenance.md](storage/maintenance.md)). Raising `compaction_live_ratio` trades write amplification for
   space.

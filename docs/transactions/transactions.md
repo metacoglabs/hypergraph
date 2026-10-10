@@ -118,7 +118,7 @@ commit(txn):
     if txn has requestId and REQUESTS[hash(id)] exists -> DUPLICATE (prior txn id, prior generation)
     fast = branch.roots sameAs txn.baseRoots
         || (requestsStable && workspace.untouchedSince(branch.roots, isolation == SERIALIZABLE))
-    if !fast and txn.generation < relocationFence and txn carries Load ops -> Conflict
+    if txn.compactionsAtStart < compactions and txn carries Load ops -> Conflict
     if fast: workspace = txn.workspace
     else:    txn.validateReads(branch.roots); workspace = txn.replay(branch.roots)
     if requestId: workspace.write(REQUESTS, hash(id), RequestRecord(id, txn.id, latest.id + 1))
@@ -155,9 +155,9 @@ A footprint is *commutative* iff the edge was a `SET` edge at the base and every
 
 `TreeDiff.diff` uses the frontier algorithm over shared subtrees ([persistent tree](../storage/persistent-tree.md)), so the cost of the overlap check is proportional to the changed region, not the edge cardinality.
 
-### 5.3 Relocation fence
+### 5.3 Compaction fence
 
-Compaction rewrites roots through `TransactionManager.rewrite`, which records `relocationFence = new generation id`. A transaction that bulk-loaded stored subtrees (`carriesStoredRoots()`: any `EdgeOp` with `EdgeAction.Load`) began before the fence and cannot take the fast path is rejected with a conflict, because its stored roots may point into segments that compaction is about to retire. Retrying rebuilds the subtree.
+Compaction moves pages without changing any root, so it doesn't affect other commits. A bulk load is different: a transaction that bulk-loaded stored subtrees (`carriesStoredRoots()`: any `EdgeOp` with `EdgeAction.Load`) may have spilled pages that no generation reaches yet, so compaction can't see them and won't move them. Each transaction records `TransactionManager.compactions()` when it begins, and one that carries stored roots is rejected with a conflict if a compaction has finished since, on the fast path as well as the slow one. Retrying rebuilds the subtree.
 
 ### 5.4 Page budget
 
@@ -206,7 +206,7 @@ Under `SNAPSHOT` both commits succeed (R replays `Insert(p)` into B, which L nev
 
 | Code | Class | Retryable | Raised by |
 |---|---|---|---|
-| `RETRYABLE_CONFLICT` | `Conflict` | yes | replay preconditions, `verifyEdge`, `validateReads`, relocation fence, concurrent atom id/canonical key |
+| `RETRYABLE_CONFLICT` | `Conflict` | yes | replay preconditions, `verifyEdge`, `validateReads`, compaction fence, concurrent atom id/canonical key |
 | `RETRYABLE_IO` | `TransientIo` | yes | WAL/page/feed I/O failures; a broken commit pipeline (`"the commit pipeline stopped after a durability failure; restart the engine"`) |
 | `ABORTED_RESOURCE_LIMIT` | `ResourceLimit` | no | page budget, quotas |
 | `INVALID_SCHEMA` | `InvalidSchema` | no | caller errors |
@@ -344,10 +344,9 @@ Had T2 also touched `m1`, or had `E` been an `ORDERED` edge, the overlap check w
 
 ## 10. Branch operations and internal writes
 
-`system(branchId, work)`, `createBranch`, `closeBranch` and `rewrite` reuse `append` and the group committer, so they are durable and ordered exactly like user commits:
+`system(branchId, work)`, `createBranch` and `closeBranch` reuse `append` and the group committer, so they are durable and ordered exactly like user commits:
 
 * `createBranch` appends a `BranchMeta` record and a branch whose roots are the parent's current roots (copy-on-write makes this O(number of slots)). Names must be unique among active branches; the new id is one past the largest existing id.
 * `closeBranch` (`MERGED` or `DROPPED`, never for `MAIN`) empties the root vector so the branch's pages become unreachable.
-* `rewrite` (compaction) replaces roots without member or slot changes and sets the relocation fence.
 
 These commits carry no member or slot changes, so their `CommitEvent` is empty and nothing is written to the change feed (see [change feed](../storage/change-feed.md)).

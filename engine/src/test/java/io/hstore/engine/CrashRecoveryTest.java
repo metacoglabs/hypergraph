@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,7 +36,7 @@ class CrashRecoveryTest {
     Path directory;
 
     static Stream<Arguments> crashMatrix() {
-        return Stream.of(WalMode.values()).flatMap(mode -> Stream.of(CrashPoint.values()).map(point -> Arguments.of(mode, point)));
+        return Stream.of(WalMode.values()).flatMap(mode -> EnumSet.range(CrashPoint.PAGE, CrashPoint.CATALOG_PUBLISH).stream().map(point -> Arguments.of(mode, point)));
     }
 
     @ParameterizedTest

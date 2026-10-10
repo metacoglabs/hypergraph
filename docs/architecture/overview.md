@@ -91,7 +91,7 @@ The engine has no dependencies outside `java.base`. All three modules build into
 | `engine.txn` | `TransactionManager` (commit lock, append, publication, pins, history), `Transaction` (op log, read sets, rebase), `Snapshot`, `View` (read API shared by both), `Workspace` (mutable root vector plus derivations), `GroupCommitter`, `Op`/`EdgeAction`, `Derivation`/`EngineDerivations`, `CrashPoint`, `Durability`, `WalMode`, `Isolation` and `TxnOptions`. |
 | `engine.wal` | `WriteAheadLog` (segmented, checksummed records) and `WalRecord` (`Begin`, `Page`, `PageRef`, `Root`, `BranchMeta`, `Feed`, `Commit`, `Abort`, `Checkpoint`). |
 | `engine.feed` | `ChangeFeed` (segmented append-only `feed/*.feed` files, sparse generation index, retention, tailing subscriptions), `CommitEvent` and `FeedCodec`; see [change-feed.md](../storage/change-feed.md). |
-| `engine.maintenance` | `Checkpointer`, `Compactor` (liveness, relocation, reclamation) and `Recovery` (catalog discovery, WAL redo, durable-prefix rule). |
+| `engine.maintenance` | `Checkpointer`, `Compactor` (liveness, moving live pages out of victim segments, reclamation) and `Recovery` (catalog discovery, WAL redo, durable-prefix rule). |
 
 ### `io.hstore.db`
 

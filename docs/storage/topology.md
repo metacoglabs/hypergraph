@@ -36,9 +36,9 @@ EdgeRecord: u8 tag=1 | varint type | u8 kind (0=SET, 1=ORDERED) | Ref members | 
 Ref:        i64le pageId (0 = empty) | [Summary encoding, only when pageId != 0]
 ```
 
-Because `AtomCodec.holdsRefs()` is true, the materializer writes each edge's member and order trees *before* the catalog leaf that references them. `TreeWalker` and `TreeVerifier` descend into them, and compaction relocates them. The catalog therefore forms a two-level tree of trees: catalog leaves hold edge records, and each edge record roots its own membership tree.
+Because `AtomCodec.holdsRefs()` is true, the materializer writes each edge's member and order trees *before* the catalog leaf that references them. `TreeWalker` and `TreeVerifier` descend into them, and compaction moves their pages like any other. The catalog therefore forms a two-level tree of trees: catalog leaves hold edge records, and each edge record roots its own membership tree.
 
-A record's `contentHash()` feeds the catalog's SET fingerprint. The hash of an edge record is computed from `(1, type, kind, members.count, members.fingerprint, version, dataRef, tenant, isolation)`. It is a function of the edge's member *contents*, never of page ids, so relocating pages during compaction does not change catalog fingerprints.
+A record's `contentHash()` feeds the catalog's SET fingerprint. The hash of an edge record is computed from `(1, type, kind, members.count, members.fingerprint, version, dataRef, tenant, isolation)`. It is a function of the edge's member *contents*, never of page ids, and compaction never changes page ids anyway, so it leaves catalog fingerprints alone.
 
 ## Hyperedges
 

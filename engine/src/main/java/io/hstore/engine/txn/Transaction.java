@@ -47,6 +47,7 @@ public final class Transaction extends View implements AutoCloseable {
 
     private final TransactionManager manager;
     private final long id;
+    private final long compactionsAtStart;
     private final Generation snapshot;
     private final Branch branch;
     private final TxnOptions options;
@@ -62,6 +63,7 @@ public final class Transaction extends View implements AutoCloseable {
     Transaction(TransactionManager manager, long id, Generation snapshot, TxnOptions options) {
         this.manager = manager;
         this.id = id;
+        this.compactionsAtStart = manager.compactions();
         this.snapshot = snapshot;
         this.branch = snapshot.branch(options.branch());
         this.options = options;
@@ -257,6 +259,10 @@ public final class Transaction extends View implements AutoCloseable {
         if (state != State.ACTIVE) {
             throw new IllegalStateException("transaction " + id + " is " + state);
         }
+    }
+
+    long compactionsAtStart() {
+        return compactionsAtStart;
     }
 
     boolean carriesStoredRoots() {

@@ -23,6 +23,7 @@ public final class Checkpointer {
     private final CatalogStore catalog;
     private final int historyLimit;
     private volatile long lastLsn;
+    private volatile long completed;
 
     public Checkpointer(TransactionManager transactions, PageStore pages, WriteAheadLog wal, ChangeFeed feed,
                         CatalogStore catalog, int historyLimit, long recoveredLsn) {
@@ -37,6 +38,10 @@ public final class Checkpointer {
 
     public long walSinceCheckpoint() {
         return wal.end() - lastLsn;
+    }
+
+    public long completed() {
+        return completed;
     }
 
     public Result checkpoint() {
@@ -55,6 +60,7 @@ public final class Checkpointer {
             wal.sync();
             wal.truncateBefore(lsn);
             lastLsn = lsn;
+            completed++;
             return new Result(current.id(), lsn, wal.segmentCount());
         });
     }

@@ -56,6 +56,9 @@ public final class PageStore implements AutoCloseable {
                     files.put(id, segment);
                     long units = segment.unitsOnDisk();
                     SegmentInfo info = byId.getOrDefault(id, new SegmentInfo(id, SegmentState.SEALED, units, units, 0));
+                    if (info.state() == SegmentState.COMPACTING) {
+                        info = info.withState(SegmentState.SEALED, 0);
+                    }
                     segments.put(id, info.withAllocation(info.pages(), Math.max(info.units(), units)));
                 }
             }
@@ -87,18 +90,39 @@ public final class PageStore implements AutoCloseable {
         int units = PageId.unitsFor(length);
         allocation.lock();
         try {
-            if (activeSegment == 0 || nextUnit + units > segmentUnits) {
-                rollSegment();
-            }
-            int offset = nextUnit;
-            nextUnit += units;
-            segments.computeIfPresent(activeSegment, (_, info) -> info.withAllocation(info.pages() + 1, Math.max(info.units(), offset + (long) units)));
             long index = addresses.allocate();
-            addresses.put(index, new PageAddress(activeSegment, offset, units).pack());
+            addresses.put(index, claim(units));
             return PageId.pack(index, 0);
         } finally {
             allocation.unlock();
         }
+    }
+
+    public long copy(long pageId) {
+        long from = locate(pageId);
+        MemorySegment image = read(pageId);
+        PageHeader.verify(image, pageId);
+        long to;
+        allocation.lock();
+        try {
+            to = claim(PageAddress.unitsOf(from));
+        } finally {
+            allocation.unlock();
+        }
+        files.get(PageAddress.segmentOf(to)).write((long) PageAddress.offsetOf(to) * PageId.UNIT_BYTES, image);
+        pagesWritten.incrementAndGet();
+        bytesWritten.addAndGet(image.byteSize());
+        return to;
+    }
+
+    private long claim(int units) {
+        if (activeSegment == 0 || nextUnit + units > segmentUnits) {
+            rollSegment();
+        }
+        int offset = nextUnit;
+        nextUnit += units;
+        segments.computeIfPresent(activeSegment, (_, info) -> info.withAllocation(info.pages() + 1, Math.max(info.units(), offset + (long) units)));
+        return new PageAddress(activeSegment, offset, units).pack();
     }
 
     private void rollSegment() {
