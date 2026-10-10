@@ -7,6 +7,7 @@ import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
@@ -25,6 +26,7 @@ final class PageDirectory implements AutoCloseable {
     private static final long CHUNK_BYTES = 1L << CHUNK_SHIFT;
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG.withOrder(ByteOrder.LITTLE_ENDIAN);
+    private static final VarHandle ENTRY = LONG.varHandle();
 
     private final Path path;
     private final FileChannel channel;
@@ -62,7 +64,7 @@ final class PageDirectory implements AutoCloseable {
         long position = HEADER + index * Long.BYTES;
         MemorySegment[] mapped = chunks;
         int chunk = (int) (position >>> CHUNK_SHIFT);
-        return chunk < mapped.length ? mapped[chunk].get(LONG, position & (CHUNK_BYTES - 1)) : PageAddress.NONE;
+        return chunk < mapped.length ? (long) ENTRY.getAcquire(mapped[chunk], position & (CHUNK_BYTES - 1)) : PageAddress.NONE;
     }
 
     void put(long index, long address) {
@@ -71,7 +73,7 @@ final class PageDirectory implements AutoCloseable {
         if (chunk >= chunks.length) {
             mapThrough(chunk);
         }
-        chunks[chunk].set(LONG, position & (CHUNK_BYTES - 1), address);
+        ENTRY.setRelease(chunks[chunk], position & (CHUNK_BYTES - 1), address);
     }
 
     long allocate() {
