@@ -370,7 +370,7 @@ public final class TransactionManager {
                         ? new WalRecord.Page(txnId, pageId, image.toArray(ValueLayout.JAVA_BYTE))
                         : new WalRecord.PageRef(txnId, pageId, Math.toIntExact(image.byteSize()), Checksums.crc32c(image)));
                 writes.add(new PageWrite(pageId, image));
-                storage.source().admit(pageId, frozen, Math.toIntExact(image.byteSize()));
+                storage.source().admit(pageId, frozen);
             }
         }, epoch, storage.pages().pageSize());
     }

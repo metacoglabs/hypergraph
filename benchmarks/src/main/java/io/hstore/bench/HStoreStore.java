@@ -44,7 +44,7 @@ final class HStoreStore implements Store {
         this.cacheBytes = cacheBytes > 0 ? cacheBytes : DEFAULT_CACHE_BYTES;
         EngineOptions engine = EngineOptions.defaults();
         this.options = DatabaseOptions.defaults().withEngine(engine
-                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withCacheBytes(this.cacheBytes).withHistoryLimit(history)
+                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withNodeCacheBytes(this.cacheBytes).withHistoryLimit(history)
                 .withCompactionLiveRatio(liveRatio).withPagesPerSegment(pagesPerSegment > 0 ? pagesPerSegment : engine.pagesPerSegment()));
         this.database = HypergraphDatabase.open(directory, options);
         if (create) {

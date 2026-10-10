@@ -154,7 +154,7 @@ sequenceDiagram
 
 Notes:
 
-* Nodes are decoded once and then shared by every reader through `NodeCache`. It has 16 shards, each a `ConcurrentHashMap` plus a CLOCK (second-chance) ring, with a total byte budget of `cache_mb`, each node counted at the size of its page. Lookups are lock-free; only admission takes a per-shard lock. Decoded nodes are immutable (`owner == null`), so sharing them needs no copying. See [pages.md](../storage/pages.md#caching-and-io-accounting).
+* Nodes are decoded once and then shared by every reader through `NodeCache`. It has 16 shards, each a `ConcurrentHashMap` plus a CLOCK (second-chance) ring, with a total byte budget of `node_cache_mb`, each node counted at an estimate of its heap size (`Node.heapBytes`). Lookups are lock-free; only admission takes a per-shard lock. Decoded nodes are immutable (`owner == null`), so sharing them needs no copying. See [pages.md](../storage/pages.md#caching-and-io-accounting).
 * `IoTrace` is bound with `ScopedValue.where(...)` around a query. `recordRead` throws `HStoreException.limit` once page reads plus cache hits exceed the query's page budget (`query_page_budget`).
 * Historical reads use `TransactionManager.snapshotAt(generation, branch)`. It looks the generation up in the retained `history` map; see [catalog-and-generations.md](../storage/catalog-and-generations.md#history-retention-and-time-travel).
 

@@ -112,7 +112,7 @@ final class ServerConfig {
                 .withPageSize(integer(Setting.PAGE_SIZE))
                 .withDurability(Durability.valueOf(string(Setting.DURABILITY).toUpperCase()))
                 .withWalMode(string(Setting.WAL_MODE).equalsIgnoreCase("images") ? WalMode.PAGE_IMAGES : WalMode.PAGE_REFERENCES)
-                .withCacheBytes(number(Setting.CACHE_MB) << 20)
+                .withNodeCacheBytes(number(Setting.NODE_CACHE_MB) << 20)
                 .withCheckpointWalBytes(number(Setting.CHECKPOINT_WAL_MB) << 20)
                 .withHistoryLimit(integer(Setting.HISTORY_LIMIT))
                 .withCompactionLiveRatio(Double.parseDouble(string(Setting.COMPACTION_LIVE_RATIO)))

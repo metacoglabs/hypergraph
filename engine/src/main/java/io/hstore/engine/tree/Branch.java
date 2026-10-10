@@ -4,6 +4,8 @@ import java.util.Arrays;
 
 public final class Branch extends Node {
 
+    private static final int CHILD_HEAP_BYTES = 128;
+
     private long[] separators;
     private Ref[] children;
     private int size;
@@ -173,6 +175,12 @@ public final class Branch extends Node {
     @Override
     public int height() {
         return height;
+    }
+
+    @Override
+    int heapBytes() {
+        return NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * separators.length + Integer.BYTES * children.length
+                + CHILD_HEAP_BYTES * size;
     }
 
     @Override

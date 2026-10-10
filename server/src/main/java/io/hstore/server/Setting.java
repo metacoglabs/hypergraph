@@ -21,7 +21,7 @@ enum Setting {
     PAGE_SIZE("page_size", "16384", "page size in bytes, fixed when the data directory is initialised"),
     DURABILITY("durability", "sync", "sync waits for fsync before acknowledging commits; async does not"),
     WAL_MODE("wal_mode", "references", "references logs page checksums and syncs data first; images logs full page images"),
-    CACHE_MB("cache_mb", "256", "megabytes of decoded tree nodes kept in memory, each counted at the size of its page"),
+    NODE_CACHE_MB("node_cache_mb", "256", "megabytes of heap for decoded tree nodes, each counted at an estimate of its size"),
     CHECKPOINT_WAL_MB("checkpoint_wal_mb", "256", "write-ahead log volume that triggers a background checkpoint"),
     HISTORY_LIMIT("history_limit", "64", "committed generations retained for time travel"),
     COMPACTION_LIVE_RATIO("compaction_live_ratio", "0.5", "sealed segments whose live node images fall below this ratio are compacted"),
@@ -42,7 +42,8 @@ enum Setting {
     LOG_FILE_COUNT("log_file_count", "8", "number of rotated log files kept");
 
     private static final Map<String, String> REMOVED = Map.of(
-            "cache_nodes", "cache_nodes is no longer supported: the node cache is now sized in megabytes. Remove cache_nodes and set cache_mb instead");
+            "cache_nodes", "cache_nodes is no longer supported: the node cache is now sized in megabytes. Remove cache_nodes and set node_cache_mb instead",
+            "cache_mb", "cache_mb is now called node_cache_mb, since it only sizes the decoded nodes kept on the heap. Rename it to node_cache_mb");
 
     private final String key;
     private final String fallback;

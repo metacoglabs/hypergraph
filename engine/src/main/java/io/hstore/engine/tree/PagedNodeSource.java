@@ -2,7 +2,6 @@ package io.hstore.engine.tree;
 
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.page.IoTrace;
-import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageStore;
 
 import java.lang.foreign.MemorySegment;
@@ -32,12 +31,12 @@ public final class PagedNodeSource implements NodeSource {
         IoTrace.recordRead();
         MemorySegment page = store.read(pageId);
         Node node = NodeCodec.decode(page, pageId, schema);
-        cache.put(pageId, node, PageHeader.SIZE + PageHeader.payloadLength(page));
+        cache.put(pageId, node, node.heapBytes());
         return node;
     }
 
-    public void admit(long pageId, Node frozen, int bytes) {
-        cache.put(pageId, frozen, bytes);
+    public void admit(long pageId, Node frozen) {
+        cache.put(pageId, frozen, frozen.heapBytes());
     }
 
     @Override
