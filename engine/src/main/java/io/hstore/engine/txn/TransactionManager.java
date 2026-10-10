@@ -42,7 +42,6 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 public final class TransactionManager {
@@ -80,7 +79,7 @@ public final class TransactionManager {
     private final LongAdder readOnly = new LongAdder();
     private final LongAdder pagesWritten = new LongAdder();
     private final LongAdder walBytes = new LongAdder();
-    private volatile long relocationFence;
+    private final AtomicLong compactions = new AtomicLong();
 
     public TransactionManager(Storage storage, Generation recovered, Collection<Generation> retained) {
         this.storage = storage;
@@ -197,7 +196,7 @@ public final class TransactionManager {
                     || Ref.same(txn.baseRoots().get(EngineSlots.REQUESTS), branch.roots().get(EngineSlots.REQUESTS));
             boolean serializable = txn.options().isolation() == Isolation.SERIALIZABLE;
             fast = branch.roots().sameAs(txn.baseRoots()) || (requestsStable && txn.workspace().untouchedSince(branch.roots(), serializable));
-            if (!fast && txn.generation() < relocationFence && txn.carriesStoredRoots()) {
+            if (txn.compactionsAtStart() < compactions.get() && txn.carriesStoredRoots()) {
                 conflicts.increment();
                 throw HStoreException.conflict("bulk-loaded roots of transaction " + txn.id() + " predate a compaction");
             }
@@ -305,22 +304,12 @@ public final class TransactionManager {
         return new WalRecord.BranchMeta(txn, branch.id(), branch.name(), branch.parent(), branch.baseGeneration(), branch.createdAt(), branch.state());
     }
 
-    public long rewrite(int branchId, UnaryOperator<RootVector> rewrite) {
-        Appended appended;
-        commitLock.lock();
-        try {
-            Generation latest = head.get();
-            Branch branch = latest.branch(branchId);
-            RootVector roots = rewrite.apply(branch.roots());
-            if (roots.sameAs(branch.roots())) {
-                return latest.id();
-            }
-            appended = append(latest, branch.withRoots(roots), txns.getAndIncrement(), List.of(), List.of(), List.of(), Long.MAX_VALUE);
-            relocationFence = appended.pending().generation().id();
-        } finally {
-            commitLock.unlock();
-        }
-        return committer.await(appended.pending()).id();
+    public void compacted() {
+        compactions.incrementAndGet();
+    }
+
+    long compactions() {
+        return compactions.get();
     }
 
     public <T> T exclusive(Supplier<T> action) {

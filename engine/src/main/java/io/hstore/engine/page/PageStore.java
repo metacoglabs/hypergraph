@@ -56,6 +56,9 @@ public final class PageStore implements AutoCloseable {
                     files.put(id, segment);
                     long units = segment.unitsOnDisk();
                     SegmentInfo info = byId.getOrDefault(id, new SegmentInfo(id, SegmentState.SEALED, units, units, 0));
+                    if (info.state() == SegmentState.COMPACTING) {
+                        info = info.withState(SegmentState.SEALED, 0);
+                    }
                     segments.put(id, info.withAllocation(info.pages(), Math.max(info.units(), units)));
                 }
             }

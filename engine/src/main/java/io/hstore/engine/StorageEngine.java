@@ -82,7 +82,7 @@ public final class StorageEngine implements AutoCloseable {
                 options.derivations(), options.durability(), options.walMode(), options.faults(), options.historyLimit());
         this.transactions = new TransactionManager(storage, recovery.image().current(), recovery.image().history());
         this.checkpointer = new Checkpointer(transactions, pages, wal, feed, catalog, options.historyLimit(), checkpoint.checkpointLsn());
-        this.compactor = new Compactor(transactions, pages, slots);
+        this.compactor = new Compactor(transactions, pages, slots, checkpointer, options.faults());
         this.dictionary = new Dictionary(transactions);
         checkpointer.checkpoint();
         compactor.reclaim();
@@ -274,7 +274,7 @@ public final class StorageEngine implements AutoCloseable {
             Compactor.Report report = compactor.compact(options.compactionLiveRatio());
             timedCheckpoint();
             List<Integer> reclaimed = compactor.reclaim();
-            LOG.log(System.Logger.Level.INFO, "compaction relocated segments {0} and reclaimed {1}", report.compacted(), reclaimed);
+            LOG.log(System.Logger.Level.INFO, "compaction moved the live pages out of segments {0} and reclaimed {1}", report.compacted(), reclaimed);
             return report;
         } finally {
             maintenance.unlock();
@@ -308,7 +308,7 @@ public final class StorageEngine implements AutoCloseable {
                         Compactor.Report report = compactor.compact(options.compactionLiveRatio(), 1);
                         if (!report.compacted().isEmpty()) {
                             timedCheckpoint();
-                            LOG.log(System.Logger.Level.INFO, "background compaction relocated segments {0}", report.compacted());
+                            LOG.log(System.Logger.Level.INFO, "background compaction moved the live pages out of segments {0}", report.compacted());
                         }
                     }
                     List<Integer> reclaimed = compactor.reclaim();
