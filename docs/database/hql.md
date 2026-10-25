@@ -687,15 +687,15 @@ tenant, role` (tenant id). The tenancy model is specified in [security](security
 ```sql
 CREATE TENANT clinic_b QUOTA (atoms 3, edges 1);
 ALTER TENANT clinic_b QUOTA (payload_bytes 1048576, query_pages 100000);
-CREATE USER analyst PASSWORD 's3cret' TENANT clinic_b ROLE writer;
-CREATE USER auditor PASSWORD 'pw' ROLE reader;
-ALTER USER auditor PASSWORD 'pw2';
+CREATE USER analyst PASSWORD 's3cret-pass' TENANT clinic_b ROLE writer;
+CREATE USER auditor PASSWORD 'pw-secret' ROLE reader;
+ALTER USER auditor PASSWORD 'pw2-secret';
 DROP USER auditor;
 USE TENANT clinic_b;
 INSERT NODE Lab 'b1' {name: 'B1'}; INSERT NODE Lab 'b2' {name: 'B2'}; INSERT NODE Lab 'b3' {name: 'B3'};
 INSERT NODE Lab 'b4' {name: 'B4'};
 -- error [ABORTED_RESOURCE_LIMIT]: tenant #1 would exceed its quota: usage Usage[atoms=4, edges=0, payloadBytes=0] against Quota[…]
-AUTHENTICATE analyst PASSWORD 's3cret';
+AUTHENTICATE analyst PASSWORD 's3cret-pass';
 CREATE NODE TYPE Y;
 -- error [INVALID_SCHEMA]: user analyst lacks the ADMIN role required for this statement
 ```

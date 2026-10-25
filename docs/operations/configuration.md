@@ -73,9 +73,10 @@ max_connections          = 200
 | `listen_address` | `HSTORE_LISTEN_ADDRESS` | `127.0.0.1` | Interface for both the wire protocol and Studio. The Docker image sets `0.0.0.0`. |
 | `port` | `HSTORE_PORT` | `7432` | TCP port of the [HQL wire protocol](wire-protocol.md). |
 | `max_connections` | `HSTORE_MAX_CONNECTIONS` | `200` | Open wire connections allowed. Connection *n+1* receives `error [ABORTED_RESOURCE_LIMIT]: too many connections` and is closed. Studio sessions are not counted. |
-| `authentication` | `HSTORE_AUTHENTICATION` | `auto` | `auto` requires `AUTHENTICATE` once at least one user exists. `on` always requires it. `off` never requires it, and every connection runs as the built-in `system` ADMIN principal. Applies to the wire protocol and to Studio. |
+| `authentication` | `HSTORE_AUTHENTICATION` | `auto` | `auto` requires `AUTHENTICATE` once at least one user exists; until then only clients on the server's own host are served. `on` always requires it. `off` never requires it, and every connection, from any host, runs as the built-in `system` ADMIN principal. Applies to the wire protocol and to Studio. |
 | `idle_timeout_seconds` | `HSTORE_IDLE_TIMEOUT_SECONDS` | `0` | Wire connections with no request for this long are closed (the socket read timeout). `0` disables the timeout. |
 | `authentication_timeout_seconds` | `HSTORE_AUTHENTICATION_TIMEOUT_SECONDS` | `30` | Wire connections that still have to authenticate are closed after this long. `0` disables the timeout. |
+| `authentication_failure_delay_ms` | `HSTORE_AUTHENTICATION_FAILURE_DELAY_MS` | `500` | Pause before the wire protocol or Studio answers a failed sign-in, from 0 to 10000. Successful sign-ins are not delayed. |
 | `max_message_mb` | `HSTORE_MAX_MESSAGE_MB` | `64` | Largest request an authenticated client may send. Clients that have not authenticated are limited to 64 KiB. |
 | `tls` | `HSTORE_TLS` | `off` | `on` serves the wire protocol over TLS and Studio over HTTPS, with the same certificate. Startup fails if the certificate or key is missing or unreadable. |
 | `tls_certificate_file` | `HSTORE_TLS_CERTIFICATE_FILE` | *(empty)* | PEM certificate chain the server presents, leaf first. |

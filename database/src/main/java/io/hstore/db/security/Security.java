@@ -34,6 +34,8 @@ public final class Security {
     }
 
     private static final int ITERATIONS = 600_000;
+    public static final int MIN_PASSWORD_LENGTH = 8;
+    public static final int MAX_PASSWORD_LENGTH = 1024;
     private static final byte[] UNKNOWN_USER_SALT = new byte[16];
     private static final HexFormat HEX = HexFormat.of();
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -138,6 +140,7 @@ public final class Security {
         if (!name.matches("[A-Za-z_][A-Za-z0-9_.@-]*")) {
             throw HStoreException.invalid("invalid user name '" + name + "'");
         }
+        requirePassword(password);
         byte[] salt = new byte[16];
         RANDOM.nextBytes(salt);
         User user = new User(name, HEX.formatHex(salt), HEX.formatHex(derive(password, salt, ITERATIONS)), ITERATIONS, tenant, role);
@@ -146,10 +149,18 @@ public final class Security {
 
     public static void setPassword(Transaction txn, String name, String password) {
         User current = user(txn, name).orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
+        requirePassword(password);
         byte[] salt = new byte[16];
         RANDOM.nextBytes(salt);
         txn.put(USERS, userKey(name), new User(name, HEX.formatHex(salt), HEX.formatHex(derive(password, salt, ITERATIONS)),
                 ITERATIONS, current.tenant(), current.role()));
+    }
+
+    public static void requirePassword(String password) {
+        int length = password.codePointCount(0, password.length());
+        if (length < MIN_PASSWORD_LENGTH || length > MAX_PASSWORD_LENGTH) {
+            throw HStoreException.invalid("a password must be between " + MIN_PASSWORD_LENGTH + " and " + MAX_PASSWORD_LENGTH + " characters long");
+        }
     }
 
     public static void dropUser(Transaction txn, String name) {
