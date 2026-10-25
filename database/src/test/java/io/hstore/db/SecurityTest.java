@@ -303,7 +303,7 @@ class SecurityTest {
 
     @Test
     void roleFilteredMatchesStayInsideTheTenant() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             long acmePatient = alice.variables().get("p");
@@ -328,7 +328,7 @@ class SecurityTest {
 
     @Test
     void rankStaysInsideTheTenant() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             bob.executeAll("""
                     INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p;
