@@ -82,8 +82,16 @@ final class Planner {
         candidates.add(new Candidate(catalogScan.path(), List.of(), catalogScan.rows(), catalogScan.cost() + VERIFY_WEIGHT * catalogScan.rows()));
         type.ifPresent(found -> candidates.add(candidate(new AccessPath.TypeScan(found), List.of(), population, conjuncts)));
         List<Candidate> exactParts = new ArrayList<>();
+        List<AccessPath.Incident.Leg> legs = new ArrayList<>();
+        List<Expr> incidentSources = new ArrayList<>();
         for (Expr conjunct : conjuncts) {
-            accessPath(match, type, conjunct).or(() -> union(match, type, conjunct)).ifPresent(path -> {
+            Optional<AccessPath> direct = accessPath(match, type, conjunct);
+            if (direct.isPresent() && direct.get() instanceof AccessPath.Incident(List<AccessPath.Incident.Leg> found)) {
+                legs.addAll(found);
+                incidentSources.add(conjunct);
+                continue;
+            }
+            direct.or(() -> union(match, type, conjunct)).ifPresent(path -> {
                 List<Expr> consumed = exact(path, conjunct) ? List.of(conjunct) : List.of();
                 Candidate single = candidate(path, consumed, estimate(path, catalogSize), conjuncts);
                 candidates.add(single);
@@ -91,6 +99,12 @@ final class Planner {
                     exactParts.add(single);
                 }
             });
+        }
+        if (!legs.isEmpty()) {
+            AccessPath merged = AccessPath.Incident.merge(legs);
+            Candidate incident = candidate(merged, List.copyOf(incidentSources), estimate(merged, catalogSize), conjuncts);
+            candidates.add(incident);
+            exactParts.add(incident);
         }
         exactParts.sort(Comparator.comparingDouble(Candidate::rows));
         for (int size = 2; size <= Math.min(MAX_INTERSECTED, exactParts.size()); size++) {
@@ -158,8 +172,8 @@ final class Planner {
 
     private double estimate(AccessPath path, double population) {
         return switch (path) {
-            case AccessPath.Incident(List<Long> atoms) -> {
-                double[] degrees = atoms.stream().mapToDouble(reader::degree).sorted().toArray();
+            case AccessPath.Incident(List<AccessPath.Incident.Leg> legs) -> {
+                double[] degrees = legs.stream().mapToDouble(leg -> reader.degree(leg.atom())).sorted().toArray();
                 double rows = degrees.length == 0 ? 0 : degrees[0];
                 for (int i = 1; i < degrees.length; i++) {
                     rows *= Math.min(1.0, degrees[i] / Math.max(1.0, population));
@@ -191,10 +205,11 @@ final class Planner {
     private Optional<AccessPath> accessPath(Ast.Match match, Optional<TypeDef> type, Expr conjunct) {
         String variable = match.variable();
         return switch (conjunct) {
-            case Expr.Contains(String target, List<Ast.Ref> members) when target.equals(variable) && match.edges() ->
-                    Optional.of(new AccessPath.Incident(members.stream().map(resolver::applyAsLong).toList()));
-            case Expr.Has(String target, Ast.Ref member, Optional<String> _) when target.equals(variable) && match.edges() ->
-                    Optional.of(new AccessPath.Incident(List.of(resolver.applyAsLong(member))));
+            case Expr.Contains(String target, List<Ast.Ref> members) when target.equals(variable) && match.edges() && !members.isEmpty() ->
+                    Optional.of(AccessPath.Incident.merge(members.stream()
+                            .map(member -> new AccessPath.Incident.Leg(resolver.applyAsLong(member), List.of())).toList()));
+            case Expr.Has(String target, Ast.Ref member, Optional<String> role) when target.equals(variable) && match.edges() ->
+                    Optional.of(new AccessPath.Incident(List.of(new AccessPath.Incident.Leg(resolver.applyAsLong(member), role.stream().toList()))));
             case Expr.In(String target, Ast.Ref edge) when target.equals(variable) ->
                     Optional.of(new AccessPath.Members(resolver.applyAsLong(edge)));
             case Expr.Similar(String target, String text, int k, var consistency) when target.equals(variable) ->
@@ -249,8 +264,7 @@ final class Planner {
     private static boolean exact(AccessPath path, Expr conjunct) {
         return switch (path) {
             case AccessPath.Semantic _, AccessPath.TypeScan _, AccessPath.AllAtoms _ -> false;
-            case AccessPath.Incident _ -> !(conjunct instanceof Expr.Has(String _, Ast.Ref _, Optional<String> role) && role.isPresent());
-            case AccessPath.Members _, AccessPath.IndexRange _, AccessPath.Fixed _ -> true;
+            case AccessPath.Incident _, AccessPath.Members _, AccessPath.IndexRange _, AccessPath.Fixed _ -> true;
             case AccessPath.Union(List<AccessPath> parts) -> conjunct instanceof Expr.Or(List<Expr> terms) && terms.size() == parts.size()
                     && IntStream.range(0, parts.size()).allMatch(i -> exact(parts.get(i), terms.get(i)));
             case AccessPath.Intersection _ -> false;

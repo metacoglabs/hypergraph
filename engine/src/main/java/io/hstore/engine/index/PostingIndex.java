@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.LongConsumer;
+import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -122,6 +123,17 @@ public final class PostingIndex<P> {
                 case Postings.Promoted<P>(Ref root) -> subtree(index, root).forEachKey(action);
             }
         });
+    }
+
+    public PostingCursor<P> cursor(Tree<Postings<P>> index, long key) {
+        return cursor(index, key, null);
+    }
+
+    public PostingCursor<P> cursor(Tree<Postings<P>> index, long key, Predicate<? super P> accept) {
+        return index.get(key).<PostingCursor<P>>map(value -> switch (value) {
+            case Postings.Inline<P>(long[] keys, List<P> values, long _, int _) -> new PostingCursor.Inline<>(keys, values, accept);
+            case Postings.Promoted<P>(Ref root) -> new PostingCursor.Promoted<>(subtree(index, root).cursor(), accept, root.count());
+        }).orElseGet(() -> new PostingCursor.Inline<>(new long[0], List.of(), accept));
     }
 
     public Tree<P> tree(Tree<Postings<P>> index, long key) {
