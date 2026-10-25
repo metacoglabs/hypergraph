@@ -11,6 +11,7 @@ module io.hstore.db {
     exports io.hstore.db.payload;
     exports io.hstore.db.property;
     exports io.hstore.db.query;
+    exports io.hstore.db.retrieve;
     exports io.hstore.db.schema;
     exports io.hstore.db.security;
     exports io.hstore.db.semantic;

@@ -23,6 +23,9 @@ import io.hstore.db.query.Ast.Expr;
 import io.hstore.db.query.Ast.MemberClause;
 import io.hstore.db.query.Ast.Statement;
 import io.hstore.db.query.QueryResult.Cell;
+import io.hstore.db.retrieve.RankQuery;
+import io.hstore.db.retrieve.Ranking;
+import io.hstore.db.retrieve.RoleTimeScorer;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Quota;
@@ -61,6 +64,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -268,6 +272,7 @@ final class Executor {
             case Statement.IncidentTo(Ast.Ref atom, Optional<Expr> validAt) -> read(reader -> incident(reader, session.resolve(reader, atom), validAt));
             case Statement.Describe(Ast.Ref atom) -> read(reader -> describe(reader, session.resolve(reader, atom)));
             case Statement.SetAlgebra algebra -> algebra.into().isPresent() ? write(writer -> setAlgebra(writer, algebra)) : read(reader -> setAlgebra(reader, algebra));
+            case Statement.Rank rank -> read(reader -> rank(reader, rank));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -464,6 +469,68 @@ final class Executor {
         QueryResult result = QueryResult.table(match.projections().stream().map(Ast.Projection::alias).toList(), rows);
         return result.withTrace(new QueryResult.Trace(0, reader.generation(), plan.chosen().path().describe(), plan.chosen().rows(),
                 rows.size(), trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
+    }
+
+    private QueryResult rank(Reader reader, Statement.Rank statement) {
+        long started = System.nanoTime();
+        IoTrace trace = IoTrace.withBudget(database().queryPageBudget(session.principal()));
+        Ranking ranking = Ranking.of(reader, rankQuery(reader, statement));
+        List<RoleTimeScorer.EdgeScore> scores = trace.call(() -> ranking.top(Budget.DEFAULT.start()));
+        List<List<Cell>> rows = scores.stream().map(scored -> List.of(atomCell(reader, scored.edge()), QueryResult.number(scored.score()),
+                component(scored.components().members()), component(scored.components().roles()), component(scored.components().attributes()),
+                component(scored.components().time()), component(scored.components().topology()))).toList();
+        return QueryResult.table(List.of("edge", "score", "members", "roles", "attributes", "time", "topology"), rows)
+                .withTrace(new QueryResult.Trace(0, reader.generation(), ranking.access(), Double.NaN, rows.size(),
+                        trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
+    }
+
+    private static Cell component(double value) {
+        return Double.isNaN(value) ? QueryResult.scalar(Value.NULL) : QueryResult.number(value);
+    }
+
+    private RankQuery rankQuery(Reader reader, Statement.Rank statement) {
+        Optional<TypeDef> type = statement.type().map(reader::requireType);
+        List<RankQuery.Slot> slots = statement.slots().stream().map(slot -> new RankQuery.Slot(switch (slot.target()) {
+            case Ast.RankTarget.Atom(Ast.Ref ref) -> new RankQuery.Target.Atom(reader.require(session.resolve(reader, ref)).id());
+            case Ast.RankTarget.OfType(String name) -> new RankQuery.Target.OfType(reader.requireType(name));
+        }, Set.copyOf(slot.roles()), slot.weight().orElse(1), slot.required())).toList();
+        Evaluator evaluator = evaluator(reader);
+        Optional<RankQuery.TimeSpec> time = statement.time().map(spec -> switch (spec) {
+            case Ast.RankTime.At(Expr instant, var tau) -> new RankQuery.TimeSpec.At(
+                    (long) evaluator.value(instant, Map.of()).number().orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")),
+                    tau.orElse(0));
+            case Ast.RankTime.During(long from, long to) -> new RankQuery.TimeSpec.During(from, to);
+        });
+        List<RankQuery.Preference> preferences = statement.preferences().stream().map(preference -> switch (preference) {
+            case Ast.RankPreference.Equals(String variable, String property, Value target, var weight) -> {
+                requireRankVariable(statement, variable);
+                yield (RankQuery.Preference) new RankQuery.Preference.Equals(property, target, weight.orElse(1));
+            }
+            case Ast.RankPreference.Near(String variable, String property, double target, double scale, var weight) -> {
+                requireRankVariable(statement, variable);
+                yield new RankQuery.Preference.Near(property, target, scale, weight.orElse(1));
+            }
+        }).toList();
+        RankQuery.Weights defaults = RankQuery.Weights.DEFAULT;
+        Map<String, Double> given = statement.weights();
+        Set<String> unknown = new TreeSet<>(given.keySet());
+        unknown.removeAll(Set.of("members", "roles", "attributes", "time", "topology"));
+        if (!unknown.isEmpty()) {
+            throw HStoreException.invalid("unknown component " + unknown + "; expected members, roles, attributes, time or topology");
+        }
+        RankQuery.Weights weights = new RankQuery.Weights(given.getOrDefault("members", defaults.members()),
+                given.getOrDefault("roles", defaults.roles()), given.getOrDefault("attributes", defaults.attributes()),
+                given.getOrDefault("time", defaults.time()), given.getOrDefault("topology", defaults.topology()));
+        if (statement.top() > RankQuery.MAX_TOP) {
+            throw HStoreException.invalid("TOP must be between 1 and " + RankQuery.MAX_TOP);
+        }
+        return new RankQuery(type, slots, time, preferences, statement.size(), weights, (int) Math.max(0, statement.top()));
+    }
+
+    private static void requireRankVariable(Statement.Rank statement, String variable) {
+        if (!variable.equals(statement.variable())) {
+            throw HStoreException.invalid("unknown variable " + variable + "; RANK binds only " + statement.variable());
+        }
     }
 
     private static boolean admits(Reader reader, Planner.Plan plan, long atom) {

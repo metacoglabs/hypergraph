@@ -327,6 +327,36 @@ class SecurityTest {
     }
 
     @Test
+    void rankStaysInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            bob.executeAll("""
+                    INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p;
+                    INSERT NODE Patient 'b2' {mrn: 'B-2'} AS $q;
+                    INSERT EDGE Encounter MEMBERS ($q AS clinician) AS $e;
+                    """);
+            long acmePatient = alice.variables().get("p");
+            long acmeEdge = alice.variables().get("e");
+            long globexEdge = bob.variables().get("e");
+            int patient = database.engine().dictionary().roleSet(List.of("patient"));
+            database.write(writer -> {
+                writer.transaction().upsert(globexEdge, acmePatient, _ -> new Incidence(acmePatient, patient, Weight.ONE,
+                        Long.MIN_VALUE, Long.MAX_VALUE, 0, 0));
+                return null;
+            });
+            String failure = assertThrows(HStoreException.InvalidSchema.class,
+                    () -> bob.execute("RANK EDGE e:Encounter LIKE (@" + acmePatient + " AS patient) TOP 5")).getMessage();
+            assertEquals("atom " + acmePatient + " does not exist", failure);
+            QueryResult ranked = bob.execute("RANK EDGE e:Encounter LIKE (ANY Patient AS patient) TOP 5");
+            assertEquals(List.of("@" + globexEdge), ranked.rows().stream().map(row -> row.getFirst().render().split(" ")[0]).toList());
+            assertEquals("0.6", ranked.rows().getFirst().get(1).render());
+            assertEquals("0", ranked.rows().getFirst().get(3).render());
+            QueryResult own = alice.execute("RANK EDGE e:Encounter LIKE (@" + acmePatient + " AS patient REQUIRED) TOP 5");
+            assertEquals(List.of("@" + acmeEdge), own.rows().stream().map(row -> row.getFirst().render().split(" ")[0]).toList());
+        }
+    }
+
+    @Test
     void qualifyOnlyAcceptsVisibleMembers() {
         try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");

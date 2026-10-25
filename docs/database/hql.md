@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -370,6 +370,59 @@ IncidentIntersection[@9, @25]  rows≈1  cost≈12
   rejected CatalogScan(edges) rows≈128 cost≈49
   rejected TypeScan(Claim) rows≈28 cost≈19
   rejected IndexRange(Claim.amount (100, +inf]) rows≈28 cost≈17
+```
+
+### RANK
+
+```ebnf
+rank       = "RANK" ( "EDGE" | "EDGES" ) identifier [ ":" identifier ]
+             "LIKE" "(" slot { "," slot } ")"
+             [ "VALID" ( "AT" additive [ "TAU" number ] | "DURING" interval ) ]
+             [ "PREFER" preference { "," preference } ]
+             [ "SIZE" integer ]
+             [ "WEIGHTS" "(" component number { "," component number } ")" ]
+             "TOP" integer ;
+slot       = ( ref | "ANY" identifier ) [ "AS" identifier { "OR" identifier } ] [ "WEIGHT" number ] [ "REQUIRED" ] ;
+preference = identifier "." identifier ( "=" literal | "NEAR" number "SCALE" number ) [ "WEIGHT" number ] ;
+component  = "members" | "roles" | "attributes" | "time" | "topology" ;
+```
+
+Returns the `TOP` hyperedges that best fit a query hyperedge, best first. `MATCH` answers which hyperedges satisfy
+a condition; `RANK` scores how well each one fits and never changes what `MATCH` returns.
+
+A slot asks for a named atom or for any atom of a type, optionally in one of several roles (`AS actor OR reviewer`
+means either role). `REQUIRED` makes the slot a hard condition: the hyperedge must have that member in an accepted
+role. Every other part of the query only changes the score. The score is a weighted sum of five parts, each between
+0 and 1:
+
+| Part | Meaning of 1 |
+|---|---|
+| `members` | every slot is filled |
+| `roles` | every slot is filled in an accepted role |
+| `attributes` | every `PREFER` holds (`=` exactly; `NEAR t SCALE s` scores `1 - |x - t| / s`, at least 0) |
+| `time` | every filled member is valid at the `VALID AT` instant, or covers the whole `VALID DURING` window |
+| `topology` | the hyperedge has exactly `SIZE` members |
+
+The default weights are `members 0.3, roles 0.2, attributes 0.2, time 0.2, topology 0.1`. A part the query does not
+use (no `PREFER`, no `VALID`, no `SIZE`) gets weight 0 and the rest are scaled to add up to 1. `VALID AT t TAU d`
+scores a member outside its validity `exp(-distance / d)`; without `TAU` it scores 0. `VALID DURING` needs a finite
+interval (no `*`). Ties are broken by the lower hyperedge id.
+
+Output columns: `edge, score, members, roles, attributes, time, topology`; unused parts are `NULL`. `TOP` is at most
+10,000, a query has at most 16 slots and 16 preferences. The algorithm, its bounds and its costs are in
+[ranking](ranking.md).
+
+```
+RANK EDGE e:Review
+  LIKE ($alice AS actor REQUIRED, $bob AS reviewer, ANY Document AS target)
+  VALID AT 100 TAU 100
+  PREFER e.status = 'approved'
+  SIZE 3
+  TOP 3;
+-- | edge          | score  | members | roles  | attributes | time   | topology |
+-- | @14 Review    | 0.9734 | 1       | 1      | 1          | 0.8668 | 1        |
+-- | @16 Review    | 0.8083 | 0.6667  | 0.6667 | 1          | 1      | 0.75     |
+-- | @15 Review    | 0.7333 | 1       | 0.6667 | 0          | 1      | 1        |
 ```
 
 ### MEMBERS OF
