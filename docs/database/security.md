@@ -123,6 +123,9 @@ record User(String name, String salt, String hash, int iterations, int tenant, R
 - Slot `USERS` = 45 (schema 82), keyed by `Hashing.of(name)`; lookups also compare the stored name, so a hash
   collision cannot authenticate the wrong user.
 - Names match `[A-Za-z_][A-Za-z0-9_.@-]*`.
+- Passwords set by `CREATE USER`, `ALTER USER … PASSWORD` and `hstore init --superuser` must be 8 to 1,024
+  characters long (`Security.requirePassword`). Passwords stored before this rule keep working until they are
+  changed.
 - Password hashing: **PBKDF2WithHmacSHA256**, 600,000 iterations, 16-byte salt from `SecureRandom`, 256-bit
   derived key, stored hex-encoded together with the iteration count. Users created before the count was raised
   from 120,000 keep their old hash until their password is next changed.
@@ -130,11 +133,16 @@ record User(String name, String salt, String hash, int iterations, int tenant, R
   `MessageDigest.isEqual` (constant time with respect to content). For a name that does not exist it still runs
   PBKDF2 against a fixed salt, so the response time does not tell which names exist.
 - Every sign-in, from the wire protocol, Studio or an `AUTHENTICATE` statement, goes through one throttle per
-  database (`SignIns`): at most 10 failed attempts per user name and 20 per client address in 15 minutes. The
-  slot is taken before the password is hashed, so parallel guesses cannot slip past the limit. A successful
-  sign-in clears only that user's count and gives back the address's slot. A throttled attempt fails with
-  `ABORTED_RESOURCE_LIMIT` without checking the password. Someone who knows a user name can keep that user locked
-  out by failing on purpose; the address limit makes that cost several addresses.
+  database (`SignIns`): at most 10 failed attempts for one user name from one client address, and 20 from one
+  address over all user names, in 15 minutes. Sign-ins without an address (the embedded API, `hstore exec` and
+  `hstore shell` on a local directory) count 10 per user name. The slot is taken before the password is hashed,
+  so parallel guesses cannot slip past the limit. A successful sign-in clears that user's count for that address
+  and gives back the address's slot. A throttled attempt fails with `ABORTED_RESOURCE_LIMIT` without checking the
+  password. Failures from other addresses never block a user, so nobody can lock an account out by failing on
+  purpose. When one user name collects 50 failures in 15 minutes over all addresses, the server logs a WARNING
+  that someone may be guessing its password from several addresses.
+- The wire protocol and Studio wait `authentication_failure_delay_ms` (500 ms by default) before they answer a
+  failed sign-in, which slows each guessing connection without delaying successful sign-ins.
 - `ALTER USER … PASSWORD` re-salts; `DROP USER` deletes the record. A session checks its user's stored record
   before every statement, so once a user is dropped or its password changes, its open sessions fail with "was
   dropped or its password changed; authenticate again" until they authenticate again. A session that changes its
@@ -197,6 +205,12 @@ allocator but are not charged as atoms.
 
 ## Network surface
 
+- While no user exists and `authentication = auto`, the wire protocol and Studio accept clients on the server's
+  own host only; other hosts get `AUTHENTICATION_REQUIRED` (Studio: `403`) and are disconnected. The check runs
+  for every request, so dropping the last user also cuts off sessions from other hosts. A Studio request counts as
+  remote when the peer is not a loopback address or when `X-Forwarded-For` names a non-loopback client. Only
+  `authentication = off` lets other hosts in without authentication, and the server logs a WARNING at startup
+  when it listens beyond loopback in that mode, or with no users in `auto` mode.
 - Wire protocol: `authentication = auto | on | off`; `AUTHENTICATE` is the only accepted statement before
   authentication; a connection has `authentication_timeout_seconds` (30) to authenticate and may send at most
   64 KiB per request until it has (`max_message_mb` after); a connection whose first request looks like HTTP is
@@ -222,7 +236,7 @@ allocator but are not charged as atoms.
 | cross-tenant write or reference | `require` before mutations; members must be visible | none known |
 | resource exhaustion by a tenant | atom/edge/payload quotas (payload bytes are charged in their own transaction, so a rollback still counts them, as the payload store never shrinks), the tenant's page budget on every read statement, per-transaction page budget, HORA budgets that `LIMIT` cannot raise past 1,000,000 rows, `DEPTH` 1-64, `SIMILAR TO … TOP` 1-1000, expression and JSON nesting up to 256 levels, number literals up to 400 characters with exponents up to 1000, 32 views per tenant, 128-character names, new embedding models only by a global admin | CPU in planning and projection is not budgeted; the HNSW index is shared; a WRITER can still add new property names, role names (on edge types that declare no roles) and state schemas, which stay in the shared dictionary |
 | password database theft | PBKDF2-SHA256, 600k iterations, per-user salt | offline guessing of weak passwords remains possible |
-| online password guessing | one throttle for every sign-in path: 10 failures per user, 20 per address in 15 minutes | a known user name can be locked out on purpose |
+| online password guessing | one throttle for every sign-in path: 10 failures per user and address, 20 per address in 15 minutes; a delay before every failed answer; a warning when one user collects 50 failures; passwords of at least 8 characters | guessing spread over many addresses is slowed and logged, not stopped |
 | credential sniffing | `tls = on` for the wire protocol and Studio | plaintext when TLS is off |
 | privilege escalation | role checks in both HQL and the Java API; tenant admins cannot leave their tenant; sessions that never authenticated must authenticate once the first user exists; sessions end when their user is dropped or its password changes; tenant admins cannot drop the last user | an embedded application holding `Principal.SYSTEM` is fully trusted |
 | tampering with data files | CRC32C on pages, WAL records and payloads detects corruption | no cryptographic integrity or encryption at rest; protect the data directory with file-system permissions (the container runs as a non-root user with mode 0700) |

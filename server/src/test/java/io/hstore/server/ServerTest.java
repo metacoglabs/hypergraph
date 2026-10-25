@@ -13,6 +13,7 @@ import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.topology.Validity;
 import io.hstore.engine.topology.Weight;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -22,7 +23,11 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.StringWriter;
 import java.io.UncheckedIOException;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -231,7 +236,7 @@ class ServerTest {
     void serversRequireCredentialsOnceUsersExist() throws Exception {
         DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
         try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
-            new Session(database).execute("CREATE USER admin PASSWORD 'pw' ROLE admin");
+            new Session(database).execute("CREATE USER admin PASSWORD 'pw-secret' ROLE admin");
             Thread acceptor;
             try (Server server = new Server(database, new InetSocketAddress("127.0.0.1", 0))) {
                 acceptor = Thread.ofVirtual().start(server::serve);
@@ -242,7 +247,7 @@ class ServerTest {
                 }
                 assertThrows(IllegalArgumentException.class,
                         () -> new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "wrong"))));
-                try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw")))) {
+                try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")))) {
                     assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
                     assertTrue(admin.execute("FORMAT JSON; SHOW USERS;").contains("\"rows\":[[\"admin\""));
                 }
@@ -260,9 +265,9 @@ class ServerTest {
                 acceptor = Thread.ofVirtual().start(server::serve);
                 InetSocketAddress address = new InetSocketAddress("127.0.0.1", server.port());
                 try (Endpoint early = new RemoteEndpoint(address, Optional.empty())) {
-                    assertTrue(early.execute("CREATE USER admin PASSWORD 'pw' ROLE admin;").contains("created user admin"));
+                    assertTrue(early.execute("CREATE USER admin PASSWORD 'pw-secret' ROLE admin;").contains("created user admin"));
                     assertTrue(early.execute("SHOW USERS;").startsWith("error [AUTHENTICATION_REQUIRED]"));
-                    assertTrue(early.execute("AUTHENTICATE admin PASSWORD 'pw';").contains("authenticated as admin"));
+                    assertTrue(early.execute("AUTHENTICATE admin PASSWORD 'pw-secret';").contains("authenticated as admin"));
                     assertTrue(early.execute("FORMAT JSON; SHOW USERS;").contains("\"rows\":[[\"admin\""));
                 }
             }
@@ -279,10 +284,10 @@ class ServerTest {
                 acceptor = Thread.ofVirtual().start(server::serve);
                 InetSocketAddress address = new InetSocketAddress("127.0.0.1", server.port());
                 assertFalse(exchange(address, "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\n\r\n"
-                        + ".\nCREATE USER intruder PASSWORD 'x' ROLE admin\n.\n").stream().anyMatch(message -> message.startsWith("created")));
+                        + ".\nCREATE USER intruder PASSWORD 'x-password' ROLE admin\n.\n").stream().anyMatch(message -> message.startsWith("created")));
                 assertFalse(database.requiresAuthentication());
                 try (Endpoint admin = new RemoteEndpoint(address, Optional.empty())) {
-                    admin.execute("CREATE USER admin PASSWORD 'pw' ROLE admin; CREATE TENANT acme; CREATE USER alice PASSWORD 'a1' TENANT acme ROLE writer;");
+                    admin.execute("CREATE USER admin PASSWORD 'pw-secret' ROLE admin; CREATE TENANT acme; CREATE USER alice PASSWORD 'alice-pass' TENANT acme ROLE writer;");
                 }
                 List<String> oversized = exchange(address, "x".repeat(100_000) + "\n.\n");
                 assertTrue(oversized.getLast().startsWith("error [ABORTED_RESOURCE_LIMIT]") || oversized.getLast().equals("closed"), oversized.toString());
@@ -310,18 +315,93 @@ class ServerTest {
                     }
                     assertTrue(Duration.ofNanos(System.nanoTime() - started).toSeconds() < 8);
                 }
-                try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw")));
-                     Endpoint alice = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("alice", "a1")))) {
+                try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")));
+                     Endpoint alice = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("alice", "alice-pass")))) {
                     assertFalse(alice.execute("WHOAMI;").startsWith("error"));
                     admin.execute("CREATE NODE TYPE Doc (text STRING); INSERT NODE Doc 'x' {text: 'a\r.\rCREATE USER injected PASSWORD ''p'' ROLE admin'};");
                     assertFalse(admin.execute("SHOW USERS;").contains("injected"));
                     assertTrue(admin.execute("MATCH NODE d:Doc RETURN d.text;").contains("CREATE USER injected"));
-                    admin.execute("ALTER USER alice PASSWORD 'rotated';");
+                    admin.execute("ALTER USER alice PASSWORD 'rotated-pass';");
                     assertTrue(alice.execute("WHOAMI;").contains("authenticate again"));
-                    assertTrue(alice.execute("AUTHENTICATE alice PASSWORD 'rotated'; WHOAMI;").contains("acme"));
+                    assertTrue(alice.execute("AUTHENTICATE alice PASSWORD 'rotated-pass'; WHOAMI;").contains("acme"));
                     String crashed = admin.execute("MATCH NODE p WHERE " + "(".repeat(50_000) + "p = @1" + ")".repeat(50_000) + " RETURN p;");
                     assertTrue(crashed.startsWith("error [INVALID_SCHEMA]") && !crashed.contains("Exception"), crashed);
                     assertFalse(admin.execute("WHOAMI;").startsWith("error"));
+                }
+            }
+            acceptor.join();
+        }
+    }
+
+    private static Optional<InetAddress> otherInterface() throws SocketException {
+        return NetworkInterface.networkInterfaces()
+                .filter(network -> {
+                    try {
+                        return network.isUp() && !network.isLoopback();
+                    } catch (SocketException e) {
+                        return false;
+                    }
+                })
+                .flatMap(NetworkInterface::inetAddresses)
+                .filter(address -> address instanceof Inet4Address && !address.isLoopbackAddress() && !address.isLinkLocalAddress())
+                .findFirst();
+    }
+
+    @Test
+    void otherHostsNeedAUserUnlessAuthenticationIsOff() throws Exception {
+        Optional<InetAddress> other = otherInterface();
+        Assumptions.assumeTrue(other.isPresent(), "needs a network interface other than loopback");
+        DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
+            Thread acceptor;
+            try (Server server = new Server(database, new InetSocketAddress("0.0.0.0", 0))) {
+                acceptor = Thread.ofVirtual().start(server::serve);
+                InetSocketAddress remote = new InetSocketAddress(other.get(), server.port());
+                InetSocketAddress local = new InetSocketAddress("127.0.0.1", server.port());
+                List<String> refused = exchange(remote, "CREATE USER intruder PASSWORD 'intruder-pass' ROLE admin;\n.\n");
+                assertTrue(refused.getFirst().startsWith("error [AUTHENTICATION_REQUIRED]: this database has no users"), refused.toString());
+                assertTrue(refused.stream().noneMatch(message -> message.contains("created user")), refused.toString());
+                assertFalse(database.requiresAuthentication());
+                try (Endpoint early = new RemoteEndpoint(local, Optional.empty())) {
+                    assertTrue(early.execute("WHOAMI;").contains("system"));
+                    early.execute("CREATE USER admin PASSWORD 'pw-secret' ROLE admin;");
+                }
+                try (Endpoint anonymous = new RemoteEndpoint(remote, Optional.empty())) {
+                    assertTrue(anonymous.describe().endsWith("authentication required"));
+                }
+                try (Endpoint admin = new RemoteEndpoint(remote, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")))) {
+                    assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
+                    admin.execute("DROP USER admin;");
+                    assertTrue(admin.execute("WHOAMI;").startsWith("error [AUTHENTICATION_REQUIRED]: this database has no users"));
+                }
+            }
+            acceptor.join();
+            try (Server open = new Server(database, new InetSocketAddress("0.0.0.0", 0), Server.Policy.permissive().withAuthentication("off"))) {
+                acceptor = Thread.ofVirtual().start(open::serve);
+                try (Endpoint anyone = new RemoteEndpoint(new InetSocketAddress(other.get(), open.port()), Optional.empty())) {
+                    assertTrue(anyone.execute("WHOAMI;").contains("system"));
+                }
+            }
+            acceptor.join();
+        }
+    }
+
+    @Test
+    void failedSignInsAreAnsweredAfterTheConfiguredDelay() throws Exception {
+        DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
+            new Session(database).execute("CREATE USER admin PASSWORD 'pw-secret' ROLE admin");
+            Thread acceptor;
+            try (Server server = new Server(database, new InetSocketAddress("127.0.0.1", 0),
+                    Server.Policy.permissive().withFailureDelay(Duration.ofMillis(400)))) {
+                acceptor = Thread.ofVirtual().start(server::serve);
+                InetSocketAddress address = new InetSocketAddress("127.0.0.1", server.port());
+                long started = System.nanoTime();
+                assertThrows(IllegalArgumentException.class,
+                        () -> new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "wrong-password"))));
+                assertTrue(System.nanoTime() - started >= Duration.ofMillis(400).toNanos());
+                try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")))) {
+                    assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
                 }
             }
             acceptor.join();

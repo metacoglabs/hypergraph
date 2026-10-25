@@ -220,8 +220,13 @@ neighbourhood short.
   Caddy, Traefik) and expose only the proxy. Configure the proxy to send `X-Forwarded-Proto: https` (nginx:
   `proxy_set_header X-Forwarded-Proto $scheme;`) so session cookies are marked `Secure`. The header is
   trusted as given, so do not expose the plain-HTTP port to clients who could forge it.
-* `authentication = off` gives every Studio visitor a `system` ADMIN session. Never combine it with a reachable
-  port.
+* While the database has no users and `authentication = auto`, `/api/` answers only requests from the server's
+  own host and returns `403` to the rest. A request counts as remote when its peer is not a loopback address or
+  when `X-Forwarded-For` names a non-loopback client, so a reverse proxy on the same host passes the restriction
+  on to the clients behind it. Create a user before exposing Studio.
+* `authentication = off` gives every Studio visitor, from any host, a `system` ADMIN session. Never combine it
+  with a reachable port.
+* A failed `POST /api/login` is answered after `authentication_failure_delay_ms` (500 ms by default).
 * Disable Studio with `studio = off` (`HSTORE_STUDIO=off`) when only the wire protocol is needed.
 * User-supplied strings are rendered with DOM text nodes, never as HTML. The HQL highlighter escapes before
   wrapping tokens. The CSP forbids inline scripts.

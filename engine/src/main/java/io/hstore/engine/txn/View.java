@@ -27,6 +27,14 @@ import java.util.stream.Stream;
 
 public abstract sealed class View permits Snapshot, Transaction {
 
+    public interface Unrecorded extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    static final Unrecorded NOT_RECORDING = () -> {
+    };
+
     abstract <V> Tree<V> tree(Slot<V> slot);
 
     void exposeLazily() {
@@ -40,7 +48,17 @@ public abstract sealed class View permits Snapshot, Transaction {
     void observeAtom(long id, Optional<AtomRecord> record) {
     }
 
-    <V> void observeKey(Slot<V> slot, long key, Optional<V> value) {
+    void observeKey(Slot<?> slot, long key) {
+    }
+
+    void observeRange(Slot<?> slot, long key, long low, long high) {
+    }
+
+    void observeSlot(Slot<?> slot) {
+    }
+
+    public Unrecorded unrecorded() {
+        return NOT_RECORDING;
     }
 
     public abstract long generation();
@@ -91,10 +109,12 @@ public abstract sealed class View permits Snapshot, Transaction {
     }
 
     public Stream<IncidentEdge> incident(long atom) {
+        observeKey(EngineSlots.REVERSE, atom);
         return Views.incident(lazyTree(EngineSlots.REVERSE), atom);
     }
 
     public void forEachIncidentEdge(long atom, LongConsumer action) {
+        observeKey(EngineSlots.REVERSE, atom);
         EngineSlots.REVERSE_INDEX.forEachPosting(lazyTree(EngineSlots.REVERSE), atom, action);
     }
 
@@ -107,30 +127,41 @@ public abstract sealed class View permits Snapshot, Transaction {
     }
 
     public Tree<?> incidentTree(long atom) {
+        observeKey(EngineSlots.REVERSE, atom);
         return EngineSlots.REVERSE_INDEX.tree(lazyTree(EngineSlots.REVERSE), atom);
     }
 
     public long degree(long atom) {
+        observeKey(EngineSlots.REVERSE, atom);
         return EngineSlots.REVERSE_INDEX.count(tree(EngineSlots.REVERSE), atom);
     }
 
     public OptionalLong resolve(int tenant, int type, String canonicalKey) {
-        return Views.resolve(tree(EngineSlots.CANONICAL), tenant, type, canonicalKey);
+        long hash = EngineSlots.canonicalKey(tenant, type, canonicalKey);
+        observeKey(EngineSlots.CANONICAL, hash);
+        return Views.resolve(tree(EngineSlots.CANONICAL), tenant, type, canonicalKey, hash);
     }
 
     public LongStream atomsOfType(int tenant, int type) {
-        return EngineSlots.TYPE_INDEX.stream(lazyTree(EngineSlots.TYPES), EngineSlots.typeKey(tenant, type)).mapToLong(Entry::key);
+        long key = EngineSlots.typeKey(tenant, type);
+        observeKey(EngineSlots.TYPES, key);
+        return EngineSlots.TYPE_INDEX.stream(lazyTree(EngineSlots.TYPES), key).mapToLong(Entry::key);
     }
 
     public Tree<?> typeTree(int tenant, int type) {
-        return EngineSlots.TYPE_INDEX.tree(lazyTree(EngineSlots.TYPES), EngineSlots.typeKey(tenant, type));
+        long key = EngineSlots.typeKey(tenant, type);
+        observeKey(EngineSlots.TYPES, key);
+        return EngineSlots.TYPE_INDEX.tree(lazyTree(EngineSlots.TYPES), key);
     }
 
     public long countOfType(int tenant, int type) {
-        return EngineSlots.TYPE_INDEX.count(tree(EngineSlots.TYPES), EngineSlots.typeKey(tenant, type));
+        long key = EngineSlots.typeKey(tenant, type);
+        observeKey(EngineSlots.TYPES, key);
+        return EngineSlots.TYPE_INDEX.count(tree(EngineSlots.TYPES), key);
     }
 
     public Stream<Entry<AtomRecord>> atoms() {
+        observeSlot(EngineSlots.CATALOG);
         return lazyTree(EngineSlots.CATALOG).stream();
     }
 
@@ -139,12 +170,18 @@ public abstract sealed class View permits Snapshot, Transaction {
     }
 
     public <V> Optional<V> get(Slot<V> slot, long key) {
-        Optional<V> value = tree(slot).get(key);
-        observeKey(slot, key, value);
-        return value;
+        observeKey(slot, key);
+        return tree(slot).get(key);
+    }
+
+    public <V> Optional<V> nested(Slot<V> slot, long key, long low, long high) {
+        observeRange(slot, key, low, high);
+        exposeLazily();
+        return tree(slot).get(key);
     }
 
     public <V> Tree<V> scan(Slot<V> slot) {
+        observeSlot(slot);
         return lazyTree(slot);
     }
 
