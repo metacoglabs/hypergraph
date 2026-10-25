@@ -3,6 +3,7 @@
 
 package io.hstore.db.hora;
 
+import io.hstore.db.Atom;
 import io.hstore.db.Member;
 import io.hstore.db.Reader;
 import io.hstore.db.temporal.StateBindings;
@@ -317,8 +318,11 @@ public final class Hora {
             return;
         }
         for (Incidence member : reader.edge(atom).stream().toList()) {
+            if (!reader.owns(member.member())) {
+                continue;
+            }
             path.add(member.member());
-            boolean nested = reader.view().edge(member.member()).isPresent();
+            boolean nested = reader.atom(member.member()).filter(Atom::isEdge).isPresent();
             if (nested) {
                 expand(member.member(), depth - 1, visited, path, meter, out);
             } else {

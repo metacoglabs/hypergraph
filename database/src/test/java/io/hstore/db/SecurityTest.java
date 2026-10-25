@@ -19,6 +19,7 @@ import io.hstore.db.security.SignIns;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.txn.TxnOptions;
+import io.hstore.engine.catalog.Branch;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,6 +30,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.Comparator;
@@ -269,6 +271,33 @@ class SecurityTest {
                         () -> bob.execute("MATCH NODE p:Patient RETURN overlap(@" + probe + ", @" + probe + ")")).getMessage();
                 assertEquals("atom " + probe + " does not exist", failure);
             }
+        }
+    }
+
+    @Test
+    void membershipsAcrossTenantsAreNotFollowed() {
+        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmePatient = alice.variables().get("p");
+            long acmeEdge = alice.variables().get("e");
+            long globexEdge = bob.variables().get("e");
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexEdge, _ -> Incidence.of(globexEdge));
+                writer.transaction().upsert(globexEdge, acmePatient, _ -> Incidence.of(acmePatient));
+                return null;
+            });
+            List<String> expanded = alice.execute("EXPAND @" + acmeEdge + " DEPTH 3").rows().stream()
+                    .map(row -> row.stream().map(QueryResult.Cell::render).collect(Collectors.joining(" "))).toList();
+            assertEquals(1, expanded.size());
+            assertFalse(expanded.getFirst().contains(String.valueOf(globexEdge)));
+            database.read(Branch.MAIN, alice.principal(), reader -> {
+                List<Long> edges = new ArrayList<>();
+                reader.forEachIncidentEdge(acmePatient, edges::add);
+                assertEquals(List.of(acmeEdge), edges);
+                assertEquals(reader.incident(acmePatient).map(Incident::edge).toList(), edges);
+                return null;
+            });
         }
     }
 

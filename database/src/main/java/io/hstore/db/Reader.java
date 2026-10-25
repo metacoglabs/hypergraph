@@ -254,8 +254,14 @@ public sealed class Reader permits Writer {
     }
 
     public void forEachIncidentEdge(long atom, LongConsumer action) {
-        if (onlyDefaultTenant() || visible(atom)) {
+        if (onlyDefaultTenant()) {
             view.forEachIncidentEdge(atom, action);
+        } else if (visible(atom)) {
+            view.forEachIncidentEdge(atom, edge -> {
+                if (visible(edge)) {
+                    action.accept(edge);
+                }
+            });
         }
     }
 
