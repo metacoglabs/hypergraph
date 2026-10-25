@@ -308,27 +308,37 @@ public final class Hora {
         return out.stream();
     }
 
-    private void expand(long atom, int depth, Set<Long> visited, List<Long> path, Budget.Meter meter, List<Expansion> out) {
-        if (depth == 0 || !meter.tryConsume(1)) {
+    private boolean expand(long atom, int depth, Set<Long> ancestors, List<Long> path, Budget.Meter meter, List<Expansion> out) {
+        if (!meter.tryConsume(1)) {
             out.add(new Expansion(List.copyOf(path), atom, Expansion.Status.BUDGET_EXHAUSTED));
-            return;
+            return false;
         }
-        if (!visited.add(atom)) {
+        if (depth == 0) {
+            out.add(new Expansion(List.copyOf(path), atom, Expansion.Status.BUDGET_EXHAUSTED));
+            return true;
+        }
+        if (!ancestors.add(atom)) {
             out.add(new Expansion(List.copyOf(path), atom, Expansion.Status.CYCLE));
-            return;
+            return true;
         }
-        for (Incidence member : reader.edge(atom).stream().toList()) {
-            if (!reader.owns(member.member())) {
+        boolean proceed = true;
+        for (Iterator<Incidence> members = reader.edge(atom).stream().iterator(); proceed && members.hasNext(); ) {
+            long member = members.next().member();
+            if (!reader.owns(member)) {
                 continue;
             }
-            path.add(member.member());
-            boolean nested = reader.atom(member.member()).filter(Atom::isEdge).isPresent();
-            if (nested) {
-                expand(member.member(), depth - 1, visited, path, meter, out);
+            path.add(member);
+            if (reader.atom(member).filter(Atom::isEdge).isPresent()) {
+                proceed = expand(member, depth - 1, ancestors, path, meter, out);
+            } else if (meter.tryConsume(1)) {
+                out.add(new Expansion(List.copyOf(path), member, Expansion.Status.EMIT));
             } else {
-                out.add(new Expansion(List.copyOf(path), member.member(), Expansion.Status.EMIT));
+                out.add(new Expansion(List.copyOf(path), member, Expansion.Status.BUDGET_EXHAUSTED));
+                proceed = false;
             }
             path.removeLast();
         }
+        ancestors.remove(atom);
+        return proceed;
     }
 }
