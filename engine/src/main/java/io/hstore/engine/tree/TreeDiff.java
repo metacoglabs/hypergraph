@@ -32,7 +32,52 @@ public final class TreeDiff {
     }
 
     public static <V> Stream<Delta<V>> diff(Tree<V> before, Tree<V> after) {
-        return Tree.stream(new Walker<>(before, after)).map(Entry::value);
+        return diff(before, after, Long.MIN_VALUE, Long.MAX_VALUE);
+    }
+
+    public static <V> Stream<Delta<V>> diff(Tree<V> before, Tree<V> after, long low, long high) {
+        return Tree.stream(new Walker<>(before, after, low, high)).map(Entry::value);
+    }
+
+    public static <V> boolean sameContent(Tree<V> a, Tree<V> b) {
+        return sameContent(a, b, Long.MIN_VALUE, Long.MAX_VALUE);
+    }
+
+    public static <V> boolean sameContent(Tree<V> a, Tree<V> b, long low, long high) {
+        return Ref.same(a.root(), b.root()) || diff(a, b, low, high).allMatch(delta ->
+                delta instanceof Delta.Changed<V>(long _, V before, V after) && sameValue(a.schema(), a.source(), before, after));
+    }
+
+    public static <V> boolean sameValue(TreeSchema<V> schema, NodeSource source, V a, V b) {
+        if (Objects.equals(a, b)) {
+            return true;
+        }
+        ValueCodec<V> codec = schema.codec();
+        if (!codec.holdsRefs() || !Objects.equals(codec.mapRefs(a, (_, _) -> Ref.EMPTY), codec.mapRefs(b, (_, _) -> Ref.EMPTY))) {
+            return false;
+        }
+        List<Tree<?>> left = nested(source, codec, a);
+        List<Tree<?>> right = nested(source, codec, b);
+        if (left.size() != right.size()) {
+            return false;
+        }
+        for (int i = 0; i < left.size(); i++) {
+            if (!left.get(i).schema().equals(right.get(i).schema()) || !sameNested(left.get(i), right.get(i), Long.MIN_VALUE, Long.MAX_VALUE)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static <V> List<Tree<?>> nested(NodeSource source, ValueCodec<V> codec, V value) {
+        List<Tree<?>> trees = new ArrayList<>();
+        codec.forEachRef(value, (ref, schema) -> trees.add(new Tree<>(schema, source, ref)));
+        return trees;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <V> boolean sameNested(Tree<V> a, Tree<?> b, long low, long high) {
+        return sameContent(a, (Tree<V>) b, low, high);
     }
 
     public static <V> Optional<String> difference(Tree<V> a, Tree<V> b) {
@@ -109,13 +154,19 @@ public final class TreeDiff {
     private static final class Walker<V> implements Iterator<Entry<Delta<V>>> {
         private final Tree<V> before;
         private final Tree<V> after;
+        private final long low;
+        private final long high;
+        private final boolean bounded;
         private final Deque<Item> left = new ArrayDeque<>();
         private final Deque<Item> right = new ArrayDeque<>();
         private Delta<V> pending;
 
-        Walker(Tree<V> before, Tree<V> after) {
+        Walker(Tree<V> before, Tree<V> after, long low, long high) {
             this.before = before;
             this.after = after;
+            this.low = low;
+            this.high = high;
+            this.bounded = low != Long.MIN_VALUE || high != Long.MAX_VALUE;
             if (!before.isEmpty()) {
                 left.push(new Item.Subtree(before.root()));
             }
@@ -145,6 +196,14 @@ public final class TreeDiff {
         private Delta<V> step() {
             Item a = left.peek();
             Item b = right.peek();
+            if (bounded && a != null && outside(a)) {
+                skip(left, a);
+                return null;
+            }
+            if (bounded && b != null && outside(b)) {
+                skip(right, b);
+                return null;
+            }
             if (a == null) {
                 return drain(right, after, false);
             }
@@ -212,6 +271,9 @@ public final class TreeDiff {
         private Delta<V> drain(Deque<Item> side, Tree<V> tree, boolean removed) {
             while (side.peek() instanceof Item.Subtree) {
                 expand(side, tree);
+                if (bounded) {
+                    return null;
+                }
             }
             if (!(side.peek() instanceof Item.Run run)) {
                 return null;
@@ -219,6 +281,20 @@ public final class TreeDiff {
             long key = run.key();
             V value = tree.schema().cast(take(side, run));
             return removed ? new Delta.Removed<>(key, value) : new Delta.Added<>(key, value);
+        }
+
+        private boolean outside(Item item) {
+            return switch (item) {
+                case Item.Subtree(Ref ref) -> !ref.summary().overlaps(low, high);
+                case Item.Run run -> run.key() < low || run.key() > high;
+            };
+        }
+
+        private static void skip(Deque<Item> side, Item item) {
+            switch (item) {
+                case Item.Subtree _ -> side.pop();
+                case Item.Run run -> take(side, run);
+            }
         }
 
         private static Object take(Deque<Item> side, Item.Run run) {

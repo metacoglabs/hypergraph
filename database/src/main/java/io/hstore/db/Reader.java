@@ -62,8 +62,10 @@ public sealed class Reader permits Writer {
     private boolean onlyDefaultTenant() {
         Boolean known = onlyDefaultTenant;
         if (known == null) {
-            known = tenant() == Principal.DEFAULT_TENANT
-                    && view.scan(EngineSlots.TYPES).last().map(entry -> entry.key() >>> 32 == Principal.DEFAULT_TENANT).orElse(true);
+            try (View.Unrecorded _ = view.unrecorded()) {
+                known = tenant() == Principal.DEFAULT_TENANT
+                        && view.scan(EngineSlots.TYPES).last().map(entry -> entry.key() >>> 32 == Principal.DEFAULT_TENANT).orElse(true);
+            }
             onlyDefaultTenant = known;
         }
         return known;
@@ -287,8 +289,7 @@ public sealed class Reader permits Writer {
         Optional<TypeTag> indexedTag = indexedTag(definition, property);
         if (indexedTag.isPresent()) {
             TypeTag tag = indexedTag.get();
-            return PropertyIndex.candidates(view.scan(PropertySlots.PROPERTY_INDEX), tenant(), key.getAsInt(), tag,
-                            PropertyIndex.lowerKey(tag, low), PropertyIndex.upperKey(tag, high))
+            return PropertyIndex.candidates(view, tenant(), key.getAsInt(), tag, PropertyIndex.lowerKey(tag, low), PropertyIndex.upperKey(tag, high))
                     .filter(entry -> accept.test(entry.value()))
                     .mapToLong(Entry::key)
                     .filter(owner -> view.atom(owner).map(record -> record.type() == definition.id() && record.tenant() == tenant()).orElse(false))

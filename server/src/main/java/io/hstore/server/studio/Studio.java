@@ -32,6 +32,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -62,11 +63,20 @@ public final class Studio implements AutoCloseable {
         void executed(String origin, String user, Statement statement, long millis, String script);
     }
 
-    public record Options(InetSocketAddress address, BooleanSupplier authenticationRequired, StatementListener statements,
-                          String version, Duration idleSession, Optional<Path> assets, Optional<SSLContext> tls) {
+    public record Options(InetSocketAddress address, BooleanSupplier authenticationRequired, BooleanSupplier openToOtherHosts,
+                          StatementListener statements, String version, Duration idleSession, Optional<Path> assets,
+                          Optional<SSLContext> tls, Duration failureDelay) {
     }
 
-    private record Request(String method, String path, Map<String, String> query, Headers headers, String body, String peer, String address) {
+    private record Request(String method, String path, Map<String, String> query, Headers headers, String body, String peer, String address,
+                           InetAddress remote) {
+
+        boolean local() {
+            return remote.isLoopbackAddress() && headers.getOrDefault("X-Forwarded-For", List.of()).stream()
+                    .flatMap(header -> Arrays.stream(header.split(",")))
+                    .map(String::strip)
+                    .allMatch(forwarded -> forwarded.equals("127.0.0.1") || forwarded.equals("::1") || forwarded.equals("[::1]"));
+        }
 
         Optional<String> cookie(String name) {
             return headers.getOrDefault("Cookie", List.of()).stream()
@@ -203,7 +213,7 @@ public final class Studio implements AutoCloseable {
         });
         return new Request(exchange.getRequestMethod(), exchange.getRequestURI().getPath(), query, exchange.getRequestHeaders(),
                 new String(body, StandardCharsets.UTF_8), String.valueOf(exchange.getRemoteAddress()),
-                exchange.getRemoteAddress().getAddress().getHostAddress());
+                exchange.getRemoteAddress().getAddress().getHostAddress(), exchange.getRemoteAddress().getAddress());
     }
 
     private static String decode(String value) {
@@ -225,6 +235,11 @@ public final class Studio implements AutoCloseable {
     }
 
     private Response api(Request request) {
+        if (!request.local() && !options.openToOtherHosts().getAsBoolean() && !options.authenticationRequired().getAsBoolean()) {
+            LOG.log(System.Logger.Level.WARNING, "studio request from {0} refused: no users exist and the client is not on this host", request.peer());
+            throw HttpFailure.forbidden("this database has no users, so studio only answers requests from its own host; create a user with "
+                    + "CREATE USER, or set authentication = off to let other hosts in without authentication");
+        }
         if (!hostAllowed(request)) {
             throw HttpFailure.forbidden("studio does not answer to this Host header; use an IP address or localhost, or turn on authentication");
         }
@@ -309,6 +324,7 @@ public final class Studio implements AutoCloseable {
             if (!accepted) {
                 session.close();
                 LOG.log(System.Logger.Level.WARNING, "studio password authentication failed for user \"{0}\" from {1}", user.get(), request.peer());
+                pause(options.failureDelay());
                 throw HttpFailure.unauthorized("authentication failed");
             }
         } else if (options.authenticationRequired().getAsBoolean()) {
@@ -321,6 +337,16 @@ public final class Studio implements AutoCloseable {
         boolean secure = options.tls().isPresent() || request.headers().getOrDefault("X-Forwarded-Proto", List.of()).contains("https");
         return Response.json(JsonFields.object().put("session", describe(session)).build(),
                 COOKIE + "=" + entry.token() + "; Path=/; HttpOnly; SameSite=Strict" + (secure ? "; Secure" : ""));
+    }
+
+    private static void pause(Duration delay) {
+        if (!delay.isZero()) {
+            try {
+                Thread.sleep(delay);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private Response logout(Request request) {

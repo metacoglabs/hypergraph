@@ -304,9 +304,10 @@ public final class Main {
         Server server = new Server(database, config.address(), policy);
         Optional<Studio> studio = config.flag(Setting.STUDIO) ? Optional.of(new Studio(database, new Studio.Options(
                 new InetSocketAddress(config.string(Setting.LISTEN_ADDRESS), config.integer(Setting.STUDIO_PORT)),
-                () -> policy.authenticationRequired(database), policy.statements()::executed, VERSION,
+                () -> policy.authenticationRequired(database), policy::openToOtherHosts, policy.statements()::executed, VERSION,
                 Duration.ofMinutes(config.integer(Setting.STUDIO_SESSION_MINUTES)),
-                Optional.of(config.string(Setting.STUDIO_ASSETS)).filter(value -> !value.isBlank()).map(Path::of), tls))) : Optional.empty();
+                Optional.of(config.string(Setting.STUDIO_ASSETS)).filter(value -> !value.isBlank()).map(Path::of), tls,
+                policy.failureDelay()))) : Optional.empty();
         studio.ifPresent(Studio::start);
         Thread shutdown = Thread.ofPlatform().name("hstore-shutdown").unstarted(() -> {
             log.log(System.Logger.Level.INFO, "received shutdown request; closing connections and checkpointing");

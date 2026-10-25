@@ -55,7 +55,7 @@ jobs:
       - name: Smoke test
         run: |
           data="$RUNNER_TEMP/hstore"
-          server/target/hstore init "$data" --superuser admin --password ci
+          server/target/hstore init "$data" --superuser admin --password ci-password
           server/target/hstore exec "$data" examples/clinical-claims.hql > /dev/null
           server/target/hstore check "$data"
 
@@ -76,7 +76,7 @@ jobs:
           cache-to: type=gha,mode=max,ignore-error=true
       - name: Start container and wait for health
         run: |
-          docker run -d --name hstore -e HSTORE_PASSWORD=ci -p 7432:7432 -p 7480:7480 hstore:ci
+          docker run -d --name hstore -e HSTORE_PASSWORD=ci-password -p 7432:7432 -p 7480:7480 hstore:ci
           for _ in $(seq 1 30); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' hstore)" = healthy ] && break
             sleep 2

@@ -12,6 +12,7 @@ import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeAlgebra;
 import io.hstore.engine.txn.IncidentEdge;
+import io.hstore.engine.txn.View;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -94,7 +95,10 @@ public final class PatternMatcher {
     }
 
     private long typeDomain(Variable variable) {
-        return variable.type().flatMap(reader::type).map(type -> reader.countOfType(type.id())).orElse(UNKNOWN_DOMAIN);
+        Optional<TypeDef> type = variable.type().flatMap(reader::type);
+        try (View.Unrecorded _ = reader.view().unrecorded()) {
+            return type.map(found -> reader.countOfType(found.id())).orElse(UNKNOWN_DOMAIN);
+        }
     }
 
     private LongStream candidates(Pattern pattern, String name, Map<String, Long> binding) {

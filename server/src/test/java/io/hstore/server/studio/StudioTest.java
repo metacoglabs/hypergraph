@@ -13,10 +13,15 @@ import io.hstore.server.Tls;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -47,7 +52,7 @@ class StudioTest {
         database = HypergraphDatabase.open(directory, DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096)));
         try (Session session = new Session(database)) {
             session.executeAll("""
-                    CREATE USER admin PASSWORD 'secret' ROLE admin;
+                    CREATE USER admin PASSWORD 'secret-pass' ROLE admin;
                     CREATE NODE TYPE Person (name STRING INDEXED);
                     CREATE SET EDGE TYPE Meeting ROLES (host, guest);
                     INSERT NODE Person 'ann' {name: 'Ann'} AS $ann;
@@ -57,8 +62,8 @@ class StudioTest {
                     INSERT EDGE Meeting MEMBERS ($meeting AS host, $cy AS guest);
                     """);
         }
-        studio = new Studio(database, new Studio.Options(new InetSocketAddress("127.0.0.1", 0), database::requiresAuthentication,
-                (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty(), Optional.empty()));
+        studio = new Studio(database, new Studio.Options(new InetSocketAddress("127.0.0.1", 0), database::requiresAuthentication, () -> false,
+                (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty(), Optional.empty(), Duration.ZERO));
         studio.start();
     }
 
@@ -86,7 +91,7 @@ class StudioTest {
     }
 
     private Optional<String> login() throws Exception {
-        HttpResponse<String> response = post("/api/login", "{\"user\":\"admin\",\"password\":\"secret\"}", Optional.empty(), true);
+        HttpResponse<String> response = post("/api/login", "{\"user\":\"admin\",\"password\":\"secret-pass\"}", Optional.empty(), true);
         assertEquals(200, response.statusCode());
         return response.headers().firstValue("Set-Cookie").map(header -> header.substring(0, header.indexOf(';')));
     }
@@ -110,7 +115,7 @@ class StudioTest {
     void requiresCredentialsAndTheCsrfHeader() throws Exception {
         assertEquals(401, get("/api/schema", Optional.empty()).statusCode());
         assertEquals(401, post("/api/login", "{\"user\":\"admin\",\"password\":\"wrong\"}", Optional.empty(), true).statusCode());
-        assertEquals(403, post("/api/login", "{\"user\":\"admin\",\"password\":\"secret\"}", Optional.empty(), false).statusCode());
+        assertEquals(403, post("/api/login", "{\"user\":\"admin\",\"password\":\"secret-pass\"}", Optional.empty(), false).statusCode());
         Optional<String> cookie = login();
         assertTrue(cookie.orElseThrow().startsWith("hstore_studio="));
         assertEquals(200, get("/api/schema", cookie).statusCode());
@@ -121,27 +126,27 @@ class StudioTest {
     @Test
     void repeatedFailedLoginsAreThrottled() throws Exception {
         try (Session session = new Session(database)) {
-            session.execute("CREATE USER bob PASSWORD 'b0b' ROLE reader");
+            session.execute("CREATE USER bob PASSWORD 'b0b-pass' ROLE reader");
         }
-        for (int i = 0; i < SignIns.USER_LIMIT; i++) {
+        for (int i = 0; i < SignIns.ACCOUNT_LIMIT; i++) {
             assertEquals(401, post("/api/login", "{\"user\":\"admin\",\"password\":\"wrong\"}", Optional.empty(), true).statusCode());
             if (i % 3 == 0) {
-                assertEquals(200, post("/api/login", "{\"user\":\"bob\",\"password\":\"b0b\"}", Optional.empty(), true).statusCode());
+                assertEquals(200, post("/api/login", "{\"user\":\"bob\",\"password\":\"b0b-pass\"}", Optional.empty(), true).statusCode());
             }
         }
-        HttpResponse<String> blocked = post("/api/login", "{\"user\":\"admin\",\"password\":\"secret\"}", Optional.empty(), true);
+        HttpResponse<String> blocked = post("/api/login", "{\"user\":\"admin\",\"password\":\"secret-pass\"}", Optional.empty(), true);
         assertEquals(429, blocked.statusCode());
         assertTrue(blocked.body().contains("too many failed sign-in attempts"));
-        assertEquals(200, post("/api/login", "{\"user\":\"bob\",\"password\":\"b0b\"}", Optional.empty(), true).statusCode());
+        assertEquals(200, post("/api/login", "{\"user\":\"bob\",\"password\":\"b0b-pass\"}", Optional.empty(), true).statusCode());
     }
 
     @Test
     void studioServesHttpsWithSecureCookies() throws Exception {
         Path certificate = Path.of(StudioTest.class.getResource("/tls/certificate.pem").toURI());
         Path key = Path.of(StudioTest.class.getResource("/tls/key.pem").toURI());
-        Studio secure = new Studio(database, new Studio.Options(new InetSocketAddress("127.0.0.1", 0), database::requiresAuthentication,
+        Studio secure = new Studio(database, new Studio.Options(new InetSocketAddress("127.0.0.1", 0), database::requiresAuthentication, () -> false,
                 (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty(),
-                Optional.of(Tls.server(certificate, key))));
+                Optional.of(Tls.server(certificate, key)), Duration.ZERO));
         secure.start();
         try {
             HttpClient client = HttpClient.newBuilder().sslContext(Tls.trusting(certificate)).build();
@@ -149,7 +154,7 @@ class StudioTest {
             assertEquals(200, client.send(HttpRequest.newBuilder(base).build(), HttpResponse.BodyHandlers.ofString()).statusCode());
             HttpResponse<String> login = client.send(HttpRequest.newBuilder(base.resolve("/api/login"))
                     .header("Content-Type", "application/json").header("X-HStore-Studio", "1")
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"user\":\"admin\",\"password\":\"secret\"}")).build(),
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"user\":\"admin\",\"password\":\"secret-pass\"}")).build(),
                     HttpResponse.BodyHandlers.ofString());
             assertEquals(200, login.statusCode());
             assertTrue(login.headers().firstValue("Set-Cookie").orElseThrow().contains("; Secure"));
@@ -211,7 +216,7 @@ class StudioTest {
         Optional<String> cookie = opened.headers().firstValue("Set-Cookie").map(header -> header.substring(0, header.indexOf(';')));
         assertEquals(200, get("/api/schema", cookie).statusCode());
         try (Session session = new Session(database)) {
-            session.execute("CREATE USER admin PASSWORD 'secret' ROLE admin");
+            session.execute("CREATE USER admin PASSWORD 'secret-pass' ROLE admin");
         }
         assertEquals(401, get("/api/schema", cookie).statusCode());
         assertEquals(401, post("/api/query", "{\"script\":\"SHOW USERS\"}", cookie, true).statusCode());
@@ -220,9 +225,9 @@ class StudioTest {
     @Test
     void tenantAdministratorsStayOutOfEngineWidePages() throws Exception {
         try (Session session = new Session(database)) {
-            session.executeAll("CREATE TENANT acme; CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin;");
+            session.executeAll("CREATE TENANT acme; CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin;");
         }
-        HttpResponse<String> signedIn = post("/api/login", "{\"user\":\"carol\",\"password\":\"c4rol\"}", Optional.empty(), true);
+        HttpResponse<String> signedIn = post("/api/login", "{\"user\":\"carol\",\"password\":\"c4rol-pass\"}", Optional.empty(), true);
         assertEquals(200, signedIn.statusCode());
         Optional<String> cookie = signedIn.headers().firstValue("Set-Cookie").map(header -> header.substring(0, header.indexOf(';')));
         assertEquals(403, get("/api/stats", cookie).statusCode());
@@ -233,13 +238,63 @@ class StudioTest {
         for (int i = 0; i < Session.MAX_FAILED_AUTHENTICATIONS; i++) {
             assertTrue(post("/api/query", "{\"script\":\"AUTHENTICATE admin PASSWORD 'guess'\"}", cookie, true).body().contains("\"error\""));
         }
-        assertTrue(post("/api/query", "{\"script\":\"AUTHENTICATE admin PASSWORD 'secret'\"}", cookie, true).body()
+        assertTrue(post("/api/query", "{\"script\":\"AUTHENTICATE admin PASSWORD 'secret-pass'\"}", cookie, true).body()
                 .contains("too many failed authentication attempts in this session"));
-        for (int i = Session.MAX_FAILED_AUTHENTICATIONS; i < SignIns.USER_LIMIT; i++) {
-            assertEquals(200, post("/api/login", "{\"user\":\"carol\",\"password\":\"c4rol\"}", Optional.empty(), true).statusCode());
+        for (int i = Session.MAX_FAILED_AUTHENTICATIONS; i < SignIns.ACCOUNT_LIMIT; i++) {
+            assertEquals(200, post("/api/login", "{\"user\":\"carol\",\"password\":\"c4rol-pass\"}", Optional.empty(), true).statusCode());
             assertEquals(401, post("/api/login", "{\"user\":\"admin\",\"password\":\"guess\"}", Optional.empty(), true).statusCode());
         }
-        assertEquals(429, post("/api/login", "{\"user\":\"admin\",\"password\":\"secret\"}", Optional.empty(), true).statusCode());
+        assertEquals(429, post("/api/login", "{\"user\":\"admin\",\"password\":\"secret-pass\"}", Optional.empty(), true).statusCode());
+    }
+
+    private static Optional<InetAddress> otherInterface() throws SocketException {
+        return NetworkInterface.networkInterfaces()
+                .filter(network -> {
+                    try {
+                        return network.isUp() && !network.isLoopback();
+                    } catch (SocketException e) {
+                        return false;
+                    }
+                })
+                .flatMap(NetworkInterface::inetAddresses)
+                .filter(address -> address instanceof Inet4Address && !address.isLoopbackAddress() && !address.isLinkLocalAddress())
+                .findFirst();
+    }
+
+    @Test
+    void otherHostsNeedAUserUnlessAuthenticationIsOff() throws Exception {
+        Optional<InetAddress> other = otherInterface();
+        Assumptions.assumeTrue(other.isPresent(), "needs a network interface other than loopback");
+        for (boolean off : new boolean[]{false, true}) {
+            Path empty = directory.resolve(off ? "open" : "closed");
+            try (HypergraphDatabase bare = HypergraphDatabase.open(empty, DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096)))) {
+                Studio exposed = new Studio(bare, new Studio.Options(new InetSocketAddress("0.0.0.0", 0), bare::requiresAuthentication, () -> off,
+                        (origin, user, statement, millis, script) -> { }, "test", Duration.ofMinutes(5), Optional.empty(), Optional.empty(), Duration.ZERO));
+                exposed.start();
+                try {
+                    String host = other.get().getHostAddress();
+                    HttpResponse<String> remote = client.send(HttpRequest.newBuilder(URI.create("http://" + host + ":" + exposed.port() + "/api/info"))
+                            .build(), HttpResponse.BodyHandlers.ofString());
+                    HttpResponse<String> forwarded = client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + exposed.port() + "/api/info"))
+                            .header("X-Forwarded-For", "198.51.100.7").build(), HttpResponse.BodyHandlers.ofString());
+                    HttpResponse<String> local = client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + exposed.port() + "/api/info"))
+                            .build(), HttpResponse.BodyHandlers.ofString());
+                    assertEquals(off ? 200 : 403, remote.statusCode(), remote.body());
+                    assertEquals(off ? 200 : 403, forwarded.statusCode(), forwarded.body());
+                    assertEquals(200, local.statusCode());
+                    if (!off) {
+                        assertTrue(remote.body().contains("this database has no users"), remote.body());
+                        try (Session session = new Session(bare)) {
+                            session.execute("CREATE USER admin PASSWORD 'secret-pass' ROLE admin");
+                        }
+                        assertEquals(200, client.send(HttpRequest.newBuilder(URI.create("http://" + host + ":" + exposed.port() + "/api/info"))
+                                .build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+                    }
+                } finally {
+                    exposed.close();
+                }
+            }
+        }
     }
 
     @Test

@@ -20,6 +20,7 @@ import io.hstore.engine.tree.NodeSource;
 import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeDiff;
+import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.tree.WriteScope;
 
 import java.util.ArrayList;
@@ -49,6 +50,11 @@ public final class Transaction extends View implements AutoCloseable {
     private record KeyRead(Slot<?> slot, long key) {
     }
 
+    private record RangeRead(Slot<?> slot, long key, long low, long high) {
+    }
+
+    static final int PROMOTE_AFTER = 8192;
+
     private final TransactionManager manager;
     private final long id;
     private final Retained retained;
@@ -61,6 +67,12 @@ public final class Transaction extends View implements AutoCloseable {
     private final Map<Long, Footprint> footprints = new HashMap<>();
     private final Map<Long, Optional<AtomRecord>> atomReads = new HashMap<>();
     private final Map<KeyRead, Optional<?>> keyReads = new HashMap<>();
+    private final Map<RangeRead, Optional<?>> rangeReads = new HashMap<>();
+    private final Map<Slot<?>, Integer> readsPerSlot = new HashMap<>();
+    private final Set<Slot<?>> slotReads = new HashSet<>();
+    private final boolean serializable;
+    private final Unrecorded resume;
+    private int unrecorded;
     private State state = State.ACTIVE;
     private long[] spilled = new long[0];
     private int spilledPages;
@@ -72,6 +84,8 @@ public final class Transaction extends View implements AutoCloseable {
         this.snapshot = snapshot;
         this.branch = snapshot.branch(options.branch());
         this.options = options;
+        this.serializable = options.isolation() == Isolation.SERIALIZABLE;
+        this.resume = serializable ? () -> unrecorded = Math.max(0, unrecorded - 1) : NOT_RECORDING;
         this.scope = new WriteScope((ref, schema) -> manager.spill(this.id, ref, schema, this::spilled));
         this.workspace = manager.workspace(scope, branch.roots(), Workspace.EdgeGuard.NONE, false);
     }
@@ -114,17 +128,68 @@ public final class Transaction extends View implements AutoCloseable {
     }
 
     @Override
+    public Unrecorded unrecorded() {
+        if (serializable) {
+            unrecorded++;
+        }
+        return resume;
+    }
+
+    private boolean recording() {
+        return serializable && unrecorded == 0;
+    }
+
+    @Override
     void observeAtom(long atom, Optional<AtomRecord> record) {
-        if (options.isolation() == Isolation.SERIALIZABLE && !atomReads.containsKey(atom)) {
-            atomReads.put(atom, snapshotValue(EngineSlots.CATALOG, atom));
+        if (!recording() || slotReads.contains(EngineSlots.CATALOG) || atomReads.containsKey(atom)) {
+            return;
+        }
+        atomReads.put(atom, snapshotValue(EngineSlots.CATALOG, atom));
+        if (atomReads.size() > PROMOTE_AFTER) {
+            observeSlot(EngineSlots.CATALOG);
         }
     }
 
     @Override
-    <V> void observeKey(Slot<V> slot, long key, Optional<V> value) {
+    void observeKey(Slot<?> slot, long key) {
+        if (!recording() || slotReads.contains(slot)) {
+            return;
+        }
         KeyRead read = new KeyRead(slot, key);
-        if (options.isolation() == Isolation.SERIALIZABLE && !keyReads.containsKey(read)) {
+        if (!keyReads.containsKey(read)) {
             keyReads.put(read, snapshotValue(slot, key));
+            counted(slot);
+        }
+    }
+
+    @Override
+    void observeRange(Slot<?> slot, long key, long low, long high) {
+        if (!recording() || slotReads.contains(slot) || keyReads.containsKey(new KeyRead(slot, key))) {
+            return;
+        }
+        RangeRead read = new RangeRead(slot, key, low, high);
+        if (!rangeReads.containsKey(read)) {
+            rangeReads.put(read, snapshotValue(slot, key));
+            counted(slot);
+        }
+    }
+
+    @Override
+    void observeSlot(Slot<?> slot) {
+        if (!recording() || !slotReads.add(slot)) {
+            return;
+        }
+        keyReads.keySet().removeIf(read -> read.slot().equals(slot));
+        rangeReads.keySet().removeIf(read -> read.slot().equals(slot));
+        readsPerSlot.remove(slot);
+        if (slot.equals(EngineSlots.CATALOG)) {
+            atomReads.clear();
+        }
+    }
+
+    private void counted(Slot<?> slot) {
+        if (readsPerSlot.merge(slot, 1, Integer::sum) > PROMOTE_AFTER) {
+            observeSlot(slot);
         }
     }
 
@@ -227,7 +292,11 @@ public final class Transaction extends View implements AutoCloseable {
     }
 
     private <V> Optional<V> snapshotValue(Slot<V> slot, long key) {
-        return new Tree<>(slot.schema(), source(), branch.roots().get(slot)).get(key);
+        return snapshotTree(slot).get(key);
+    }
+
+    private <V> Tree<V> snapshotTree(Slot<V> slot) {
+        return new Tree<>(slot.schema(), source(), branch.roots().get(slot));
     }
 
     private void edgeAction(long edge, EdgeAction action) {
@@ -361,9 +430,14 @@ public final class Transaction extends View implements AutoCloseable {
     }
 
     void validateReads(RootVector latest) {
-        if (options.isolation() != Isolation.SERIALIZABLE) {
+        if (!serializable) {
             return;
         }
+        slotReads.forEach(slot -> {
+            if (!sameSlot(slot, latest)) {
+                throw HStoreException.conflict("serializable scan of " + slot + " was invalidated");
+            }
+        });
         Tree<AtomRecord> catalog = new Tree<>(EngineSlots.ATOM_SCHEMA, source(), latest.get(EngineSlots.CATALOG));
         atomReads.forEach((atom, seen) -> {
             Optional<AtomRecord> now = catalog.get(atom);
@@ -375,10 +449,73 @@ public final class Transaction extends View implements AutoCloseable {
             }
         });
         keyReads.forEach((read, seen) -> {
-            Optional<?> now = new Tree<>(read.slot().schema(), source(), latest.get(read.slot())).get(read.key());
-            if (!now.equals(seen)) {
-                throw HStoreException.conflict("serializable read of " + read.slot() + " key " + read.key() + " was invalidated");
+            if (!sameValue(read.slot(), seen, latestValue(read.slot(), read.key(), latest))) {
+                throw HStoreException.conflict("serializable read of " + describe(read.slot(), read.key()) + " was invalidated");
             }
         });
+        rangeReads.forEach((read, seen) -> {
+            if (!sameRange(read, seen, latestValue(read.slot(), read.key(), latest))) {
+                throw HStoreException.conflict("serializable read of " + describe(read.slot(), read.key())
+                        + " between " + read.low() + " and " + read.high() + " was invalidated");
+            }
+        });
+    }
+
+    private <V> boolean sameSlot(Slot<V> slot, RootVector latest) {
+        return TreeDiff.sameContent(snapshotTree(slot), new Tree<>(slot.schema(), source(), latest.get(slot)));
+    }
+
+    private Optional<?> latestValue(Slot<?> slot, long key, RootVector latest) {
+        return new Tree<>(slot.schema(), source(), latest.get(slot)).get(key);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <V> boolean sameValue(Slot<V> slot, Optional<?> seen, Optional<?> now) {
+        if (seen.isEmpty() || now.isEmpty()) {
+            return seen.isEmpty() && now.isEmpty();
+        }
+        return TreeDiff.sameValue(slot.schema(), source(), (V) seen.get(), (V) now.get());
+    }
+
+    @SuppressWarnings("unchecked")
+    private <V> boolean sameRange(RangeRead read, Optional<?> seen, Optional<?> now) {
+        Slot<V> slot = (Slot<V>) read.slot();
+        ValueCodec<V> codec = slot.schema().codec();
+        if (seen.isEmpty() && now.isEmpty()) {
+            return true;
+        }
+        if (!codec.holdsRefs()) {
+            return sameValue(slot, seen, now);
+        }
+        if (seen.isPresent() && now.isPresent()
+                && !Objects.equals(codec.mapRefs((V) seen.get(), (_, _) -> Ref.EMPTY), codec.mapRefs((V) now.get(), (_, _) -> Ref.EMPTY))) {
+            return false;
+        }
+        List<Tree<?>> before = seen.map(value -> TreeDiff.nested(source(), codec, (V) value)).orElse(List.of());
+        List<Tree<?>> after = now.map(value -> TreeDiff.nested(source(), codec, (V) value)).orElse(List.of());
+        if (seen.isPresent() && now.isPresent() ? before.size() != after.size() : before.isEmpty() && after.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < Math.max(before.size(), after.size()); i++) {
+            Tree<?> was = before.isEmpty() ? after.get(i).withRoot(Ref.EMPTY) : before.get(i);
+            Tree<?> is = after.isEmpty() ? before.get(i).withRoot(Ref.EMPTY) : after.get(i);
+            if (!TreeDiff.sameNested(was, is, read.low(), read.high())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String describe(Slot<?> slot, long key) {
+        if (slot.equals(EngineSlots.REVERSE)) {
+            return "the incident edges of atom " + key;
+        }
+        if (slot.equals(EngineSlots.TYPES)) {
+            return "the atoms of type " + (int) key + " in tenant " + (key >>> 32);
+        }
+        if (slot.equals(EngineSlots.CANONICAL)) {
+            return "canonical key hash " + Long.toHexString(key);
+        }
+        return slot + " key " + key;
     }
 }

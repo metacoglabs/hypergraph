@@ -138,6 +138,9 @@ and in Docker it is the last line of `docker logs`. The storage-integrity failur
 | WARNING | `connection {n} from /{ip}:{port} closed: message exceeds {bytes} bytes` (64 KiB before authentication, `max_message_mb` after) |
 | WARNING | `connection {n} from /{ip}:{port} closed: it sent an HTTP request` |
 | WARNING | `connection from /{ip}:{port} refused: {reason} (max_connections={n})`: the server is full, or 16 connections from this address are still waiting to authenticate. |
+| WARNING | `connection {n} from /{ip}:{port} refused: no users exist and the client is not on this host` (Studio: `studio request from … refused: …`). |
+| WARNING | `user "{user}" failed to sign in 50 times within 15 minutes; someone may be guessing its password from several addresses` (logger `hstore.security`). |
+| WARNING | at startup, `authentication = off and the server listens on {address}: …` or `the database has no users, so connections from other hosts are refused until CREATE USER creates one`, when the listen address is not loopback. |
 | LOG | `studio session opened for user={user} role={ROLE} from /{ip}:{port}` |
 | WARNING | `studio password authentication failed for user "{user}" from /{ip}:{port}` |
 

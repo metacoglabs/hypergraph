@@ -642,9 +642,17 @@ Session semantics (`Session`):
 
 - Without `BEGIN`, every statement runs in its own transaction (`HypergraphDatabase.write`, retried up to 8 times
   on conflict) or snapshot.
-- `BEGIN` opens a session transaction with `SNAPSHOT` isolation (`SERIALIZABLE` adds read-set validation, see
-  [transactions](../transactions/transactions.md)); subsequent reads see its writes. `COMMIT` publishes it,
-  `ROLLBACK` aborts it; closing a session aborts an open transaction.
+- `BEGIN` opens a session transaction with `SNAPSHOT` isolation; subsequent reads see its writes. `COMMIT`
+  publishes it, `ROLLBACK` aborts it; closing a session aborts an open transaction. Under `SNAPSHOT`, two
+  transactions can each read a predicate, write something the other's predicate depends on, and both commit
+  (write skew).
+- `BEGIN SERIALIZABLE` also records what each statement read: the atoms and properties it looked at, the posting
+  lists behind `HAS`, `CONTAINS`, `degree()` and type scans, the property index range of an indexed `WHERE`, and
+  canonical key lookups, including ones that found nothing. `COMMIT` fails with a retryable conflict
+  (`RETRYABLE_CONFLICT`, "serializable read of ... was invalidated") if a transaction that committed in the
+  meantime changed any of it. The session transaction is closed either way; run it again from `BEGIN`. Planner
+  estimates and `EXPLAIN` are not recorded. See [transactions](../transactions/transactions.md#6-isolation) for the
+  exact granularity.
 - `USE BRANCH b` / `USE MAIN` / `USE TENANT t` are rejected inside a transaction.
 - `AT GENERATION g s` and `AS OF t s` run the single statement `s` against a retained historical generation
   (`Database.readAt`); writes inside are rejected (`historical generations are read-only`). `AS OF` resolves the
@@ -740,15 +748,15 @@ tenant, role` (tenant id). The tenancy model is specified in [security](security
 ```sql
 CREATE TENANT clinic_b QUOTA (atoms 3, edges 1);
 ALTER TENANT clinic_b QUOTA (payload_bytes 1048576, query_pages 100000);
-CREATE USER analyst PASSWORD 's3cret' TENANT clinic_b ROLE writer;
-CREATE USER auditor PASSWORD 'pw' ROLE reader;
-ALTER USER auditor PASSWORD 'pw2';
+CREATE USER analyst PASSWORD 's3cret-pass' TENANT clinic_b ROLE writer;
+CREATE USER auditor PASSWORD 'pw-secret' ROLE reader;
+ALTER USER auditor PASSWORD 'pw2-secret';
 DROP USER auditor;
 USE TENANT clinic_b;
 INSERT NODE Lab 'b1' {name: 'B1'}; INSERT NODE Lab 'b2' {name: 'B2'}; INSERT NODE Lab 'b3' {name: 'B3'};
 INSERT NODE Lab 'b4' {name: 'B4'};
 -- error [ABORTED_RESOURCE_LIMIT]: tenant #1 would exceed its quota: usage Usage[atoms=4, edges=0, payloadBytes=0] against Quota[…]
-AUTHENTICATE analyst PASSWORD 's3cret';
+AUTHENTICATE analyst PASSWORD 's3cret-pass';
 CREATE NODE TYPE Y;
 -- error [INVALID_SCHEMA]: user analyst lacks the ADMIN role required for this statement
 ```

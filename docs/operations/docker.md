@@ -60,7 +60,7 @@ Image environment defaults: `HSTORE_DATA=/var/lib/hstore/data`, `HSTORE_LISTEN_A
 
 | Variable | Description |
 |---|---|
-| `HSTORE_PASSWORD` | Password of the superuser created at first start. Required unless `HSTORE_PASSWORD_FILE` is set or `HSTORE_AUTHENTICATION=off`. The entrypoint unsets it before `exec`ing the server. |
+| `HSTORE_PASSWORD` | Password of the superuser created at first start, at least 8 characters. Required unless `HSTORE_PASSWORD_FILE` is set or `HSTORE_AUTHENTICATION=off`. The entrypoint unsets it before `exec`ing the server. |
 | `HSTORE_PASSWORD_FILE` | Path of a file containing the password, for Docker or Kubernetes secrets. Takes precedence over `HSTORE_PASSWORD`. |
 | `HSTORE_USER` | Superuser name. Default `hstore`. The superuser has role `ADMIN` in tenant `default`. |
 | `HSTORE_AUTHENTICATION=off` | Initialise without a superuser. Because it is also the `authentication` setting, the server then accepts unauthenticated connections. |
