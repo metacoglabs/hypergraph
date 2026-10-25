@@ -25,6 +25,7 @@ Start here
 * [database/data-model.md](database/data-model.md): logical data model (types, atoms, properties, roles, documents, payloads) and its mapping onto engine slots.
 * [database/hql.md](database/hql.md): HQL reference: every statement, its grammar and examples.
 * [database/planner.md](database/planner.md): how `MATCH` is planned (access paths, cost estimates, `EXPLAIN`, `TRACE`) and executed.
+* [database/ranking.md](database/ranking.md): how `RANK` scores hyperedges against a query hyperedge and finds the best ones without scoring all of them.
 * [database/hora.md](database/hora.md): higher-order relational algebra: gather, scatter, propagate, overlap join, closure, pattern matching.
 * [database/semantic.md](database/semantic.md): the semantic plane: embeddings, encoders, the persistent HNSW index, freshness.
 * [database/evidence-and-temporal.md](database/evidence-and-temporal.md): assertions, evidence and provenance; valid time and transaction time.

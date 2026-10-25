@@ -125,7 +125,10 @@ public final class Security {
 
     public static void charge(Transaction txn, int tenant, Usage delta) {
         Quota quota = quota(txn, tenant);
-        Usage projected = usage(txn, tenant).plus(delta);
+        Usage projected;
+        try (View.Unrecorded _ = txn.unrecorded()) {
+            projected = usage(txn, tenant).plus(delta);
+        }
         boolean growing = delta.atoms() > 0 || delta.edges() > 0 || delta.payloadBytes() > 0;
         if (growing && !quota.admits(projected)) {
             throw HStoreException.limit("tenant #" + tenant + " would exceed its quota: usage " + projected + " against " + quota);

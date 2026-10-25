@@ -10,11 +10,15 @@ import io.hstore.engine.index.IndexValues.Marker;
 import io.hstore.engine.index.Postings;
 import io.hstore.engine.tree.Entry;
 import io.hstore.engine.tree.Tree;
+import io.hstore.engine.tree.TreeCursor;
 import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.TransactionManager;
 
+import java.util.BitSet;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,6 +34,9 @@ public final class Dictionary {
     private final ConcurrentHashMap<Symbol, Integer> ids = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, Symbol> symbols = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, List<String>> roleLists = new ConcurrentHashMap<>();
+    private final Map<Integer, BitSet> roleSetsByRole = new HashMap<>();
+    private long roleSetsScanned;
+    private long roleSetsGeneration = -1;
 
     Dictionary(TransactionManager transactions) {
         this.transactions = transactions;
@@ -116,17 +123,41 @@ public final class Dictionary {
     }
 
     public List<Integer> roleSetsContaining(String role) {
-        OptionalInt roleId = roleId(role);
-        if (roleId.isEmpty()) {
-            return List.of();
+        return roleSetsWithAll(List.of(role)).stream().boxed().toList();
+    }
+
+    public BitSet roleSetsWithAll(Collection<String> roles) {
+        if (roles.isEmpty()) {
+            throw new IllegalArgumentException("at least one role is required");
+        }
+        List<OptionalInt> roleIds = roles.stream().distinct().map(this::roleId).toList();
+        if (roleIds.stream().anyMatch(OptionalInt::isEmpty)) {
+            return new BitSet();
+        }
+        synchronized (roleSetsByRole) {
+            refreshRoleSets();
+            BitSet accepted = (BitSet) roleSetsByRole.getOrDefault(roleIds.getFirst().getAsInt(), new BitSet()).clone();
+            roleIds.stream().skip(1).forEach(id -> accepted.and(roleSetsByRole.getOrDefault(id.getAsInt(), new BitSet())));
+            return accepted;
+        }
+    }
+
+    private void refreshRoleSets() {
+        long generation = transactions.current().id();
+        if (generation == roleSetsGeneration) {
+            return;
         }
         try (Snapshot snapshot = transactions.snapshot(Branch.MAIN)) {
-            return snapshot.scan(EngineSlots.SYMBOLS).stream()
-                    .filter(entry -> entry.value() instanceof Symbol.Group(int namespace, List<Integer> members)
-                            && namespace == ROLE_SET && members.contains(roleId.getAsInt()))
-                    .map(entry -> (int) entry.key())
-                    .toList();
+            TreeCursor<Symbol> cursor = snapshot.scan(EngineSlots.SYMBOLS).cursor();
+            for (boolean found = cursor.seek(roleSetsScanned + 1); found && cursor.hasNext(); cursor.advance()) {
+                if (cursor.value() instanceof Symbol.Group(int namespace, List<Integer> members) && namespace == ROLE_SET) {
+                    int roleSet = (int) cursor.key();
+                    members.forEach(role -> roleSetsByRole.computeIfAbsent(role, _ -> new BitSet()).set(roleSet));
+                }
+                roleSetsScanned = cursor.key();
+            }
         }
+        roleSetsGeneration = generation;
     }
 
     public OptionalInt lookup(Symbol symbol) {

@@ -15,6 +15,7 @@ import io.hstore.db.query.Ast.Projection;
 import io.hstore.db.query.Ast.Ref;
 import io.hstore.db.query.Ast.SetOp;
 import io.hstore.db.query.Ast.Statement;
+import io.hstore.db.retrieve.RankQuery;
 import io.hstore.db.schema.AtomKind;
 import io.hstore.db.schema.TypeDef.PropertyDef;
 import io.hstore.db.security.Role;
@@ -313,6 +314,9 @@ public final class Parser {
                 Ref right = ref();
                 return new Statement.SetAlgebra(op, left, right, accept("INTO") ? Optional.of(variable()) : Optional.empty());
             }
+        }
+        if (accept("RANK")) {
+            return rank();
         }
         if (accept("EXPAND")) {
             Ref atom = ref();
@@ -651,6 +655,88 @@ public final class Parser {
         return new Bounds(exact, exact);
     }
 
+    private Statement.Rank rank() {
+        if (!accept("EDGE") && !accept("EDGES")) {
+            throw error("expected EDGE");
+        }
+        String variable = identifier();
+        Optional<String> type = acceptSymbol(":") ? Optional.of(identifier()) : Optional.empty();
+        expect("LIKE");
+        expectSymbol("(");
+        List<Ast.RankSlot> slots = new ArrayList<>();
+        do {
+            if (slots.size() == RankQuery.MAX_SLOTS) {
+                throw error("RANK accepts at most " + RankQuery.MAX_SLOTS + " slots");
+            }
+            slots.add(rankSlot());
+        } while (acceptSymbol(","));
+        expectSymbol(")");
+        Optional<Ast.RankTime> time = Optional.empty();
+        if (accept("VALID")) {
+            if (accept("DURING")) {
+                Validity interval = interval();
+                time = Optional.of(new Ast.RankTime.During(interval.from(), interval.to()));
+            } else {
+                expect("AT");
+                Expr instant = additive();
+                time = Optional.of(new Ast.RankTime.At(instant, accept("TAU") ? OptionalDouble.of(number().doubleValue()) : OptionalDouble.empty()));
+            }
+        }
+        List<Ast.RankPreference> preferences = new ArrayList<>();
+        if (accept("PREFER")) {
+            do {
+                if (preferences.size() == RankQuery.MAX_PREFERENCES) {
+                    throw error("RANK accepts at most " + RankQuery.MAX_PREFERENCES + " preferences");
+                }
+                preferences.add(preference());
+            } while (acceptSymbol(","));
+        }
+        OptionalLong size = accept("SIZE") ? OptionalLong.of(longValue()) : OptionalLong.empty();
+        Map<String, Double> weights = new LinkedHashMap<>();
+        if (accept("WEIGHTS")) {
+            expectSymbol("(");
+            do {
+                String component = identifier().toLowerCase(Locale.ROOT);
+                if (weights.put(component, number().doubleValue()) != null) {
+                    throw error("the weight of " + component + " is given twice");
+                }
+            } while (acceptSymbol(","));
+            expectSymbol(")");
+        }
+        expect("TOP");
+        return new Statement.Rank(variable, type, slots, time, preferences, size, weights, longValue());
+    }
+
+    private Ast.RankSlot rankSlot() {
+        Ast.RankTarget target = accept("ANY") ? new Ast.RankTarget.OfType(identifier()) : new Ast.RankTarget.Atom(ref());
+        List<String> roles = new ArrayList<>();
+        if (accept("AS")) {
+            do {
+                roles.add(identifier());
+            } while (accept("OR"));
+        }
+        OptionalDouble weight = accept("WEIGHT") ? OptionalDouble.of(number().doubleValue()) : OptionalDouble.empty();
+        return new Ast.RankSlot(target, roles, weight, accept("REQUIRED"));
+    }
+
+    private Ast.RankPreference preference() {
+        String variable = identifier();
+        expectSymbol(".");
+        String property = identifier();
+        if (accept("NEAR")) {
+            double target = number().doubleValue();
+            expect("SCALE");
+            double scale = number().doubleValue();
+            return new Ast.RankPreference.Near(variable, property, target, scale, preferenceWeight());
+        }
+        expectSymbol("=");
+        return new Ast.RankPreference.Equals(variable, property, literal(), preferenceWeight());
+    }
+
+    private OptionalDouble preferenceWeight() {
+        return accept("WEIGHT") ? OptionalDouble.of(number().doubleValue()) : OptionalDouble.empty();
+    }
+
     private Ast.Match match() {
         boolean edges;
         if (accept("EDGE") || accept("EDGES")) {
@@ -867,6 +953,9 @@ public final class Parser {
         expectSymbol(",");
         long to = acceptSymbol("*") ? Long.MAX_VALUE : instant();
         expectSymbol(")");
+        if (from >= to) {
+            throw error("the interval [" + from + ", " + to + ") is empty");
+        }
         return new Validity(from, to);
     }
 

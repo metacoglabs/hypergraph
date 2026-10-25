@@ -110,6 +110,33 @@ public final class Ast {
                         List<Projection> projections, Optional<Expr> orderBy, boolean descending, OptionalLong limit) {
     }
 
+    public sealed interface RankTarget {
+        record Atom(Ref ref) implements RankTarget {
+        }
+
+        record OfType(String type) implements RankTarget {
+        }
+    }
+
+    public record RankSlot(RankTarget target, List<String> roles, OptionalDouble weight, boolean required) {
+    }
+
+    public sealed interface RankTime {
+        record At(Expr instant, OptionalDouble tau) implements RankTime {
+        }
+
+        record During(long from, long to) implements RankTime {
+        }
+    }
+
+    public sealed interface RankPreference {
+        record Equals(String variable, String property, Value target, OptionalDouble weight) implements RankPreference {
+        }
+
+        record Near(String variable, String property, double target, double scale, OptionalDouble weight) implements RankPreference {
+        }
+    }
+
     public sealed interface Statement {
         record Begin(boolean serializable) implements Statement {
         }
@@ -263,6 +290,10 @@ public final class Ast {
         }
 
         record Expand(Ref atom, int depth, OptionalLong limit) implements Statement {
+        }
+
+        record Rank(String variable, Optional<String> type, List<RankSlot> slots, Optional<RankTime> time,
+                    List<RankPreference> preferences, OptionalLong size, Map<String, Double> weights, long top) implements Statement {
         }
 
         record Gather(Field field, Ref edge) implements Statement {
