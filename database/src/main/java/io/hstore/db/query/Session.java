@@ -111,7 +111,7 @@ public final class Session implements AutoCloseable {
             throw malformed;
         }
         Optional<Principal> found = outcome instanceof Scram.Outcome.Accepted(String user, String _)
-                ? database.read(reader -> Security.user(reader.view(), user)).map(Security::principal)
+                ? database.read(reader -> Security.user(reader.engineView(), user)).map(Security::principal)
                 : Optional.empty();
         if (found.isEmpty()) {
             attempt.reservation().failed();
@@ -139,7 +139,7 @@ public final class Session implements AutoCloseable {
     private void signIn(Principal found) {
         principal = found;
         authenticated = true;
-        credentials = database.read(reader -> Security.user(reader.view(), found.user()));
+        credentials = database.read(reader -> Security.user(reader.engineView(), found.user()));
         renewing = false;
         variables.clear();
         branch = Branch.MAIN;
@@ -157,7 +157,7 @@ public final class Session implements AutoCloseable {
         if (!authenticated) {
             return true;
         }
-        Optional<Security.User> stored = database.read(reader -> Security.user(reader.view(), principal.user()));
+        Optional<Security.User> stored = database.read(reader -> Security.user(reader.engineView(), principal.user()));
         boolean current = stored.isPresent() && credentials.isPresent()
                 && stored.get().tenant() == credentials.get().tenant() && stored.get().role() == credentials.get().role()
                 && (renewing || stored.get().hash().equals(credentials.get().hash()));
@@ -210,7 +210,7 @@ public final class Session implements AutoCloseable {
                 if (transaction.isPresent()) {
                     throw HStoreException.invalid("cannot switch tenants inside a transaction");
                 }
-                Security.Tenant tenant = database.read(reader -> Security.tenant(reader.view(), name))
+                Security.Tenant tenant = database.read(reader -> Security.tenant(reader.engineView(), name))
                         .filter(found -> principal.global() || found.id() == principal.tenant())
                         .orElseThrow(() -> principal.global()
                                 ? HStoreException.invalid("unknown tenant '" + name + "'")
@@ -226,7 +226,7 @@ public final class Session implements AutoCloseable {
             }
             case Statement.WhoAmI _ -> QueryResult.table(List.of("user", "tenant", "role", "branch"), List.of(List.of(
                     QueryResult.text(principal.user()),
-                    QueryResult.text(database.read(reader -> Security.tenant(reader.view(), principal.tenant()).map(Security.Tenant::name).orElse("#" + principal.tenant()))),
+                    QueryResult.text(database.read(reader -> Security.tenant(reader.engineView(), principal.tenant()).map(Security.Tenant::name).orElse("#" + principal.tenant()))),
                     QueryResult.text(principal.role().name()), QueryResult.number(branch))));
             case Statement.SetFormat(String name) -> {
                 format = Arrays.stream(Format.values()).filter(candidate -> candidate.name().equalsIgnoreCase(name)).findFirst()

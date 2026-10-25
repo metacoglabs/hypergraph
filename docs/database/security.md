@@ -79,17 +79,29 @@ Every `Reader` method that accepts an atom id calls `visible` (or filters by ten
 in the default tenant and the type index holds no atom of another tenant, every atom is visible and a missing atom
 has no incidence entries anyway, so the extra catalog lookup is skipped. The reader checks this once per snapshot.
 
-Code that needs the raw engine `View` (`reader.view()`) may only pass it ids that are already known to belong to the
-reader's tenant, such as bound query variables or atoms from `atomsOfType`. Ids that come from a statement go
-through `Reader` first. The `MemberScan` and `IncidentIntersection` access paths return nothing for an id the
-reader cannot see.
+Query code reads through `Reader` only. Besides the methods above, `Reader` offers the tenant-checked lookups that
+query paths need: `incidence(edge, member)` and `contains(edge, member)` (the edge must be the reader's and the
+member owned, checked inside the same catalog lookup), `incidentEdges(atom)` (edges the reader owns),
+`hyperedge(id)`, `isEdge(id)`, and `incidentTree(atom)` / `incidentCursor(atom)` (empty for an atom the reader
+cannot see; the edge ids they yield still go through `Executor.admits` or `owns` before use). `MATCH`, `RANK`,
+`PATTERN`, HORA operators and temporal queries use nothing else.
+
+The raw engine `View` is available as `reader.engineView()` for code that works across tenants by design: user,
+tenant and quota records, the SCRAM secret, the shared schema listing, branch merges and `DIFF` (global admins
+only), materialized view maintenance (filtered by the view's tenant), and records that carry their own tenant
+stamp (evidence, qualifiers, state, signals). `TenantBoundaryTest` in the database and server modules lists the
+files allowed to call it, each with its reason, and fails when any other file does, or when a listed file no
+longer needs it. Adding a raw read therefore means stating why it is safe in that list.
 
 Writes call `require`, so a principal cannot modify an atom it cannot see. A hyperedge may only gain members that
 are visible to the writer (`Writer.incidence`, also used by `Writer.qualify`), so a tenant cannot reference another
 tenant's atoms. Evidence sources, assertion sources and the evidence list of `QUALIFY` must be atoms, evidence or
 assertions of the writer's tenant (`Provenance.record/assertion`). `hstore check` lists any membership on main
-whose member belongs to a different tenant than its edge, with the `REMOVE` statement that undoes it. Databases
-written before these checks existed could have such memberships from `QUALIFY`.
+whose member belongs to a different tenant than its edge, with the `REMOVE` statement that undoes it, and
+`hstore check <dir> --repair-tenants` removes them in one transaction. Databases written before these checks
+existed could have such memberships from `QUALIFY`. A new database, and one that `hstore check` found clean or
+repaired, records that in `EngineSlots.SETTINGS`; `hstore serve` logs a WARNING at startup for a database without
+that record.
 
 The planner only uses numbers from the reader's tenant: untyped matches are estimated from `Reader.population`
 (the sum of the tenant's per-type counts), and the feedback that corrects estimates after each query is kept per

@@ -18,11 +18,15 @@ import io.hstore.db.value.Values;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.AtomRecord;
 import io.hstore.engine.catalog.EngineSlots;
+import io.hstore.engine.index.IndexValues;
+import io.hstore.engine.index.PostingCursor;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Hyperedge;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.topology.Weight;
 import io.hstore.engine.tree.Entry;
+import io.hstore.engine.tree.Tree;
+import io.hstore.engine.txn.IncidentEdge;
 import io.hstore.engine.txn.View;
 
 import java.util.LinkedHashMap;
@@ -79,8 +83,55 @@ public sealed class Reader permits Writer {
         return onlyDefaultTenant() || visible(atom);
     }
 
-    public View view() {
+    public View engineView() {
         return view;
+    }
+
+    public View.Unrecorded unrecorded() {
+        return view.unrecorded();
+    }
+
+    public boolean isEdge(long atom) {
+        return view.atom(atom).map(record -> record.tenant() == tenant() && record instanceof AtomRecord.EdgeRecord).orElse(false);
+    }
+
+    public Optional<Hyperedge> hyperedge(long id) {
+        return view.atom(id)
+                .filter(record -> record.tenant() == tenant())
+                .flatMap(record -> record instanceof AtomRecord.EdgeRecord edge ? Optional.of(view.edge(id, edge)) : Optional.empty());
+    }
+
+    public Optional<Incidence> incidence(long edge, long member) {
+        return owns(member) ? view.incidence(edge, member, tenant()) : Optional.empty();
+    }
+
+    public boolean contains(long edge, long member) {
+        return owns(member) && view.contains(edge, member, tenant());
+    }
+
+    public Stream<IncidentEdge> incidentEdges(long atom) {
+        if (!onlyDefaultTenant() && !visible(atom)) {
+            return Stream.empty();
+        }
+        return view.incident(atom).filter(incident -> owns(incident.edge()));
+    }
+
+    public Tree<?> incidentTree(long atom) {
+        return onlyDefaultTenant() || visible(atom)
+                ? view.incidentTree(atom)
+                : Tree.empty(EngineSlots.REVERSE_INDEX.postingSchema(), view.source());
+    }
+
+    public PostingCursor<IndexValues.Incident> incidentCursor(long atom) {
+        return onlyDefaultTenant() || visible(atom) ? view.incidentCursor(atom) : nothing();
+    }
+
+    public PostingCursor<IndexValues.Incident> incidentCursor(long atom, Predicate<? super IndexValues.Incident> accept) {
+        return onlyDefaultTenant() || visible(atom) ? view.incidentCursor(atom, accept) : nothing();
+    }
+
+    private PostingCursor<IndexValues.Incident> nothing() {
+        return EngineSlots.REVERSE_INDEX.cursor(Tree.empty(EngineSlots.REVERSE_INDEX.schema(), view.source()), 0);
     }
 
     public HypergraphDatabase database() {

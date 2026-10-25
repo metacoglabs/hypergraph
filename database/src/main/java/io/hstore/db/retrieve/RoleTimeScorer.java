@@ -129,7 +129,7 @@ public final class RoleTimeScorer {
     }
 
     private Fill fixed(long edge, int slot, long atom) {
-        return reader.view().incidence(edge, atom).map(incidence -> fill(slot, incidence)).orElse(Fill.EMPTY);
+        return reader.incidence(edge, atom).map(incidence -> fill(slot, incidence)).orElse(Fill.EMPTY);
     }
 
     private Fill fill(int slot, Incidence incidence) {

@@ -154,8 +154,8 @@ final class HStoreStore implements Store {
         return database.read(reader -> {
             long total = 0;
             for (int i = from; i < to; i++) {
-                total += TreeAlgebra.intersectKeys(reader.view().incidentTree(nodes[pairs[i][0]]),
-                        reader.view().incidentTree(nodes[pairs[i][1]])).count();
+                total += TreeAlgebra.intersectKeys(reader.engineView().incidentTree(nodes[pairs[i][0]]),
+                        reader.engineView().incidentTree(nodes[pairs[i][1]])).count();
             }
             return total;
         });
@@ -209,7 +209,7 @@ final class HStoreStore implements Store {
         return database.read(reader -> {
             long found = 0;
             for (int i = from; i < to; i++) {
-                found += reader.view().incidence(large, nodes[probes[i]]).isPresent() ? 1 : 0;
+                found += reader.engineView().incidence(large, nodes[probes[i]]).isPresent() ? 1 : 0;
             }
             return found;
         });

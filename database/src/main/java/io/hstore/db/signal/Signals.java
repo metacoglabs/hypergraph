@@ -86,9 +86,9 @@ public final class Signals {
         if (!reader.visible(atom)) {
             return Stream.empty();
         }
-        return BY_ATOM.stream(reader.view().scan(SIGNAL_INDEX), atom)
+        return BY_ATOM.stream(reader.engineView().scan(SIGNAL_INDEX), atom)
                 .map(Entry::key)
-                .flatMap(id -> reader.view().get(SIGNALS, id).filter(signal -> signal.overlaps(from, to))
+                .flatMap(id -> reader.engineView().get(SIGNALS, id).filter(signal -> signal.overlaps(from, to))
                         .map(signal -> new Resolved(id, signal)).stream());
     }
 

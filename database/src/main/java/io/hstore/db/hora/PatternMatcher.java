@@ -96,7 +96,7 @@ public final class PatternMatcher {
 
     private long typeDomain(Variable variable) {
         Optional<TypeDef> type = variable.type().flatMap(reader::type);
-        try (View.Unrecorded _ = reader.view().unrecorded()) {
+        try (View.Unrecorded _ = reader.unrecorded()) {
             return type.map(found -> reader.countOfType(found.id())).orElse(UNKNOWN_DOMAIN);
         }
     }
@@ -120,9 +120,9 @@ public final class PatternMatcher {
         for (Constraint constraint : pattern.constraints()) {
             switch (constraint) {
                 case Constraint.Contains(String edge, String member) when edge.equals(name) && binding.containsKey(member) ->
-                        incidentSets.add(reader.view().incidentTree(binding.get(member)));
+                        incidentSets.add(reader.incidentTree(binding.get(member)));
                 case Constraint.HasRole(String edge, String member, String _) when edge.equals(name) && binding.containsKey(member) ->
-                        incidentSets.add(reader.view().incidentTree(binding.get(member)));
+                        incidentSets.add(reader.incidentTree(binding.get(member)));
                 case Constraint.Shares(String left, String right, long _, long _) when left.equals(name) && binding.containsKey(right) -> {
                     relatedConstraint = true;
                     related.addAll(neighbourEdges(binding.get(right)));
@@ -156,7 +156,7 @@ public final class PatternMatcher {
     private Set<Long> neighbourEdges(long edge) {
         Set<Long> edges = new HashSet<>();
         reader.edge(edge).stream().forEach(incidence ->
-                reader.view().incident(incidence.member()).map(IncidentEdge::edge).filter(reader::owns).forEach(edges::add));
+                reader.incidentEdges(incidence.member()).map(IncidentEdge::edge).forEach(edges::add));
         return edges;
     }
 
@@ -208,7 +208,7 @@ public final class PatternMatcher {
     }
 
     private Optional<Incidence> incidence(long edge, long member, Pattern pattern, String edgeVariable) {
-        Optional<Incidence> found = reader.view().edge(edge).flatMap(hyperedge -> hyperedge.get(member));
+        Optional<Incidence> found = reader.hyperedge(edge).flatMap(hyperedge -> hyperedge.get(member));
         OptionalLong instant = validAt(pattern, edgeVariable);
         return instant.isPresent() ? found.filter(incidence -> incidence.validAt(instant.getAsLong())) : found;
     }

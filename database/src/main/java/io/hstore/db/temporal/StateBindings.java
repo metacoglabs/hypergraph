@@ -64,7 +64,7 @@ public final class StateBindings {
     }
 
     public static Optional<Binding> state(Reader reader, long atom) {
-        return reader.visible(atom) ? reader.view().get(STATE, atom) : Optional.empty();
+        return reader.visible(atom) ? reader.engineView().get(STATE, atom) : Optional.empty();
     }
 
     public static Optional<Value> stateAt(Reader reader, long atom, long instant) {

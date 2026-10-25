@@ -211,7 +211,7 @@ class SecurityTest {
             carol.execute("DROP VIEW shared");
             assertTrue(carol.execute("SHOW VIEWS").rows().isEmpty());
             assertEquals(1, keys(dave.execute("VIEW shared")).size());
-            assertEquals(1L, (long) database.read(reader -> reader.view().scan(MaterializedViews.VIEW_DATA).values().count()));
+            assertEquals(1L, (long) database.read(reader -> reader.engineView().scan(MaterializedViews.VIEW_DATA).values().count()));
             String again = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("DROP VIEW shared")).getMessage();
             String missing = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("DROP VIEW nothing")).getMessage();
             assertEquals(missing.replace("nothing", "shared"), again);
@@ -358,6 +358,52 @@ class SecurityTest {
             assertEquals("0", ranked.rows().getFirst().get(3).render());
             QueryResult own = alice.execute("RANK EDGE e:Encounter LIKE (@" + acmePatient + " AS patient REQUIRED) TOP 5");
             assertEquals(List.of("@" + acmeEdge), own.rows().stream().map(row -> row.getFirst().render().split(" ")[0]).toList());
+        }
+    }
+
+    @Test
+    void queriesNeverFollowMembershipsIntoAnotherTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
+                    INSERT NODE Patient 'p2' {mrn: 'A-2'} AS $o;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient, $o AS clinician) AS $e;
+                    """);
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $q; INSERT EDGE Encounter MEMBERS ($q AS patient) AS $g;");
+            long p = alice.variables().get("p");
+            long e = alice.variables().get("e");
+            long q = bob.variables().get("q");
+            long g = bob.variables().get("g");
+            int patient = database.engine().dictionary().roleSet(List.of("patient"));
+            database.write(writer -> {
+                writer.transaction().upsert(g, p, _ -> new Incidence(p, patient, Weight.ONE, Long.MIN_VALUE, Long.MAX_VALUE, 0, 0));
+                return null;
+            });
+            List<String> statements = List.of(
+                    "MATCH EDGE x:Encounter WHERE x HAS @" + p + " RETURN x",
+                    "MATCH EDGE x:Encounter WHERE x HAS @" + p + " AS patient RETURN x",
+                    "MATCH EDGE x:Encounter WHERE x CONTAINS (@" + p + ") RETURN x",
+                    "MATCH EDGE x WHERE x CONTAINS (@" + p + ") RETURN x",
+                    "MATCH NODE n:Patient WHERE n VALID AT 5 RETURN n",
+                    "INCIDENT TO @" + p,
+                    "INCIDENT TO @" + p + " VALID AT 5",
+                    "NEIGHBORS OF @" + p,
+                    "NEIGHBORS OF @" + e + " THRESHOLD 1",
+                    "OVERLAP JOIN Encounter THRESHOLD 1",
+                    "PATTERN (x: EDGE Encounter, n: NODE Patient) WHERE x CONTAINS n AND n = @" + p,
+                    "PATTERN (x: EDGE Encounter, n: NODE Patient) WHERE x HAS n AS patient AND n = @" + p,
+                    "PATTERN (x: EDGE Encounter, y: EDGE Encounter) WHERE SHARED(x, y) >= 1",
+                    "RANK EDGE x:Encounter LIKE (@" + p + " AS patient) TOP 10",
+                    "RANK EDGE x LIKE (@" + p + " REQUIRED) TOP 10",
+                    "EXPAND @" + e + " DEPTH 3",
+                    "MATCH NODE n:Patient WHERE n = @" + p + " RETURN degree(n)");
+            for (String statement : statements) {
+                String rendered = alice.execute(statement).render();
+                assertFalse(rendered.contains("@" + g) || rendered.contains("@" + q), statement + " returned another tenant's atom:\n" + rendered);
+            }
+            assertEquals("1", cell(alice.execute("MATCH NODE n:Patient WHERE n = @" + p + " RETURN degree(n)")));
+            assertEquals(1, alice.execute("INCIDENT TO @" + p).rows().size());
+            assertEquals(1, alice.execute("MATCH EDGE x WHERE x CONTAINS (@" + p + ") RETURN x").rows().size());
         }
     }
 
@@ -763,7 +809,7 @@ class SecurityTest {
 
     @Test
     void passwordsAreStoredAsScramVerifiersAndLegacyHashesUpgrade() {
-        Security.User alice = database.read(reader -> Security.user(reader.view(), "alice")).orElseThrow();
+        Security.User alice = database.read(reader -> Security.user(reader.engineView(), "alice")).orElseThrow();
         assertTrue(alice.hash().startsWith("SCRAM-SHA-256$600000:"), alice.hash());
         byte[] salt = new byte[16];
         byte[] salted = Scram.saltedPassword("legacy-pass", salt, 4096);
@@ -772,13 +818,13 @@ class SecurityTest {
                     HexFormat.of().formatHex(salted), 4096, Principal.DEFAULT_TENANT, Role.READER));
             return null;
         });
-        assertTrue(Security.legacy(database.read(reader -> Security.user(reader.view(), "old")).orElseThrow()));
+        assertTrue(Security.legacy(database.read(reader -> Security.user(reader.engineView(), "old")).orElseThrow()));
         assertTrue(new Session(database).authenticate("old", "legacy-pass"));
         admin.close();
         database.close();
         database = HypergraphDatabase.open(directory, options());
         admin = new Session(database);
-        Security.User upgraded = database.read(reader -> Security.user(reader.view(), "old")).orElseThrow();
+        Security.User upgraded = database.read(reader -> Security.user(reader.engineView(), "old")).orElseThrow();
         assertEquals(Scram.Verifier.of("legacy-pass", salt, 4096).encode(), upgraded.hash());
         assertTrue(new Session(database).authenticate("old", "legacy-pass"));
         assertFalse(new Session(database).authenticate("old", "wrong-pass"));
@@ -939,7 +985,7 @@ class SecurityTest {
                     QUALIFY $b IN $e AS OBSERVED;
                     """);
         }
-        long foreignAssertion = database.read(reader -> reader.view().scan(io.hstore.db.evidence.Provenance.QUALIFIERS).keys().findFirst()).orElseThrow();
+        long foreignAssertion = database.read(reader -> reader.engineView().scan(io.hstore.db.evidence.Provenance.QUALIFIERS).keys().findFirst()).orElseThrow();
         try (Session alice = login("alice", "s3cret-pass")) {
             alice.executeAll("INSERT NODE Patient 'a' {mrn: 'A'} AS $a; INSERT EDGE Encounter MEMBERS ($a AS patient) AS $e;");
             long patient = alice.variables().get("a");
@@ -954,6 +1000,6 @@ class SecurityTest {
     }
 
     private int tenant(String name) {
-        return database.read(reader -> io.hstore.db.security.Security.tenant(reader.view(), name)).orElseThrow().id();
+        return database.read(reader -> io.hstore.db.security.Security.tenant(reader.engineView(), name)).orElseThrow().id();
     }
 }

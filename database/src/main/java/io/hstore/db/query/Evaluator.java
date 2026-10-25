@@ -12,7 +12,6 @@ import io.hstore.db.stats.Statistics;
 import io.hstore.db.temporal.StateBindings;
 import io.hstore.db.value.Value;
 import io.hstore.engine.HStoreException;
-import io.hstore.engine.catalog.AtomRecord.EdgeRecord;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.tree.TreeAlgebra;
 
@@ -46,14 +45,13 @@ final class Evaluator {
             case Expr.Or(List<Expr> terms) -> terms.stream().anyMatch(term -> test(term, binding));
             case Expr.Not(Expr term) -> !test(term, binding);
             case Expr.Contains(String variable, List<Ast.Ref> members) -> isEdge(atom(variable, binding))
-                    && members.stream().map(context::resolve).allMatch(member -> reader().owns(member) && reader().view().contains(atom(variable, binding), member));
-            case Expr.Has(String variable, Ast.Ref member, Optional<String> role) -> Optional.of(context.resolve(member)).filter(reader()::owns)
-                    .flatMap(resolved -> reader().view().incidence(atom(variable, binding), resolved))
+                    && members.stream().map(context::resolve).allMatch(member -> reader().contains(atom(variable, binding), member));
+            case Expr.Has(String variable, Ast.Ref member, Optional<String> role) -> reader().incidence(atom(variable, binding), context.resolve(member))
                     .map(incidence -> role.map(name -> reader().roles(incidence.roleSet()).contains(name)).orElse(true))
                     .orElse(false);
             case Expr.In(String variable, Ast.Ref edge) -> {
                 long resolved = context.resolve(edge);
-                yield reader().owns(resolved) && reader().view().contains(resolved, atom(variable, binding));
+                yield reader().contains(resolved, atom(variable, binding));
             }
             case Expr.Similar(String variable, String text, int k, var consistency) -> context.similar(text, k, consistency).contains(atom(variable, binding));
             case Expr.ValidAt(String variable, Expr instant) -> validAt(atom(variable, binding), (long) number(instant, binding));
@@ -70,7 +68,7 @@ final class Evaluator {
         if (isEdge(atom)) {
             return reader().edge(atom).validAt(instant).findAny().isPresent();
         }
-        return reader().view().incident(atom).filter(incident -> reader().owns(incident.edge())).anyMatch(incident -> reader().view().incidence(incident.edge(), atom)
+        return reader().incidentEdges(atom).anyMatch(incident -> reader().incidence(incident.edge(), atom)
                 .map(incidence -> incidence.validAt(instant)).orElse(false));
     }
 
@@ -226,7 +224,7 @@ final class Evaluator {
     }
 
     private boolean isEdge(long atom) {
-        return reader().view().atom(atom).map(record -> record instanceof EdgeRecord).orElse(false);
+        return reader().isEdge(atom);
     }
 
     private Reader reader() {

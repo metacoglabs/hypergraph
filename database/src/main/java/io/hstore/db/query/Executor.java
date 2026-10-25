@@ -136,7 +136,7 @@ final class Executor {
                 return QueryResult.message("created tenant " + tenant.name() + " #" + tenant.id());
             });
             case Statement.AlterTenant(String name, Map<String, Long> quota) -> write(writer -> {
-                Security.Tenant tenant = Security.requireTenant(writer.view(), name);
+                Security.Tenant tenant = Security.requireTenant(writer.engineView(), name);
                 Security.setQuota(writer.transaction(), tenant, tenant.quota().with(quota));
                 return QueryResult.message("updated quota of tenant " + name);
             });
@@ -151,20 +151,20 @@ final class Executor {
             });
             case Statement.DropUser(String name) -> write(writer -> {
                 governedUser(writer, name);
-                if (!session.principal().global() && Security.users(writer.view()).size() <= 1) {
+                if (!session.principal().global() && Security.users(writer.engineView()).size() <= 1) {
                     throw HStoreException.invalid("cannot drop the last user: the server would stop asking for credentials");
                 }
                 Security.dropUser(writer.transaction(), name);
                 return QueryResult.message("dropped user " + name);
             });
             case Statement.ShowTenants _ -> read(reader -> table(List.of("id", "name", "atoms", "edges", "payload bytes", "max atoms", "max edges"),
-                    Security.tenants(reader.view()).stream().filter(tenant -> session.principal().governs(tenant.id())).map(tenant -> {
-                        Quota.Usage usage = Security.usage(reader.view(), tenant.id());
+                    Security.tenants(reader.engineView()).stream().filter(tenant -> session.principal().governs(tenant.id())).map(tenant -> {
+                        Quota.Usage usage = Security.usage(reader.engineView(), tenant.id());
                         return List.of(QueryResult.number(tenant.id()), QueryResult.text(tenant.name()), QueryResult.number(usage.atoms()),
                                 QueryResult.number(usage.edges()), QueryResult.number(usage.payloadBytes()),
                                 limit(tenant.quota().maxAtoms()), limit(tenant.quota().maxEdges()));
                     })));
-            case Statement.ShowUsers _ -> read(reader -> table(List.of("user", "tenant", "role"), Security.users(reader.view()).stream()
+            case Statement.ShowUsers _ -> read(reader -> table(List.of("user", "tenant", "role"), Security.users(reader.engineView()).stream()
                     .filter(user -> session.principal().governs(user.tenant()))
                     .map(user -> List.of(QueryResult.text(user.name()), QueryResult.number(user.tenant()), QueryResult.text(user.role().name())))));
             case Statement.DropBranch(String name) -> {
@@ -189,7 +189,7 @@ final class Executor {
                 long memberId = session.resolve(writer, member.member());
                 if (at.isPresent()) {
                     writer.insertAt(edgeId, at.getAsLong(), memberId, spec(member));
-                } else if (writer.edge(edgeId).kind() == EdgeKind.ORDERED && !writer.view().contains(edgeId, memberId)) {
+                } else if (writer.edge(edgeId).kind() == EdgeKind.ORDERED && !writer.contains(edgeId, memberId)) {
                     writer.append(edgeId, memberId, spec(member));
                 } else {
                     writer.add(edgeId, memberId, spec(member));
@@ -318,7 +318,7 @@ final class Executor {
             case Statement.History(OptionalLong limit) -> history(limit);
             case Statement.Stats _ -> stats();
             case Statement.ShowTypes _ -> read(reader -> table(List.of("id", "name", "kind", "properties", "roles", "version"),
-                    reader.schema().types(reader.view()).stream().map(type -> List.of(QueryResult.number(type.id()), QueryResult.text(type.name()),
+                    reader.schema().types(reader.engineView()).stream().map(type -> List.of(QueryResult.number(type.id()), QueryResult.text(type.name()),
                             QueryResult.text(type.kind().name()), QueryResult.text(type.properties().stream()
                                     .map(property -> property.name() + " " + property.type() + (property.indexed() ? " INDEXED" : ""))
                                     .collect(Collectors.joining(", "))),
@@ -369,7 +369,7 @@ final class Executor {
         if (name.isEmpty()) {
             return principal.tenant();
         }
-        Optional<Security.Tenant> found = Security.tenant(reader.view(), name.get());
+        Optional<Security.Tenant> found = Security.tenant(reader.engineView(), name.get());
         if (principal.global()) {
             return found.orElseThrow(() -> HStoreException.invalid("unknown tenant '" + name.get() + "'")).id();
         }
@@ -378,7 +378,7 @@ final class Executor {
     }
 
     private void governedUser(Reader reader, String name) {
-        Security.user(reader.view(), name).filter(user -> session.principal().governs(user.tenant()))
+        Security.user(reader.engineView(), name).filter(user -> session.principal().governs(user.tenant()))
                 .orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
     }
 
@@ -744,7 +744,7 @@ final class Executor {
             case Field.Property(String name) -> reader.property(atom, name).flatMap(value -> value.number().stream().boxed().findFirst()).orElse(0.0);
             case Field.State _ -> StateBindings.state(reader, atom).flatMap(binding -> binding.value().number().stream().boxed().findFirst()).orElse(0.0);
             case Field.Degree _ -> reader.degree(atom);
-            case Field.Weight _ -> reader.view().edge(atom).map(edge -> edge.summary().weightSum() / 1e9).orElse(1.0);
+            case Field.Weight _ -> reader.hyperedge(atom).map(edge -> edge.summary().weightSum() / 1e9).orElse(1.0);
         };
     }
 

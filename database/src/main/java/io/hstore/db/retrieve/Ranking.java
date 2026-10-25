@@ -103,10 +103,10 @@ public final class Ranking {
                 Slot slot = query.slots().get(i);
                 long atom = ((Target.Atom) slot.target()).id();
                 if (slot.roles().isEmpty()) {
-                    return reader.view().incidentCursor(atom);
+                    return reader.incidentCursor(atom);
                 }
                 BitSet accepted = scorer.accepted(i);
-                return reader.view().incidentCursor(atom, incident -> accepted.get(incident.roleSet()));
+                return reader.incidentCursor(atom, incident -> accepted.get(incident.roleSet()));
             }).toList();
             return PostingCursor.intersect(cursors);
         }

@@ -65,7 +65,7 @@ final class Neighborhood {
         if (type.isPresent()) {
             return around(reader, reader.atoms(type.get()).limit(limits.atoms() / 2), 0, true, limits);
         }
-        List<TypeDef> types = reader.schema().types(reader.view());
+        List<TypeDef> types = reader.schema().types(reader.engineView());
         List<TypeDef> edges = types.stream().filter(candidate -> candidate.kind().isEdge()).toList();
         List<TypeDef> chosen = edges.isEmpty() ? types : edges;
         int perType = Math.max(1, limits.atoms() / 4 / Math.max(1, chosen.size()));

@@ -67,7 +67,7 @@ public final class Hora {
         if (reader.require(atom).isEdge()) {
             return reader.members(atom).map(member -> tuple(atom, member));
         }
-        return reader.view().incident(atom).filter(incident -> reader.owns(incident.edge())).flatMap(incident -> reader.view().incidence(incident.edge(), atom).stream()
+        return reader.incidentEdges(atom).flatMap(incident -> reader.incidence(incident.edge(), atom).stream()
                 .map(found -> new IncidenceTuple(incident.edge(), atom, reader.roles(found.roleSet()), found.weightValue(),
                         found.validity(), reader.edge(incident.edge()).positionOfLocator(incident.locator()))));
     }
@@ -178,8 +178,8 @@ public final class Hora {
     public boolean adjacent(long u, long v, int threshold) {
         reader.require(u);
         reader.require(v);
-        Tree<?> left = reader.view().incidentTree(u);
-        Tree<?> right = reader.view().incidentTree(v);
+        Tree<?> left = reader.incidentTree(u);
+        Tree<?> right = reader.incidentTree(v);
         return TreeAlgebra.intersectKeys(left, right).filter(reader::owns).limit(threshold).count() >= threshold;
     }
 
@@ -187,7 +187,7 @@ public final class Hora {
         reader.require(node);
         Budget.Meter meter = budget.start();
         Map<Long, Integer> counts = new HashMap<>();
-        reader.view().incident(node).map(IncidentEdge::edge).filter(reader::owns).forEach(edge -> reader.edge(edge).stream()
+        reader.incidentEdges(node).map(IncidentEdge::edge).forEach(edge -> reader.edge(edge).stream()
                 .mapToLong(Incidence::member)
                 .filter(member -> member != node)
                 .forEach(member -> {
@@ -201,7 +201,7 @@ public final class Hora {
         Budget.Meter meter = budget.start();
         Tree<?> membership = reader.edge(edge).membership();
         Set<Long> candidates = new HashSet<>();
-        reader.edge(edge).stream().forEach(incidence -> reader.view().incident(incidence.member())
+        reader.edge(edge).stream().forEach(incidence -> reader.incidentEdges(incidence.member())
                 .mapToLong(IncidentEdge::edge)
                 .filter(other -> other != edge && reader.owns(other))
                 .forEach(other -> {
@@ -224,7 +224,7 @@ public final class Hora {
                 continue;
             }
             Set<Long> partners = new HashSet<>();
-            a.stream().forEach(incidence -> reader.view().incident(incidence.member())
+            a.stream().forEach(incidence -> reader.incidentEdges(incidence.member())
                     .mapToLong(IncidentEdge::edge)
                     .filter(right -> right > left && scope.contains(right) && reader.owns(right))
                     .forEach(partners::add));

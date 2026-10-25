@@ -104,6 +104,16 @@ public abstract sealed class View permits Snapshot, Transaction {
                 : Optional.empty());
     }
 
+    public Optional<Incidence> incidence(long edge, long member, int tenant) {
+        return atom(edge).flatMap(record -> record instanceof EdgeRecord found && found.tenant() == tenant
+                ? hyperedge(edge, found, false).get(member)
+                : Optional.empty());
+    }
+
+    public boolean contains(long edge, long member, int tenant) {
+        return incidence(edge, member, tenant).isPresent();
+    }
+
     public long cardinality(long edge) {
         return atom(edge).map(record -> record instanceof EdgeRecord found ? found.cardinality() : 0L).orElse(0L);
     }
