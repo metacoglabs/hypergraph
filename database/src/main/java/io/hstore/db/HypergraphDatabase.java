@@ -12,6 +12,7 @@ import io.hstore.db.schema.SchemaSlots;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
+import io.hstore.db.security.Access;
 import io.hstore.db.security.Scram;
 import io.hstore.db.security.SignIns;
 import io.hstore.db.security.TenantMemberships;
@@ -33,7 +34,9 @@ import io.hstore.engine.txn.TxnOptions;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -51,6 +54,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final Statistics statistics;
     private final MaterializedViews views;
     private final SignIns signIns = new SignIns();
+    private final Map<String, Integer> connections = new ConcurrentHashMap<>();
     private final byte[] scramSecret;
 
     private HypergraphDatabase(Path directory, DatabaseOptions options) {
@@ -95,12 +99,37 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public Scram.Server scram(Optional<byte[]> channelBinding) {
-        return new Scram.Server(name -> read(reader -> Security.user(reader.engineView(), name)).map(Security::verifier), scramSecret,
+        return new Scram.Server(name -> read(reader -> Security.user(reader.engineView(), name)
+                .filter(user -> !Security.expired(reader.engineView(), user.name()))).map(Security::verifier), scramSecret,
                 Security.ITERATIONS, channelBinding);
     }
 
     public SignIns signIns() {
         return signIns;
+    }
+
+    public void enter(Principal principal) {
+        Access.Options limits = read(reader -> Access.options(reader.engineView(), principal.user()));
+        connections.compute(principal.user(), (user, count) -> {
+            int current = count == null ? 0 : count;
+            if (limits.connectionLimit() >= 0 && !principal.global() && current >= limits.connectionLimit()) {
+                throw HStoreException.limit("too many connections for user " + user + " (connection limit " + limits.connectionLimit() + ")");
+            }
+            return current + 1;
+        });
+    }
+
+    public boolean holds(Principal principal, Access.Privilege capability) {
+        return principal.global() || principal.home() == Principal.DEFAULT_TENANT
+                && read(reader -> Access.holds(reader.engineView(), principal.user(), capability));
+    }
+
+    public void leave(String user) {
+        connections.computeIfPresent(user, (_, count) -> count <= 1 ? null : count - 1);
+    }
+
+    public int connections(String user) {
+        return connections.getOrDefault(user, 0);
     }
 
     public static List<Slot<?>> extensionSlots() {

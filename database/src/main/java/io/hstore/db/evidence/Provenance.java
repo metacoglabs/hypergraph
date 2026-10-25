@@ -54,7 +54,7 @@ public final class Provenance {
     }
 
     public static long record(Writer writer, Evidence evidence) {
-        writer.principal().requireWrite();
+        requireTenantWrite(writer);
         requireReferable(writer, evidence.source());
         long id = writer.database().engine().transactions().allocateAtom();
         writer.transaction().put(EVIDENCE, id, evidence.withTenant(writer.tenant()));
@@ -62,7 +62,7 @@ public final class Provenance {
     }
 
     public static long assertion(Writer writer, Qualifier qualifier) {
-        writer.principal().requireWrite();
+        requireTenantWrite(writer);
         requireReferable(writer, qualifier.source());
         qualifier.evidence().forEach(support -> requireReferable(writer, support));
         long id = writer.database().engine().transactions().allocateAtom();
@@ -74,6 +74,13 @@ public final class Provenance {
         long id = assertion(writer, qualifier);
         writer.qualify(edge, member, id);
         return id;
+    }
+
+    private static void requireTenantWrite(Writer writer) {
+        writer.principal().requireWrite();
+        if (!writer.principal().role().writesEveryType()) {
+            throw HStoreException.invalid("user " + writer.principal().user() + " needs the WRITER or ADMIN role to record evidence and assertions");
+        }
     }
 
     private static void requireReferable(Reader reader, long id) {

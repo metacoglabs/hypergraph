@@ -68,7 +68,7 @@ final class Planner {
     }
 
     Plan plan(Ast.Match match) {
-        Optional<TypeDef> type = match.type().map(reader::requireType);
+        Optional<TypeDef> type = match.type().map(reader::requireReadableType);
         type.ifPresent(found -> {
             if (found.kind().isEdge() != match.edges()) {
                 throw HStoreException.invalid(found.name() + " is not a " + (match.edges() ? "hyperedge" : "node") + " type");

@@ -110,6 +110,7 @@ public final class Writer extends Reader {
     public long node(String type, String key, Map<String, ?> properties) {
         principal().requireWrite();
         TypeDef definition = kindOf(type, AtomKind.NODE);
+        requireWritableType(definition);
         Security.charge(txn, tenant(), new Usage(1, 0, 0));
         long id = txn.createNode(new AtomRecord.NodeRecord(definition.id(), key, 0, 0, 0, tenant(), 0));
         assign(id, definition, properties);
@@ -127,6 +128,7 @@ public final class Writer extends Reader {
             throw HStoreException.invalid(type + " is a node type");
         }
         principal().requireWrite();
+        requireWritableType(definition);
         Security.charge(txn, tenant(), new Usage(1, 1, 0));
         long id = txn.createEdge(new AtomRecord.EdgeRecord(definition.id(), kind.edgeKind().orElseThrow(), Ref.EMPTY, Ref.EMPTY, 0, 0, tenant(), 0));
         assign(id, definition, properties);
@@ -169,13 +171,13 @@ public final class Writer extends Reader {
 
     public void remove(long edge, long member) {
         principal().requireWrite();
-        require(edge);
+        requireWritable(edge);
         txn.remove(edge, member);
     }
 
     public void removeAt(long edge, long index) {
         principal().requireWrite();
-        require(edge);
+        requireWritable(edge);
         txn.removeAt(edge, index);
     }
 
@@ -217,7 +219,7 @@ public final class Writer extends Reader {
 
     private void requireMembership(long edge, MemberSpec spec) {
         principal().requireWrite();
-        Atom container = require(edge);
+        Atom container = requireWritable(edge);
         if (!container.isEdge()) {
             throw HStoreException.invalid("atom " + edge + " is not a hyperedge");
         }
@@ -225,6 +227,18 @@ public final class Writer extends Reader {
             if (!container.type().allowsRole(role)) {
                 throw HStoreException.invalid(container.type().name() + " does not declare role '" + role + "'");
             }
+        }
+    }
+
+    public Atom requireWritable(long atom) {
+        Atom target = require(atom);
+        requireWritableType(target.type());
+        return target;
+    }
+
+    private void requireWritableType(TypeDef type) {
+        if (!writable(type.id())) {
+            throw HStoreException.invalid("user " + principal().user() + " has no WRITE privilege on type " + type.name());
         }
     }
 
@@ -240,7 +254,7 @@ public final class Writer extends Reader {
 
     public void set(long atom, String name, Value value, Validity validity) {
         principal().requireWrite();
-        Atom target = require(atom);
+        Atom target = requireWritable(atom);
         Value stored = target.type().property(name).map(def -> Values.coerce(value, def.type())).orElse(value);
         stored = externalizeLargeText(stored);
         Property property = new Property(stored, validity.from(), validity.to());
@@ -249,7 +263,7 @@ public final class Writer extends Reader {
 
     public void unset(long atom, String name) {
         principal().requireWrite();
-        require(atom);
+        requireWritable(atom);
         schema().existingPropertyKey(name).ifPresent(key -> updateBag(atom, key, bag -> bag.without(key)));
     }
 
@@ -278,7 +292,7 @@ public final class Writer extends Reader {
 
     public void document(long atom, Json json) {
         principal().requireWrite();
-        require(atom);
+        requireWritable(atom);
         byte[] bytes = json.print().getBytes(StandardCharsets.UTF_8);
         long ref = writePayload(bytes);
         set(atom, Schema.DOCUMENT, new Value.Payload(ref, bytes.length, "application/json"));
@@ -291,7 +305,7 @@ public final class Writer extends Reader {
 
     public void embed(long atom, String model, int version, float[] vector) {
         principal().requireWrite();
-        require(atom);
+        requireWritable(atom);
         SemanticPlane semantic = database.semantic();
         int id = semantic.existingModel(model).orElseGet(() -> {
             if (!model.equals(semantic.encoder().model())) {
@@ -308,7 +322,7 @@ public final class Writer extends Reader {
 
     public void delete(long atom) {
         principal().requireWrite();
-        Atom target = require(atom);
+        Atom target = requireWritable(atom);
         Security.charge(txn, tenant(), new Usage(-1, target.isEdge() ? -1 : 0, 0));
         txn.delete(PropertySlots.PROPERTIES, atom);
         txn.delete(Embedding.EMBEDDINGS, atom);

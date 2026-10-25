@@ -9,7 +9,7 @@ in [wire protocol](../operations/wire-protocol.md) and [Studio](../operations/st
 
 ```java
 record Principal(String user, int tenant, Role role, int home)
-enum Role { ADMIN, WRITER, READER }
+enum Role { ADMIN, WRITER, READER, NONE }
 ```
 
 `tenant` is the tenant a session currently works in and `home` is the tenant the user belongs to. They only
@@ -17,16 +17,65 @@ differ after an admin of the default tenant runs `USE TENANT`. An ADMIN whose ho
 **global admin** (`Principal.global()`); an ADMIN of any other tenant is a **tenant admin** and never leaves its
 tenant.
 
-| Capability | global admin | tenant admin | WRITER | READER |
-|---|:---:|:---:|:---:|:---:|
-| read atoms of its tenant | yes | yes | yes | yes |
-| insert, update, delete atoms, members, properties, embeddings, evidence, state, signals | yes | yes | yes | no |
-| create, alter and drop users of its own tenant; `SHOW USERS`, `SHOW TENANTS` (own tenant only) | yes | yes | no | no |
-| create, refresh, drop and read materialized views (`SHOW VIEWS` lists names for every role) | yes | yes | no | no |
-| users of other tenants, `CREATE/ALTER TENANT` | yes | no | no | no |
-| DDL (`CREATE … TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`); the schema is shared by every tenant | yes | no | no | no |
-| branches (`USE BRANCH`, `SHOW BRANCHES`, `CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY`, `STATS`, `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | no | no | no |
-| switch tenant (`USE TENANT`, `Principal.inTenant`) | yes | no | no | no |
+| Capability | global admin | tenant admin | WRITER | READER | NONE |
+|---|:---:|:---:|:---:|:---:|:---:|
+| read atoms of its tenant | yes | yes | yes | yes | types with a READ grant |
+| insert, update, delete atoms, members, properties, embeddings, state, signals | yes | yes | yes | no | types with a WRITE grant |
+| record evidence and assertions (`EVIDENCE`, `QUALIFY`) | yes | yes | yes | no | no |
+| create, alter and drop users of its own tenant, grant and revoke type privileges to them; `SHOW USERS`, `SHOW TENANTS` (own tenant only), `SHOW GRANTS FOR` | yes | yes | no | no | no |
+| create, refresh, drop and read materialized views (`SHOW VIEWS` lists names for every role) | yes | yes | no | no | no |
+| users of other tenants, `CREATE/ALTER TENANT`, `GRANT MONITOR`, `GRANT MAINTAIN` | yes | no | no | no | no |
+| DDL (`CREATE … TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`); the schema is shared by every tenant | yes | no | no | no | no |
+| branches (`USE BRANCH`, `SHOW BRANCHES`, `CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY` | yes | no | no | no | no |
+| `STATS` and Studio's dashboard | yes | with `MONITOR` | with `MONITOR` | with `MONITOR` | with `MONITOR` |
+| `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | with `MAINTAIN` | with `MAINTAIN` | with `MAINTAIN` | with `MAINTAIN` |
+| switch tenant (`USE TENANT`, `Principal.inTenant`) | yes | no | no | no | no |
+
+### Privileges on types
+
+READER, WRITER and ADMIN cover every type of their tenant, like PostgreSQL's `pg_read_all_data` and
+`pg_write_all_data`. A user with `ROLE none` starts with no access to data and receives it per type:
+
+- `GRANT READ ON TYPE T TO u` lets `u` see atoms of `T`; `GRANT WRITE ON TYPE T TO u` also lets it create them and
+  change their properties, members, documents, embeddings, state and signals. `WRITE` includes `READ`.
+  `REVOKE WRITE` leaves `READ`; `REVOKE READ` removes both. Grants on types are refused for users whose role
+  already covers every type.
+- An atom of a type the user cannot read is invisible exactly like an atom of another tenant: `Reader.visible`,
+  `atom`, `require` and every lookup built on them (see the isolation model below) check the type as well as the
+  tenant, so `DESCRIBE`, properties, incidences, degrees, matches and semantic hits leave it out. Naming the type
+  in `MATCH`, `RANK`, `PATTERN` or a HORA statement fails with `no READ privilege on type T`, as `SELECT` on a table
+  without the privilege fails in PostgreSQL.
+- A hyperedge the user can read shows the ids of all its members, including members of types it cannot read,
+  the way a foreign-key column shows the key of a row in a table you cannot select from. Those members have no
+  label, properties or incidences for the user, and adding one to an edge fails as if it did not exist.
+- Writing to a hyperedge needs `WRITE` on the edge's type; the members added must be readable.
+- Grants are kept in slot `GRANTS` = 75 (schema 110), keyed by user and type, and read per statement, so a grant or
+  revoke applies to the next statement of every open session. `DROP USER` removes the user's grants.
+
+### Capabilities
+
+`GRANT MONITOR TO u` allows `STATS` and Studio's dashboard; `GRANT MAINTAIN TO u` allows `CHECKPOINT`,
+`CHECKPOINT AT` and `COMPACT`. They resemble PostgreSQL's `pg_monitor` and `pg_checkpoint`/`pg_maintain`: an
+operator can watch and maintain the engine without being a global admin. Only global admins grant them, and only
+to users of the default tenant, since the statements report on or act on every tenant. `HISTORY`, branches and
+DDL stay with global admins.
+
+### Password expiry and connection limits
+
+- `VALID UNTIL '<timestamp>'` on `CREATE USER` or `ALTER USER` makes the password stop working at that instant;
+  `VALID UNTIL 'infinity'` removes the limit. As in PostgreSQL it expires the password, not the account: open
+  sessions continue. A sign-in with an expired password fails with the usual `authentication failed`, over SCRAM
+  only at the last step, and the server logs `user "u" tried to sign in after its password expired`.
+- `CONNECTION LIMIT n` caps the user's signed-in sessions (wire connections, Studio sessions and embedded sessions
+  that authenticated) at `n`; `-1` means no limit. The next sign-in fails with `ABORTED_RESOURCE_LIMIT: too many
+  connections for user u`. Global admins are exempt, as PostgreSQL exempts superusers.
+- Both live in slot `USER_OPTIONS` = 76 (schema 111); a user without an entry has no expiry and no limit.
+
+### Changing roles
+
+`ALTER USER u ROLE r` changes the role; `u`'s open sessions then fail with "authenticate again", so the new role
+applies at once. The last ADMIN of the default tenant cannot change its role, and cannot be dropped while other
+users exist, so the database never loses its last global admin.
 
 `USE MAIN` is open to everyone. Without `TENANT`, `CREATE USER` puts the new user in the session's current
 tenant. A tenant admin who names another tenant, or another tenant's user, gets the same error as for a name that

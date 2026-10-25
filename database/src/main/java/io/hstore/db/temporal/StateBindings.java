@@ -57,7 +57,7 @@ public final class StateBindings {
 
     public static void bind(Writer writer, long atom, String schema, Value value, Validity validity) {
         writer.principal().requireWrite();
-        writer.require(atom);
+        writer.requireWritable(atom);
         int schemaId = writer.database().engine().dictionary().name(STATE_SCHEMA_NAMESPACE, Dictionary.requireName("state schema name", schema));
         writer.transaction().update(STATE, atom, current -> Optional.of(new Binding(schemaId, value, validity.from(), validity.to(),
                 current.map(Binding::version).orElse(0L) + 1)));

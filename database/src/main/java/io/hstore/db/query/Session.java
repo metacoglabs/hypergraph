@@ -42,6 +42,7 @@ public final class Session implements AutoCloseable {
     private int failedAuthentications;
     private Optional<ScramAttempt> scram = Optional.empty();
     private Optional<String> scramUser = Optional.empty();
+    private Optional<String> counted = Optional.empty();
 
     private record ScramAttempt(Scram.Server server, SignIns.Reservation reservation) {
     }
@@ -137,6 +138,9 @@ public final class Session implements AutoCloseable {
     }
 
     private void signIn(Principal found) {
+        database.enter(found);
+        counted.ifPresent(database::leave);
+        counted = Optional.of(found.user());
         principal = found;
         authenticated = true;
         credentials = database.read(reader -> Security.user(reader.engineView(), found.user()));
@@ -191,7 +195,8 @@ public final class Session implements AutoCloseable {
             throw HStoreException.invalid("user " + principal.user() + " was dropped or its password changed; authenticate again");
         }
         QueryResult result = dispatch(statement);
-        if (statement instanceof Statement.AlterUser(String name, String _) && authenticated && name.equals(principal.user())) {
+        if (statement instanceof Statement.AlterUser(String name, Optional<String> password, var _, var _, var _)
+                && password.isPresent() && authenticated && name.equals(principal.user())) {
             renewing = true;
         }
         return result;
@@ -346,5 +351,7 @@ public final class Session implements AutoCloseable {
         transaction = Optional.empty();
         scram.ifPresent(pending -> pending.reservation().failed());
         scram = Optional.empty();
+        counted.ifPresent(database::leave);
+        counted = Optional.empty();
     }
 }

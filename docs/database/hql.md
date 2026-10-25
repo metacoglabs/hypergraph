@@ -734,16 +734,27 @@ alter_tenant  = "ALTER" "TENANT" identifier "QUOTA" quota ;            (* ADMIN 
 quota         = "(" quota_key number { "," quota_key number } ")" ;
 quota_key     = "atoms" | "edges" | "payload_bytes" | "transaction_pages" | "query_pages" ;
 create_user   = "CREATE" "USER" ( identifier | string ) "PASSWORD" string
-                [ "TENANT" identifier ] [ "ROLE" ( "admin" | "writer" | "reader" ) ] ;   (* ADMIN; ROLE default writer *)
-alter_user    = "ALTER" "USER" ( identifier | string ) "PASSWORD" string ;            (* ADMIN *)
+                [ "TENANT" identifier ] [ "ROLE" role ] [ valid_until ] [ connections ] ;  (* ADMIN; ROLE default writer *)
+alter_user    = "ALTER" "USER" ( identifier | string )
+                ( "PASSWORD" string | "ROLE" role | valid_until | connections ) { … } ;  (* ADMIN; each clause at most once *)
+role          = "admin" | "writer" | "reader" | "none" ;
+valid_until   = "VALID" "UNTIL" ( instant | "'infinity'" ) ;
+connections   = "CONNECTION" "LIMIT" integer ;                                        (* -1 = no limit, else 0-100000 *)
 drop_user     = "DROP" "USER" ( identifier | string ) ;                               (* ADMIN *)
+grant         = "GRANT" ( ( "READ" | "WRITE" ) "ON" "TYPE" identifier | "MONITOR" | "MAINTAIN" )
+                "TO" ( identifier | string ) ;                                        (* ADMIN; MONITOR, MAINTAIN: global admin *)
+revoke        = "REVOKE" ( ( "READ" | "WRITE" ) "ON" "TYPE" identifier | "MONITOR" | "MAINTAIN" )
+                "FROM" ( identifier | string ) ;                                      (* ADMIN; MONITOR, MAINTAIN: global admin *)
 use_tenant    = "USE" "TENANT" identifier ;
 authenticate  = "AUTHENTICATE" ( identifier | string ) "PASSWORD" string ;
 show          = "SHOW" ( "TENANTS" | "USERS" ) ;                                      (* ADMIN *)
+show_grants   = "SHOW" "GRANTS" [ "FOR" ( identifier | string ) ] ;                   (* FOR another user: ADMIN *)
 ```
 
 `SHOW TENANTS` columns: `id, name, atoms, edges, payload bytes, max atoms, max edges`; `SHOW USERS`: `user,
-tenant, role` (tenant id). The tenancy model is specified in [security](security.md).
+tenant, role, valid until, connection limit` (tenant id); `SHOW GRANTS`: `user, privilege, type`. The model
+behind roles, grants, `VALID UNTIL` and `CONNECTION LIMIT` is specified in
+[security](security.md#principals-and-roles).
 
 A password must be 8 to 1,024 characters long. In its place `CREATE USER` and `ALTER USER` accept a SCRAM-SHA-256
 verifier (`hstore verifier` prints one), so the password never reaches the server. `AUTHENTICATE` works in
@@ -757,6 +768,11 @@ ALTER TENANT clinic_b QUOTA (payload_bytes 1048576, query_pages 100000);
 CREATE USER analyst PASSWORD 's3cret-pass' TENANT clinic_b ROLE writer;
 CREATE USER auditor PASSWORD 'pw-secret' ROLE reader;
 ALTER USER auditor PASSWORD 'pw2-secret';
+CREATE USER clerk PASSWORD 'clerk-pass' TENANT clinic_b ROLE none VALID UNTIL '2027-01-01' CONNECTION LIMIT 2;
+GRANT WRITE ON TYPE Lab TO clerk;
+REVOKE WRITE ON TYPE Lab FROM clerk;     -- clerk keeps READ
+ALTER USER auditor ROLE writer CONNECTION LIMIT 5;
+GRANT MONITOR TO auditor;                -- STATS without being an admin
 DROP USER auditor;
 USE TENANT clinic_b;
 INSERT NODE Lab 'b1' {name: 'B1'}; INSERT NODE Lab 'b2' {name: 'B2'}; INSERT NODE Lab 'b3' {name: 'B3'};

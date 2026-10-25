@@ -76,7 +76,7 @@ public final class Signals {
 
     public static long register(Writer writer, Signal signal) {
         writer.principal().requireWrite();
-        writer.require(signal.atom());
+        writer.requireWritable(signal.atom());
         long id = writer.database().engine().transactions().allocateAtom();
         writer.transaction().put(SIGNALS, id, signal);
         return id;

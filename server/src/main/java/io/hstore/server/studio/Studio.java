@@ -10,6 +10,7 @@ import io.hstore.db.query.Parser;
 import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
 import io.hstore.db.schema.TypeDef;
+import io.hstore.db.security.Access;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Security;
 import io.hstore.db.value.Json;
@@ -484,8 +485,8 @@ public final class Studio implements AutoCloseable {
 
     private Response stats(Request request) {
         Session session = session(request).session();
-        if (!session.principal().global()) {
-            throw HttpFailure.forbidden("the dashboard requires the ADMIN role in the default tenant");
+        if (!database.holds(session.principal(), Access.Privilege.MONITOR)) {
+            throw HttpFailure.forbidden("the dashboard requires the MONITOR privilege or the ADMIN role in the default tenant");
         }
         EngineStats engine = database.engine().stats();
         TransactionManager.Statistics transactions = database.engine().transactions().statistics();

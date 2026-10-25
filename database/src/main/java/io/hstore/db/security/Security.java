@@ -31,6 +31,7 @@ public final class Security {
     }
 
     public static final int ITERATIONS = 600_000;
+    private static final System.Logger LOG = System.getLogger("hstore.security");
     private static final int MIN_VERIFIER_ITERATIONS = 4096;
     private static final long SCRAM_SECRET = 0x5343_5241_4D00_0000L;
     private static final int SCRAM_SECRET_WORDS = 4;
@@ -70,7 +71,7 @@ public final class Security {
     public static final Slot<Usage> USAGE = Slot.primary(46, "tenant-usage", new TreeSchema<>(83, "tenant-usage", FingerprintMode.SET,
             USAGE_CODEC, EntryMeasure.keyed(usage -> Hashing.of(usage.atoms(), usage.edges(), usage.payloadBytes()))));
 
-    public static final List<Slot<?>> SLOTS = List.of(TENANTS, USERS, USAGE);
+    public static final List<Slot<?>> SLOTS = List.of(TENANTS, USERS, USAGE, Access.GRANTS, Access.USER_OPTIONS);
 
     public static final Tenant DEFAULT = new Tenant(Principal.DEFAULT_TENANT, "default", Quota.UNLIMITED);
 
@@ -227,6 +228,24 @@ public final class Security {
     public static void dropUser(Transaction txn, String name) {
         user(txn, name).orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
         txn.delete(USERS, userKey(name));
+        Access.forget(txn, name);
+    }
+
+    public static void setRole(Transaction txn, String name, Role role) {
+        User current = user(txn, name).orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
+        txn.put(USERS, userKey(name), new User(current.name(), current.salt(), current.hash(), current.iterations(), current.tenant(), role));
+    }
+
+    public static long globalAdmins(View view) {
+        return users(view).stream().filter(user -> user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN).count();
+    }
+
+    public static boolean expired(View view, String name) {
+        boolean expired = Access.options(view, name).expired(System.currentTimeMillis());
+        if (expired) {
+            LOG.log(System.Logger.Level.WARNING, "user \"{0}\" tried to sign in after its password expired", name);
+        }
+        return expired;
     }
 
     public static Optional<User> user(View view, String name) {
@@ -242,7 +261,7 @@ public final class Security {
         if (stored.isEmpty()) {
             derive(password, UNKNOWN_USER_SALT, ITERATIONS);
         }
-        return stored.filter(user -> verifier(user).matches(password)).map(Security::principal);
+        return stored.filter(user -> verifier(user).matches(password)).filter(user -> !expired(view, user.name())).map(Security::principal);
     }
 
     public static boolean hasUsers(View view) {

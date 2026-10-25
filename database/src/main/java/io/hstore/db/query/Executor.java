@@ -27,8 +27,10 @@ import io.hstore.db.retrieve.RankQuery;
 import io.hstore.db.retrieve.Ranking;
 import io.hstore.db.retrieve.RoleTimeScorer;
 import io.hstore.db.schema.TypeDef;
+import io.hstore.db.security.Access;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Quota;
+import io.hstore.db.security.Role;
 import io.hstore.db.security.Security;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.signal.Signals;
@@ -91,6 +93,7 @@ final class Executor {
         } else if (administrative(statement)) {
             session.principal().requireAdmin();
         }
+        capability(statement).ifPresent(this::requireCapability);
         return switch (statement) {
             case Statement.CreateType type -> write(writer -> {
                 TypeDef created = type.kind().isEdge()
@@ -140,23 +143,41 @@ final class Executor {
                 Security.setQuota(writer.transaction(), tenant, tenant.quota().with(quota));
                 return QueryResult.message("updated quota of tenant " + name);
             });
-            case Statement.CreateUser(String name, String password, Optional<String> tenant, var role) -> write(writer -> {
-                Security.createUser(writer.transaction(), name, password, governedTenant(writer, tenant), role);
-                return QueryResult.message("created user " + name + " with role " + role);
-            });
-            case Statement.AlterUser(String name, String password) -> write(writer -> {
-                governedUser(writer, name);
-                Security.setPassword(writer.transaction(), name, password);
-                return QueryResult.message("changed password of " + name);
-            });
+            case Statement.CreateUser(String name, String password, Optional<String> tenant, var role, var validUntil, var connectionLimit) ->
+                    write(writer -> {
+                        Security.createUser(writer.transaction(), name, password, governedTenant(writer, tenant), role);
+                        if (validUntil.isPresent() || connectionLimit.isPresent()) {
+                            Access.setOptions(writer.transaction(), new Access.Options(name, validUntil.orElse(Long.MAX_VALUE),
+                                    (int) connectionLimit.orElse(-1)));
+                        }
+                        return QueryResult.message("created user " + name + " with role " + role);
+                    });
+            case Statement.AlterUser alter -> write(writer -> alterUser(writer, alter));
             case Statement.DropUser(String name) -> write(writer -> {
-                governedUser(writer, name);
+                Security.User user = governedUser(writer, name);
                 if (!session.principal().global() && Security.users(writer.engineView()).size() <= 1) {
                     throw HStoreException.invalid("cannot drop the last user: the server would stop asking for credentials");
+                }
+                if (user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN && Security.globalAdmins(writer.engineView()) == 1
+                        && Security.users(writer.engineView()).size() > 1) {
+                    throw HStoreException.invalid("cannot drop the last admin of the default tenant while other users remain");
                 }
                 Security.dropUser(writer.transaction(), name);
                 return QueryResult.message("dropped user " + name);
             });
+            case Statement.Grant(Access.Privilege privilege, Optional<String> type, String name) -> write(writer -> {
+                Security.User user = grantee(writer, privilege, name);
+                boolean changed = Access.grant(writer.transaction(), name, type.map(found -> writer.requireType(found).id()).orElse(0), privilege);
+                return QueryResult.message((changed ? "granted " : name + " already holds ") + privilege + type.map(found -> " on type " + found).orElse("")
+                        + (changed ? " to " + user.name() : ""));
+            });
+            case Statement.Revoke(Access.Privilege privilege, Optional<String> type, String name) -> write(writer -> {
+                grantee(writer, privilege, name);
+                boolean changed = Access.revoke(writer.transaction(), name, type.map(found -> writer.requireType(found).id()).orElse(0), privilege);
+                return QueryResult.message((changed ? "revoked " : name + " does not hold ") + privilege + type.map(found -> " on type " + found).orElse("")
+                        + (changed ? " from " + name : ""));
+            });
+            case Statement.ShowGrants(Optional<String> name) -> read(reader -> showGrants(reader, name));
             case Statement.ShowTenants _ -> read(reader -> table(List.of("id", "name", "atoms", "edges", "payload bytes", "max atoms", "max edges"),
                     Security.tenants(reader.engineView()).stream().filter(tenant -> session.principal().governs(tenant.id())).map(tenant -> {
                         Quota.Usage usage = Security.usage(reader.engineView(), tenant.id());
@@ -164,9 +185,15 @@ final class Executor {
                                 QueryResult.number(usage.edges()), QueryResult.number(usage.payloadBytes()),
                                 limit(tenant.quota().maxAtoms()), limit(tenant.quota().maxEdges()));
                     })));
-            case Statement.ShowUsers _ -> read(reader -> table(List.of("user", "tenant", "role"), Security.users(reader.engineView()).stream()
+            case Statement.ShowUsers _ -> read(reader -> table(List.of("user", "tenant", "role", "valid until", "connection limit"),
+                    Security.users(reader.engineView()).stream()
                     .filter(user -> session.principal().governs(user.tenant()))
-                    .map(user -> List.of(QueryResult.text(user.name()), QueryResult.number(user.tenant()), QueryResult.text(user.role().name())))));
+                    .map(user -> {
+                        Access.Options options = Access.options(reader.engineView(), user.name());
+                        return List.of(QueryResult.text(user.name()), QueryResult.number(user.tenant()), QueryResult.text(user.role().name()),
+                                options.validUntil() == Long.MAX_VALUE ? QueryResult.text("infinity") : QueryResult.text(Instant.ofEpochMilli(options.validUntil()).toString()),
+                                options.connectionLimit() < 0 ? QueryResult.text("unlimited") : QueryResult.number(options.connectionLimit()));
+                    })));
             case Statement.DropBranch(String name) -> {
                 database().engine().dropBranch(session.branchId(name));
                 yield QueryResult.message("dropped branch " + name);
@@ -349,8 +376,7 @@ final class Executor {
     private static boolean engineWide(Statement statement) {
         return switch (statement) {
             case Statement.CreateBranch _, Statement.DropBranch _, Statement.MergeBranch _, Statement.ShowBranches _, Statement.Sample _,
-                 Statement.DiffGenerations _, Statement.DiffBranches _, Statement.History _, Statement.Stats _,
-                 Statement.Checkpoint _, Statement.CheckpointAt _, Statement.Compact _, Statement.CreateTenant _, Statement.AlterTenant _,
+                 Statement.DiffGenerations _, Statement.DiffBranches _, Statement.History _, Statement.CreateTenant _, Statement.AlterTenant _,
                  Statement.CreateType _, Statement.CreateIndex _, Statement.CreateJsonIndex _ -> true;
             default -> false;
         };
@@ -359,6 +385,7 @@ final class Executor {
     private static boolean administrative(Statement statement) {
         return switch (statement) {
             case Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.ShowTenants _, Statement.ShowUsers _,
+                 Statement.Grant _, Statement.Revoke _,
                  Statement.CreateView _, Statement.RefreshView _, Statement.DropView _, Statement.ShowView _ -> true;
             default -> false;
         };
@@ -377,9 +404,79 @@ final class Executor {
                 .orElseThrow(() -> HStoreException.invalid("user " + principal.user() + " may only manage users of its own tenant")).id();
     }
 
-    private void governedUser(Reader reader, String name) {
-        Security.user(reader.engineView(), name).filter(user -> session.principal().governs(user.tenant()))
+    private Security.User governedUser(Reader reader, String name) {
+        return Security.user(reader.engineView(), name).filter(user -> session.principal().governs(user.tenant()))
                 .orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
+    }
+
+    private QueryResult alterUser(Writer writer, Statement.AlterUser alter) {
+        Security.User user = governedUser(writer, alter.name());
+        List<String> changes = new ArrayList<>();
+        alter.role().filter(role -> role != user.role()).ifPresent(role -> {
+            if (user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN && Security.globalAdmins(writer.engineView()) == 1) {
+                throw HStoreException.invalid("cannot change the role of the last admin of the default tenant");
+            }
+            Security.setRole(writer.transaction(), user.name(), role);
+            changes.add("role " + role);
+        });
+        alter.password().ifPresent(password -> {
+            Security.setPassword(writer.transaction(), user.name(), password);
+            changes.add("password");
+        });
+        if (alter.validUntil().isPresent() || alter.connectionLimit().isPresent()) {
+            Access.Options current = Access.options(writer.engineView(), user.name());
+            Access.setOptions(writer.transaction(), new Access.Options(user.name(), alter.validUntil().orElse(current.validUntil()),
+                    (int) alter.connectionLimit().orElse(current.connectionLimit())));
+            alter.validUntil().ifPresent(_ -> changes.add("password expiry"));
+            alter.connectionLimit().ifPresent(_ -> changes.add("connection limit"));
+        }
+        return QueryResult.message(changes.isEmpty() ? "nothing changed for " + user.name() : "changed " + String.join(", ", changes) + " of " + user.name());
+    }
+
+    private Security.User grantee(Writer writer, Access.Privilege privilege, String name) {
+        Security.User user = governedUser(writer, name);
+        if (privilege.onType() && user.role().readsEveryType()) {
+            throw HStoreException.invalid("user " + name + " has the " + user.role() + " role, which already covers every type; "
+                    + "grants on types apply to users with ROLE none");
+        }
+        if (!privilege.onType()) {
+            session.principal().requireGlobal();
+            if (user.tenant() != Principal.DEFAULT_TENANT) {
+                throw HStoreException.invalid(privilege + " can only be granted to users of the default tenant");
+            }
+        }
+        return user;
+    }
+
+    private QueryResult showGrants(Reader reader, Optional<String> name) {
+        Principal principal = session.principal();
+        String wanted = name.orElse(principal.user());
+        if (!wanted.equals(principal.user())) {
+            principal.requireAdmin();
+            governedUser(reader, wanted);
+        }
+        return table(List.of("user", "privilege", "type"), Access.grants(reader.engineView()).stream()
+                .filter(grant -> name.isPresent() || !principal.role().canAdminister() ? grant.user().equals(wanted)
+                        : Security.user(reader.engineView(), grant.user()).filter(user -> principal.governs(user.tenant())).isPresent())
+                .map(grant -> List.of(QueryResult.text(grant.user()), QueryResult.text(grant.privilege().name()),
+                        Access.isCapability(grant.type()) ? QueryResult.scalar(Value.NULL)
+                                : QueryResult.text(reader.schema().type(reader.engineView(), grant.type()).map(TypeDef::name).orElse("#" + grant.type())))));
+    }
+
+    private static Optional<Access.Privilege> capability(Statement statement) {
+        return switch (statement) {
+            case Statement.Stats _ -> Optional.of(Access.Privilege.MONITOR);
+            case Statement.Checkpoint _, Statement.CheckpointAt _, Statement.Compact _ -> Optional.of(Access.Privilege.MAINTAIN);
+            default -> Optional.empty();
+        };
+    }
+
+    private void requireCapability(Access.Privilege capability) {
+        Principal principal = session.principal();
+        if (!database().holds(principal, capability)) {
+            throw HStoreException.invalid("user " + principal.user() + " needs the " + capability + " privilege or the ADMIN role in the default "
+                    + "tenant for this statement");
+        }
     }
 
     private static String describe(CheckpointThreshold threshold) {
@@ -489,10 +586,10 @@ final class Executor {
     }
 
     private RankQuery rankQuery(Reader reader, Statement.Rank statement) {
-        Optional<TypeDef> type = statement.type().map(reader::requireType);
+        Optional<TypeDef> type = statement.type().map(reader::requireReadableType);
         List<RankQuery.Slot> slots = statement.slots().stream().map(slot -> new RankQuery.Slot(switch (slot.target()) {
             case Ast.RankTarget.Atom(Ast.Ref ref) -> new RankQuery.Target.Atom(reader.require(session.resolve(reader, ref)).id());
-            case Ast.RankTarget.OfType(String name) -> new RankQuery.Target.OfType(reader.requireType(name));
+            case Ast.RankTarget.OfType(String name) -> new RankQuery.Target.OfType(reader.requireReadableType(name));
         }, Set.copyOf(slot.roles()), slot.weight().orElse(1), slot.required())).toList();
         Evaluator evaluator = evaluator(reader);
         Optional<RankQuery.TimeSpec> time = statement.time().map(spec -> switch (spec) {

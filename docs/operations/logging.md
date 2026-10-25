@@ -142,6 +142,7 @@ and in Docker it is the last line of `docker logs`. The storage-integrity failur
 | WARNING | `connection from /{ip}:{port} refused: {reason} (max_connections={n})`: the server is full, or 16 connections from this address are still waiting to authenticate. |
 | WARNING | `connection {n} from /{ip}:{port} refused: no users exist and the client is not on this host` (Studio: `studio request from … refused: …`). |
 | WARNING | `user "{user}" failed to sign in 50 times within 15 minutes; someone may be guessing its password from several addresses` (logger `hstore.security`). |
+| WARNING | `user "{user}" tried to sign in after its password expired` (logger `hstore.security`; see `VALID UNTIL` in [security](../database/security.md#password-expiry-and-connection-limits)). |
 | WARNING | at startup, `this database was written by a version that did not keep hyperedge members inside their tenant; …`: run `hstore check` and `hstore check --repair-tenants` ([cli](cli.md)). |
 | WARNING | at startup, `authentication = off and the server listens on {address}: …` or `the database has no users, so connections from other hosts are refused until CREATE USER creates one`, when the listen address is not loopback. |
 | LOG | `studio session opened for user={user} role={ROLE} from /{ip}:{port}` |

@@ -18,6 +18,7 @@ import io.hstore.db.query.Ast.Statement;
 import io.hstore.db.retrieve.RankQuery;
 import io.hstore.db.schema.AtomKind;
 import io.hstore.db.schema.TypeDef.PropertyDef;
+import io.hstore.db.security.Access;
 import io.hstore.db.security.Role;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.temporal.BranchMerge;
@@ -147,8 +148,41 @@ public final class Parser {
             }
             expect("USER");
             String name = identifierOrString();
-            expect("PASSWORD");
-            return new Statement.AlterUser(name, string());
+            Optional<String> password = Optional.empty();
+            Optional<Role> role = Optional.empty();
+            OptionalLong validUntil = OptionalLong.empty();
+            OptionalLong connectionLimit = OptionalLong.empty();
+            boolean changed = false;
+            while (true) {
+                if (password.isEmpty() && accept("PASSWORD")) {
+                    password = Optional.of(string());
+                } else if (role.isEmpty() && accept("ROLE")) {
+                    role = Optional.of(option(Role.class, identifier()));
+                } else if (validUntil.isEmpty() && peek().is("VALID")) {
+                    validUntil = OptionalLong.of(validUntil());
+                } else if (connectionLimit.isEmpty() && peek().is("CONNECTION")) {
+                    connectionLimit = OptionalLong.of(connectionLimit());
+                } else {
+                    break;
+                }
+                changed = true;
+            }
+            if (!changed) {
+                throw error("expected PASSWORD, ROLE, VALID UNTIL or CONNECTION LIMIT");
+            }
+            return new Statement.AlterUser(name, password, role, validUntil, connectionLimit);
+        }
+        if (accept("GRANT")) {
+            Access.Privilege privilege = option(Access.Privilege.class, identifier());
+            Optional<String> type = typeOf(privilege);
+            expect("TO");
+            return new Statement.Grant(privilege, type, identifierOrString());
+        }
+        if (accept("REVOKE")) {
+            Access.Privilege privilege = option(Access.Privilege.class, identifier());
+            Optional<String> type = typeOf(privilege);
+            expect("FROM");
+            return new Statement.Revoke(privilege, type, identifierOrString());
         }
         if (peek().is("FORMAT")) {
             index++;
@@ -405,6 +439,9 @@ public final class Parser {
             if (accept("USERS")) {
                 return new Statement.ShowUsers();
             }
+            if (accept("GRANTS")) {
+                return new Statement.ShowGrants(accept("FOR") ? Optional.of(identifierOrString()) : Optional.empty());
+            }
             expect("VIEWS");
             return new Statement.ShowViews();
         }
@@ -431,7 +468,9 @@ public final class Parser {
             String password = string();
             Optional<String> tenant = accept("TENANT") ? Optional.of(identifier()) : Optional.empty();
             Role role = accept("ROLE") ? option(Role.class, identifier()) : Role.WRITER;
-            return new Statement.CreateUser(name, password, tenant, role);
+            OptionalLong validUntil = peek().is("VALID") ? OptionalLong.of(validUntil()) : OptionalLong.empty();
+            OptionalLong connectionLimit = peek().is("CONNECTION") ? OptionalLong.of(connectionLimit()) : OptionalLong.empty();
+            return new Statement.CreateUser(name, password, tenant, role, validUntil, connectionLimit);
         }
         if (accept("BRANCH")) {
             String name = identifier();
@@ -735,6 +774,35 @@ public final class Parser {
 
     private OptionalDouble preferenceWeight() {
         return accept("WEIGHT") ? OptionalDouble.of(number().doubleValue()) : OptionalDouble.empty();
+    }
+
+    private Optional<String> typeOf(Access.Privilege privilege) {
+        if (!privilege.onType()) {
+            return Optional.empty();
+        }
+        expect("ON");
+        expect("TYPE");
+        return Optional.of(identifier());
+    }
+
+    private long validUntil() {
+        expect("VALID");
+        expect("UNTIL");
+        if (peek().kind() == Token.Kind.STRING && peek().text().equalsIgnoreCase("infinity")) {
+            index++;
+            return Long.MAX_VALUE;
+        }
+        return instant();
+    }
+
+    private long connectionLimit() {
+        expect("CONNECTION");
+        expect("LIMIT");
+        long limit = longValue();
+        if (limit < -1 || limit > 100_000) {
+            throw error("CONNECTION LIMIT must be -1 (no limit) or between 0 and 100000");
+        }
+        return limit;
     }
 
     private Ast.Match match() {

@@ -10,6 +10,7 @@ import io.hstore.db.hora.Pattern;
 import io.hstore.db.hora.Reducer;
 import io.hstore.db.schema.AtomKind;
 import io.hstore.db.schema.TypeDef.PropertyDef;
+import io.hstore.db.security.Access;
 import io.hstore.db.security.Role;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.temporal.BranchMerge;
@@ -192,10 +193,21 @@ public final class Ast {
         record AlterTenant(String name, Map<String, Long> quota) implements Statement {
         }
 
-        record CreateUser(String name, String password, Optional<String> tenant, Role role) implements Statement {
+        record CreateUser(String name, String password, Optional<String> tenant, Role role, OptionalLong validUntil,
+                          OptionalLong connectionLimit) implements Statement {
         }
 
-        record AlterUser(String name, String password) implements Statement {
+        record Grant(Access.Privilege privilege, Optional<String> type, String user) implements Statement {
+        }
+
+        record Revoke(Access.Privilege privilege, Optional<String> type, String user) implements Statement {
+        }
+
+        record ShowGrants(Optional<String> user) implements Statement {
+        }
+
+        record AlterUser(String name, Optional<String> password, Optional<Role> role, OptionalLong validUntil,
+                         OptionalLong connectionLimit) implements Statement {
         }
 
         record DropUser(String name) implements Statement {
