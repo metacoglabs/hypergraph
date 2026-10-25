@@ -56,7 +56,7 @@ sequenceDiagram
     else accepted
         S-->>C: banner "hstore connection 6 at generation 159; authentication required"
         loop until authenticated
-            C->>S: "AUTHENTICATE admin PASSWORD 'pw'"
+            C->>S: "AUTHENTICATE admin PASSWORD 'pw-secret'"
             S-->>C: "authenticated as admin" or "error [AUTHENTICATION_FAILED]: authentication failed"
         end
         Note over C,S: the 5th rejected request closes the connection
@@ -108,10 +108,22 @@ outside a transaction only. That clears its variables and returns it to main. A 
 refuses further `AUTHENTICATE` statements.
 
 Passwords are verified with PBKDF2-HMAC-SHA256 (600,000 iterations for passwords set since the count was raised).
-Every sign-in path shares one throttle: after 10 failures for a user name, or 20 from one address, within 15
-minutes, further attempts get `error [ABORTED_RESOURCE_LIMIT]: too many failed sign-in attempts; try again in N
-seconds` without the password being checked. Reconnecting does not reset it. Every failure is logged as a WARNING
-with the peer address; see [logging](logging.md#connections-log_connections--on).
+A failed attempt is answered after `authentication_failure_delay_ms` (default 500). Every sign-in path shares one
+throttle: after 10 failures for a user name from one address, or 20 from one address over all names, within 15
+minutes, further attempts from that address get `error [ABORTED_RESOURCE_LIMIT]: too many failed sign-in
+attempts; try again in N seconds` without the password being checked. Reconnecting does not reset it, and other
+addresses are not affected. Every failure is logged as a WARNING with the peer address; see
+[logging](logging.md#connections-log_connections--on).
+
+While the database has no users and `authentication = auto`, only clients on the server's own host (loopback
+addresses) are served. A client on another host receives
+
+```
+error [AUTHENTICATION_REQUIRED]: this database has no users, so it only accepts connections from its own host; create a user with CREATE USER, or set authentication = off to let other hosts in without authentication
+```
+
+instead of the banner, and is disconnected. The same answer ends a connection from another host whenever the last
+user is dropped.
 
 Until it authenticates, a connection may send at most 64 KiB per request and must authenticate within
 `authentication_timeout_seconds` (default 30), or it is closed. At most 16 connections from one address may be waiting to authenticate at
@@ -196,7 +208,7 @@ C: SHOW TYPES;
 C: .
 S: error [AUTHENTICATION_REQUIRED]: authenticate first: AUTHENTICATE <user> PASSWORD '<password>'
 S: .
-C: AUTHENTICATE admin PASSWORD 'pw'
+C: AUTHENTICATE admin PASSWORD 'pw-secret'
 C: .
 S: authenticated as admin
 S: .

@@ -72,7 +72,7 @@ initialised /srv/hstore with superuser admin
 | Option | Description |
 |---|---|
 | `--superuser NAME` | Create user `NAME` with role `ADMIN`. Defaults to `$HSTORE_USER`. |
-| `--password PW` | Password for the superuser. Defaults to `$HSTORE_PASSWORD`. Required with a superuser. |
+| `--password PW` | Password for the superuser, 8 to 1,024 characters. Defaults to `$HSTORE_PASSWORD`. Required with a superuser. |
 | `--if-not-exists` | Exit `0` without changes if `<dir>/FORMAT` already exists. Without it, an initialised directory is an error (exit `2`). |
 | `--<setting> VALUE` | Recorded in `hstore.conf`. `page_size` is fixed from this moment on. |
 

@@ -188,7 +188,7 @@ inline scripts and remote origins. Serve the files from disk while editing:
 
 ```
 ./mvnw -q install -DskipTests
-hstore init /tmp/studio-db --superuser admin --password admin
+hstore init /tmp/studio-db --superuser admin --password admin-pass
 hstore exec /tmp/studio-db examples/clinical-claims.hql
 java -p engine/target/classes:database/target/classes:server/target/classes \
      -m io.hstore.server/io.hstore.server.Main serve /tmp/studio-db \

@@ -62,8 +62,8 @@ class SecurityTest {
                 CREATE SET EDGE TYPE Encounter ROLES (patient, clinician);
                 CREATE TENANT acme QUOTA (atoms 5);
                 CREATE TENANT globex;
-                CREATE USER alice PASSWORD 's3cret' TENANT acme ROLE writer;
-                CREATE USER bob PASSWORD 'hunter2' TENANT globex ROLE writer;
+                CREATE USER alice PASSWORD 's3cret-pass' TENANT acme ROLE writer;
+                CREATE USER bob PASSWORD 'hunter2-pass' TENANT globex ROLE writer;
                 CREATE USER auditor PASSWORD 'readonly' TENANT acme ROLE reader;
                 """);
     }
@@ -91,12 +91,12 @@ class SecurityTest {
     @Test
     void materializedViewsStayInsideTheirTenant() throws InterruptedException {
         admin.executeAll("""
-                CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin;
+                CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin;
                 INSERT NODE Patient 'home' {mrn: 'H-1'} AS $h;
                 INSERT EDGE Encounter MEMBERS ($h AS patient);
                 """);
         long home = admin.variables().get("h");
-        try (Session carol = login("carol", "c4rol"); Session alice = login("alice", "s3cret")) {
+        try (Session carol = login("carol", "c4rol-pass"); Session alice = login("alice", "s3cret-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient);");
             long acmePatient = alice.variables().get("p");
             carol.execute("CREATE VIEW acme_degrees AS DEGREE");
@@ -138,8 +138,8 @@ class SecurityTest {
 
     @Test
     void viewStalenessIgnoresOtherTenants() throws InterruptedException {
-        admin.execute("CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin");
-        try (Session carol = login("carol", "c4rol"); Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        admin.execute("CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin");
+        try (Session carol = login("carol", "c4rol-pass"); Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient);");
             long patient = alice.variables().get("p");
             carol.execute("CREATE VIEW acme_degrees AS DEGREE");
@@ -156,8 +156,8 @@ class SecurityTest {
 
     @Test
     void viewParametersAreValidated() {
-        admin.execute("CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin");
-        try (Session carol = login("carol", "c4rol")) {
+        admin.execute("CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin");
+        try (Session carol = login("carol", "c4rol-pass")) {
             for (String definition : List.of("OVERLAP TOP -1", "OVERLAP TOP 0", "OVERLAP TOP 1001", "OVERLAP TOP 2147483648",
                     "ACTIVITY BUCKET 0", "ACTIVITY BUCKET -5")) {
                 assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("CREATE VIEW bad AS " + definition), definition);
@@ -169,8 +169,8 @@ class SecurityTest {
 
     @Test
     void brokenViewCannotStopAnotherTenantsContinuousView() throws InterruptedException {
-        admin.execute("CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin");
-        try (Session carol = login("carol", "c4rol"); Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        admin.execute("CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin");
+        try (Session carol = login("carol", "c4rol-pass"); Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             database.write(TxnOptions.defaults(), bob.principal(), writer -> {
                 writer.transaction().put(MaterializedViews.VIEWS, 1, new MaterializedViews.Descriptor(1, "broken",
                         MaterializedViews.Kind.OVERLAP_TOP_K, MaterializedViews.Refresh.CONTINUOUS, -1, writer.generation(), writer.tenant()));
@@ -192,11 +192,11 @@ class SecurityTest {
     @Test
     void dropViewIsTenantScopedAndNeedsAdmin() {
         admin.executeAll("""
-                CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin;
-                CREATE USER dave PASSWORD 'd4ve' TENANT globex ROLE admin;
+                CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin;
+                CREATE USER dave PASSWORD 'd4ve-pass' TENANT globex ROLE admin;
                 """);
-        try (Session carol = login("carol", "c4rol"); Session dave = login("dave", "d4ve"); Session alice = login("alice", "s3cret");
-             Session bob = login("bob", "hunter2")) {
+        try (Session carol = login("carol", "c4rol-pass"); Session dave = login("dave", "d4ve-pass"); Session alice = login("alice", "s3cret-pass");
+             Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient);");
             bob.executeAll("INSERT NODE Patient 'g1' {mrn: 'G-1'} AS $g; INSERT EDGE Encounter MEMBERS ($g AS patient);");
             carol.execute("CREATE VIEW shared AS DEGREE");
@@ -218,10 +218,10 @@ class SecurityTest {
     @Test
     void viewsPerTenantAreCapped() {
         admin.executeAll("""
-                CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin;
-                CREATE USER dave PASSWORD 'd4ve' TENANT globex ROLE admin;
+                CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin;
+                CREATE USER dave PASSWORD 'd4ve-pass' TENANT globex ROLE admin;
                 """);
-        try (Session carol = login("carol", "c4rol"); Session dave = login("dave", "d4ve")) {
+        try (Session carol = login("carol", "c4rol-pass"); Session dave = login("dave", "d4ve-pass")) {
             for (int i = 0; i < 32; i++) {
                 carol.execute("CREATE VIEW v" + i + " AS DEGREE");
             }
@@ -234,7 +234,7 @@ class SecurityTest {
 
     @Test
     void tenantsAreIsolatedIncludingCanonicalKeys() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             bob.executeAll("INSERT NODE Patient 'p1' {mrn: 'B-1'} AS $p;");
             assertEquals("1", cell(alice.execute("MATCH NODE p:Patient RETURN count(*)")));
@@ -253,7 +253,7 @@ class SecurityTest {
 
     @Test
     void edgeStatisticsDoNotReachAnotherTenant() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("""
                     INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
                     INSERT NODE Patient 'p2' {mrn: 'A-2'} AS $q;
@@ -276,7 +276,7 @@ class SecurityTest {
 
     @Test
     void membershipsAcrossTenantsAreNotFollowed() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             long acmePatient = alice.variables().get("p");
@@ -303,7 +303,7 @@ class SecurityTest {
 
     @Test
     void qualifyOnlyAcceptsVisibleMembers() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             long acmePatient = alice.variables().get("p");
@@ -325,20 +325,20 @@ class SecurityTest {
     @Test
     void tenantAdminsStayInsideTheirTenant() {
         admin.executeAll("""
-                CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin;
-                CREATE USER root PASSWORD 'r00t' ROLE admin;
+                CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin;
+                CREATE USER root PASSWORD 'r00t-pass' ROLE admin;
                 """);
-        try (Session carol = login("carol", "c4rol")) {
+        try (Session carol = login("carol", "c4rol-pass")) {
             String foreign = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("USE TENANT globex")).getMessage();
             String unknown = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("USE TENANT nowhere")).getMessage();
             assertEquals(foreign, unknown);
             assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("USE TENANT default"));
-            String otherUser = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("ALTER USER root PASSWORD 'mine'")).getMessage();
-            String noUser = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("ALTER USER nobody PASSWORD 'mine'")).getMessage();
+            String otherUser = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("ALTER USER root PASSWORD 'mine-mine-1'")).getMessage();
+            String noUser = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("ALTER USER nobody PASSWORD 'mine-mine-1'")).getMessage();
             assertEquals(otherUser.replace("root", "?"), noUser.replace("nobody", "?"));
             assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("DROP USER bob"));
-            assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("CREATE USER mallory PASSWORD 'm' TENANT default ROLE admin"));
-            carol.execute("CREATE USER dave PASSWORD 'd4ve' ROLE writer");
+            assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("CREATE USER mallory PASSWORD 'mallory-pass' TENANT default ROLE admin"));
+            carol.execute("CREATE USER dave PASSWORD 'd4ve-pass' ROLE writer");
             assertEquals(List.of("alice", "auditor", "carol", "dave"),
                     carol.execute("SHOW USERS").rows().stream().map(row -> row.getFirst().render()).sorted().toList());
             assertEquals(List.of("acme"), carol.execute("SHOW TENANTS").rows().stream().map(row -> row.get(1).render()).toList());
@@ -347,7 +347,7 @@ class SecurityTest {
                 assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute(engineWide), engineWide);
             }
         }
-        try (Session dave = login("dave", "d4ve")) {
+        try (Session dave = login("dave", "d4ve-pass")) {
             assertEquals("acme", dave.execute("WHOAMI").rows().getFirst().get(1).render());
         }
         admin.executeAll("USE TENANT acme; CREATE BRANCH audit; USE TENANT default;");
@@ -357,7 +357,7 @@ class SecurityTest {
     @Test
     void usersCannotProbeTenantNamesOrBranches() {
         admin.execute("CREATE BRANCH what_if");
-        try (Session alice = login("alice", "s3cret")) {
+        try (Session alice = login("alice", "s3cret-pass")) {
             String foreign = assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("USE TENANT globex")).getMessage();
             String unknown = assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("USE TENANT nowhere")).getMessage();
             assertEquals(foreign, unknown);
@@ -370,7 +370,7 @@ class SecurityTest {
 
     @Test
     void plansDoNotDependOnOtherTenants() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
             long acmeEdge = alice.variables().get("e");
@@ -398,7 +398,7 @@ class SecurityTest {
 
     @Test
     void evidenceOnlyReferencesVisibleRecords() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("""
                     INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
                     EVIDENCE 'chart' SOURCE $p AS $ev;
@@ -414,12 +414,12 @@ class SecurityTest {
 
     @Test
     void failedAuthenticationsInsideASessionAreCapped() {
-        try (Session alice = login("alice", "s3cret")) {
+        try (Session alice = login("alice", "s3cret-pass")) {
             for (int i = 0; i < Session.MAX_FAILED_AUTHENTICATIONS; i++) {
                 assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("AUTHENTICATE bob PASSWORD 'guess'"));
             }
             HStoreException.InvalidSchema capped = assertThrows(HStoreException.InvalidSchema.class,
-                    () -> alice.execute("AUTHENTICATE bob PASSWORD 'hunter2'"));
+                    () -> alice.execute("AUTHENTICATE bob PASSWORD 'hunter2-pass'"));
             assertTrue(capped.getMessage().contains("too many"), capped.getMessage());
             assertEquals("acme", alice.execute("WHOAMI").rows().getFirst().get(1).render());
         }
@@ -428,7 +428,7 @@ class SecurityTest {
     @Test
     void mergeAndDiffSeeEveryTenantsEdges() {
         admin.execute("CREATE BRANCH what_if");
-        try (Session alice = login("alice", "s3cret")) {
+        try (Session alice = login("alice", "s3cret-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient);");
         }
         admin.executeAll("USE BRANCH what_if; INSERT NODE Patient 'n' {mrn: 'N-1'}; USE MAIN;");
@@ -440,7 +440,7 @@ class SecurityTest {
     @Test
     void rolesAndAuthenticationAreEnforced() {
         assertFalse(new Session(database).authenticate("alice", "wrong"));
-        try (Session auditor = login("auditor", "readonly"); Session alice = login("alice", "s3cret")) {
+        try (Session auditor = login("auditor", "readonly"); Session alice = login("alice", "s3cret-pass")) {
             assertThrows(HStoreException.InvalidSchema.class, () -> auditor.execute("INSERT NODE Patient 'x' {mrn: 'x'}"));
             assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("CREATE NODE TYPE Forbidden"));
             assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("USE TENANT globex"));
@@ -454,7 +454,7 @@ class SecurityTest {
 
     @Test
     void quotasAreExactUnderTheirLimit() {
-        try (Session alice = login("alice", "s3cret")) {
+        try (Session alice = login("alice", "s3cret-pass")) {
             for (int i = 0; i < 5; i++) {
                 alice.execute("INSERT NODE Patient 'q" + i + "' {mrn: 'q" + i + "'}");
             }
@@ -519,7 +519,7 @@ class SecurityTest {
 
     @Test
     void wrongLengthVectorsCannotStallTheSharedIndex() throws InterruptedException {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; EMBED $p TEXT 'chronic kidney disease';");
             alice.execute("INSERT NODE Patient 'a1' {mrn: 'A-1'} AS $p");
             assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("EMBED $p VECTOR " + vector(257) + " MODEL 'hashing-256'"));
@@ -534,7 +534,7 @@ class SecurityTest {
 
     @Test
     void nanAndEmptyVectorsAreRejected() {
-        Principal bob = database.authenticate("bob", "hunter2").orElseThrow();
+        Principal bob = database.authenticate("bob", "hunter2-pass").orElseThrow();
         long patient = database.write(database.transactionOptions(bob), bob, writer -> writer.node("Patient", "b1", Map.of("mrn", "B-1")));
         float[] poisoned = new float[256];
         poisoned[7] = Float.NaN;
@@ -547,7 +547,7 @@ class SecurityTest {
 
     @Test
     void corruptEmbeddingRowsAreSkippedByTheIndex() throws InterruptedException, IOException {
-        try (Session bob = login("bob", "hunter2")) {
+        try (Session bob = login("bob", "hunter2-pass")) {
             bob.executeAll("""
                     INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p;
                     EMBED $p TEXT 'chronic kidney disease';
@@ -571,14 +571,14 @@ class SecurityTest {
         }
         database = HypergraphDatabase.open(directory, options());
         admin = new Session(database);
-        try (Session bob = login("bob", "hunter2")) {
+        try (Session bob = login("bob", "hunter2-pass")) {
             assertEquals("B-1", nearestMrn(bob, "kidney disease"));
         }
     }
 
     @Test
     void onlyGlobalAdminsCreateEmbeddingModels() {
-        try (Session alice = login("alice", "s3cret")) {
+        try (Session alice = login("alice", "s3cret-pass")) {
             alice.execute("INSERT NODE Patient 'a1' {mrn: 'A-1'} AS $p");
             assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("EMBED $p VECTOR [0.1, 0.9, 0.2] MODEL 'custom-3d'"));
             assertTrue(database.semantic().existingModel("custom-3d").isEmpty());
@@ -595,12 +595,12 @@ class SecurityTest {
     @Test
     void oversizedNamesAreRefused() {
         String huge = "x".repeat(10_000);
-        try (Session bob = login("bob", "hunter2")) {
+        try (Session bob = login("bob", "hunter2-pass")) {
             bob.execute("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p");
             long patient = bob.variables().get("p");
             assertThrows(HStoreException.InvalidSchema.class, () -> bob.execute("SET $p." + huge + " = 1"));
             assertThrows(HStoreException.InvalidSchema.class, () -> bob.execute("STATE $p = 1 SCHEMA '" + huge + "'"));
-            Principal principal = database.authenticate("bob", "hunter2").orElseThrow();
+            Principal principal = database.authenticate("bob", "hunter2-pass").orElseThrow();
             assertThrows(HStoreException.InvalidSchema.class, () -> database.write(database.transactionOptions(principal), principal,
                     writer -> { writer.set(patient, huge, Value.of(1)); return null; }));
             assertTrue(database.schema().existingPropertyKey(huge).isEmpty());
@@ -610,21 +610,21 @@ class SecurityTest {
 
     @Test
     void sessionsEndWhenTheirUserIsDroppedOrItsPasswordChanges() {
-        admin.execute("CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin");
-        try (Session alice = login("alice", "s3cret"); Session carol = login("carol", "c4rol"); Session other = login("carol", "c4rol")) {
+        admin.execute("CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin");
+        try (Session alice = login("alice", "s3cret-pass"); Session carol = login("carol", "c4rol-pass"); Session other = login("carol", "c4rol-pass")) {
             alice.execute("INSERT NODE Patient 'p1' {mrn: 'A-1'}");
-            carol.execute("ALTER USER carol PASSWORD 'n3w'");
+            carol.execute("ALTER USER carol PASSWORD 'n3w-pass-1'");
             carol.execute("MATCH NODE p:Patient RETURN count(*)");
             assertThrows(HStoreException.InvalidSchema.class, () -> other.execute("MATCH NODE p:Patient RETURN count(*)"));
-            carol.execute("ALTER USER alice PASSWORD 'rotated'");
+            carol.execute("ALTER USER alice PASSWORD 'rotated-pass'");
             HStoreException.InvalidSchema ended = assertThrows(HStoreException.InvalidSchema.class,
                     () -> alice.execute("MATCH NODE p:Patient RETURN count(*)"));
             assertTrue(ended.getMessage().contains("authenticate again"), ended.getMessage());
             assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("INSERT NODE Patient 'p2' {mrn: 'A-2'}"));
-            alice.execute("AUTHENTICATE alice PASSWORD 'rotated'");
+            alice.execute("AUTHENTICATE alice PASSWORD 'rotated-pass'");
             assertEquals("1", cell(alice.execute("MATCH NODE p:Patient RETURN count(*)")));
             carol.execute("BEGIN");
-            carol.execute("ALTER USER carol PASSWORD 'again'");
+            carol.execute("ALTER USER carol PASSWORD 'again-pass'");
             carol.execute("COMMIT");
             carol.execute("MATCH NODE p:Patient RETURN count(*)");
             admin.execute("DROP USER carol");
@@ -637,9 +637,9 @@ class SecurityTest {
         Path other = directory.resolve("lonely");
         Files.createDirectories(other);
         try (HypergraphDatabase lonely = HypergraphDatabase.open(other, options()); Session system = new Session(lonely)) {
-            system.executeAll("CREATE TENANT acme; CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin; CREATE USER dave PASSWORD 'd4ve' TENANT acme ROLE writer;");
+            system.executeAll("CREATE TENANT acme; CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin; CREATE USER dave PASSWORD 'd4ve-pass' TENANT acme ROLE writer;");
             try (Session carol = new Session(lonely)) {
-                assertTrue(carol.authenticate("carol", "c4rol"));
+                assertTrue(carol.authenticate("carol", "c4rol-pass"));
                 carol.execute("DROP USER dave");
                 HStoreException.InvalidSchema refused = assertThrows(HStoreException.InvalidSchema.class, () -> carol.execute("DROP USER carol"));
                 assertTrue(refused.getMessage().contains("last user"), refused.getMessage());
@@ -651,19 +651,33 @@ class SecurityTest {
     }
 
     @Test
-    void signInsAreThrottledPerUserAcrossSessions() {
-        for (int i = 0; i < SignIns.USER_LIMIT; i++) {
+    void signInsAreThrottledPerUserAndAddress() {
+        for (int i = 0; i < SignIns.ACCOUNT_LIMIT; i++) {
             try (Session attempt = new Session(database)) {
-                attempt.origin("10.0.0." + i);
+                attempt.origin("10.0.0.1");
                 assertFalse(attempt.authenticate("bob", "guess" + i));
-                assertTrue(new Session(database).authenticate("alice", "s3cret"));
             }
         }
-        try (Session attempt = new Session(database)) {
-            attempt.origin("10.0.1.1");
-            HStoreException.ResourceLimit throttled = assertThrows(HStoreException.ResourceLimit.class, () -> attempt.authenticate("bob", "hunter2"));
+        try (Session attacker = new Session(database)) {
+            attacker.origin("10.0.0.1");
+            HStoreException.ResourceLimit throttled = assertThrows(HStoreException.ResourceLimit.class,
+                    () -> attacker.authenticate("bob", "hunter2-pass"));
             assertTrue(throttled.getMessage().contains("too many failed sign-in attempts"), throttled.getMessage());
-            assertTrue(attempt.authenticate("alice", "s3cret"));
+            assertTrue(attacker.authenticate("alice", "s3cret-pass"));
+        }
+        try (Session owner = new Session(database)) {
+            owner.origin("10.0.0.2");
+            assertTrue(owner.authenticate("bob", "hunter2-pass"));
+        }
+        for (int i = 0; i < 3 * SignIns.ACCOUNT_LIMIT; i++) {
+            try (Session attempt = new Session(database)) {
+                attempt.origin("10.1.0." + i);
+                assertFalse(attempt.authenticate("alice", "guess" + i));
+            }
+        }
+        try (Session owner = new Session(database)) {
+            owner.origin("10.2.0.1");
+            assertTrue(owner.authenticate("alice", "s3cret-pass"));
         }
         AtomicLong clock = new AtomicLong();
         SignIns signIns = new SignIns(3, 2, Duration.ofMinutes(1), clock::get);
@@ -674,11 +688,34 @@ class SecurityTest {
         assertEquals(Optional.of("ok"), signIns.attempt("z", Optional.of("198.51.100.1"), () -> Optional.of("ok")));
         clock.addAndGet(Duration.ofMinutes(2).toNanos());
         assertEquals(Optional.of("ok"), signIns.attempt("z", origin, () -> Optional.of("ok")));
+        SignIns accounts = new SignIns(3, 100, Duration.ofMinutes(1), clock::get);
+        for (int i = 0; i < 3; i++) {
+            assertTrue(accounts.attempt("u", origin, Optional::empty).isEmpty());
+        }
+        assertThrows(HStoreException.ResourceLimit.class, () -> accounts.attempt("u", origin, () -> Optional.of("never")));
+        assertEquals(Optional.of("ok"), accounts.attempt("u", Optional.of("198.51.100.1"), () -> Optional.of("ok")));
+        assertEquals(Optional.of("ok"), accounts.attempt("v", origin, () -> Optional.of("ok")));
+        for (int i = 0; i < 3; i++) {
+            assertTrue(accounts.attempt("local", Optional.empty(), Optional::empty).isEmpty());
+        }
+        assertThrows(HStoreException.ResourceLimit.class, () -> accounts.attempt("local", Optional.empty(), () -> Optional.of("never")));
+    }
+
+    @Test
+    void passwordsNeedEightToAThousandCharacters() {
+        for (String password : new String[]{"", "short", "seven77", "x".repeat(1025)}) {
+            assertThrows(HStoreException.InvalidSchema.class, () -> admin.execute("CREATE USER weak PASSWORD '" + password + "'"), password);
+            assertThrows(HStoreException.InvalidSchema.class, () -> admin.execute("ALTER USER alice PASSWORD '" + password + "'"), password);
+        }
+        admin.execute("CREATE USER strong PASSWORD 'eight888'");
+        admin.execute("CREATE USER emoji PASSWORD '" + "\uD83D\uDD12".repeat(8) + "'");
+        assertTrue(new Session(database).authenticate("strong", "eight888"));
+        assertTrue(new Session(database).authenticate("alice", "s3cret-pass"));
     }
 
     @Test
     void extremeInputsFailCleanly() {
-        try (Session alice = login("alice", "s3cret")) {
+        try (Session alice = login("alice", "s3cret-pass")) {
             for (String statement : List.of(
                     "INSERT NODE Patient 'd' {mrn: 'd', amount: DECIMAL '1e2000000000'}",
                     "INSERT NODE Patient 'd' {mrn: 'd', amount: " + "9".repeat(5_000) + "}",
@@ -691,7 +728,7 @@ class SecurityTest {
                     "TRACE @1 DEPTH -1", "SET FORMAT xml", "DESCRIBE @" + Long.MAX_VALUE, "MEMBERS OF @-1")) {
                 assertThrows(HStoreException.class, () -> alice.execute(statement), statement);
             }
-            assertThrows(HStoreException.class, () -> admin.execute("CREATE USER mallory PASSWORD 'x' ROLE superuser"));
+            assertThrows(HStoreException.class, () -> admin.execute("CREATE USER mallory PASSWORD 'x-password' ROLE superuser"));
             alice.execute("INSERT NODE Patient 'j' {mrn: 'j'}");
             assertThrows(HStoreException.class, () -> alice.execute("SET @Patient:'j'.doc = JSON '" + "[".repeat(100_000) + "'"));
             assertEquals("0", cell(alice.execute("MATCH NODE p:Patient WHERE p.mrn = 'x' OR " + "NOT ".repeat(201) + "p.mrn = 'j' RETURN count(*)")));
@@ -705,7 +742,7 @@ class SecurityTest {
     void rolledBackPayloadsStillCountAgainstTheQuota() {
         admin.execute("ALTER TENANT globex QUOTA (payload_bytes 10000)");
         String large = "x".repeat(3_000);
-        try (Session bob = login("bob", "hunter2")) {
+        try (Session bob = login("bob", "hunter2-pass")) {
             bob.execute("INSERT NODE Patient 'p' {mrn: 'p'}");
             for (int i = 0; i < 3; i++) {
                 bob.executeAll("BEGIN; SET @Patient:'p'.note = '" + large + "'; ROLLBACK;");
@@ -720,7 +757,7 @@ class SecurityTest {
     void membershipsLeftAcrossTenantsStayInvisible() {
         long foreignEdge;
         long acmePatient;
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.execute("INSERT NODE Patient 'a' {mrn: 'A'} AS $a");
             acmePatient = alice.variables().get("a");
             bob.executeAll("INSERT NODE Patient 'b' {mrn: 'B'} AS $b; INSERT EDGE Encounter MEMBERS ($b AS patient) AS $e;");
@@ -731,7 +768,7 @@ class SecurityTest {
                     Validity.ALWAYS.from(), Validity.ALWAYS.to(), 0, 0));
             return null;
         });
-        try (Session alice = login("alice", "s3cret")) {
+        try (Session alice = login("alice", "s3cret-pass")) {
             assertEquals("0", cell(alice.execute("MATCH NODE p:Patient WHERE p IN @" + foreignEdge + " RETURN count(*)")));
             assertEquals("0", cell(alice.execute("MATCH EDGE e WHERE e CONTAINS (@" + acmePatient + ") AND e = @" + foreignEdge + " RETURN count(*)")));
             assertEquals("0", cell(alice.execute("MATCH NODE p:Patient WHERE p VALID AT 0 RETURN count(*)")));
@@ -744,7 +781,7 @@ class SecurityTest {
 
     @Test
     void untypedMatchesReadOnlyTheTenantsOwnAtoms() {
-        try (Session alice = login("alice", "s3cret"); Session bob = login("bob", "hunter2")) {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'a1' {mrn: 'A1'}; INSERT NODE Patient 'a2' {mrn: 'A2'};");
             QueryResult before = alice.execute("MATCH NODE n RETURN count(*)");
             for (int batch = 0; batch < 20; batch++) {
@@ -761,7 +798,7 @@ class SecurityTest {
 
     @Test
     void qualifiersMustBeTheWritersOwnAssertions() {
-        try (Session bob = login("bob", "hunter2")) {
+        try (Session bob = login("bob", "hunter2-pass")) {
             bob.executeAll("""
                     INSERT NODE Patient 'b' {mrn: 'B'} AS $b;
                     INSERT EDGE Encounter MEMBERS ($b AS patient) AS $e;
@@ -769,7 +806,7 @@ class SecurityTest {
                     """);
         }
         long foreignAssertion = database.read(reader -> reader.view().scan(io.hstore.db.evidence.Provenance.QUALIFIERS).keys().findFirst()).orElseThrow();
-        try (Session alice = login("alice", "s3cret")) {
+        try (Session alice = login("alice", "s3cret-pass")) {
             alice.executeAll("INSERT NODE Patient 'a' {mrn: 'A'} AS $a; INSERT EDGE Encounter MEMBERS ($a AS patient) AS $e;");
             long patient = alice.variables().get("a");
             long edge = alice.variables().get("e");

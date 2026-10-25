@@ -23,6 +23,7 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -39,25 +40,55 @@ import javax.net.ssl.SSLSocket;
 final class Server implements AutoCloseable {
 
     record Policy(String authentication, int maxConnections, int idleTimeoutSeconds, int authenticationTimeoutSeconds, long maxMessageBytes,
-                  StatementLogger statements, boolean logConnections, Optional<SSLContext> tls) {
+                  StatementLogger statements, boolean logConnections, Optional<SSLContext> tls, Duration failureDelay) {
 
         static Policy permissive() {
-            return new Policy("auto", 200, 0, 30, 64L << 20, StatementLogger.silent(), false, Optional.empty());
+            return new Policy("auto", 200, 0, 30, 64L << 20, StatementLogger.silent(), false, Optional.empty(), Duration.ZERO);
         }
 
         static Policy from(ServerConfig config, Optional<SSLContext> tls) {
             return new Policy(config.string(Setting.AUTHENTICATION).toLowerCase(), config.integer(Setting.MAX_CONNECTIONS),
                     config.integer(Setting.IDLE_TIMEOUT_SECONDS), config.integer(Setting.AUTHENTICATION_TIMEOUT_SECONDS),
-                    (long) config.integer(Setting.MAX_MESSAGE_MB) << 20, StatementLogger.from(config), config.flag(Setting.LOG_CONNECTIONS), tls);
+                    (long) config.integer(Setting.MAX_MESSAGE_MB) << 20, StatementLogger.from(config), config.flag(Setting.LOG_CONNECTIONS), tls,
+                    Duration.ofMillis(Math.clamp(config.integer(Setting.AUTHENTICATION_FAILURE_DELAY_MS), 0, 10_000)));
         }
 
         Policy withTls(SSLContext context) {
             return new Policy(authentication, maxConnections, idleTimeoutSeconds, authenticationTimeoutSeconds, maxMessageBytes, statements,
-                    logConnections, Optional.of(context));
+                    logConnections, Optional.of(context), failureDelay);
         }
 
         Policy withTimeouts(int idle, int authentication) {
-            return new Policy(this.authentication, maxConnections, idle, authentication, maxMessageBytes, statements, logConnections, tls);
+            return new Policy(this.authentication, maxConnections, idle, authentication, maxMessageBytes, statements, logConnections, tls,
+                    failureDelay);
+        }
+
+        Policy withAuthentication(String mode) {
+            return new Policy(mode, maxConnections, idleTimeoutSeconds, authenticationTimeoutSeconds, maxMessageBytes, statements,
+                    logConnections, tls, failureDelay);
+        }
+
+        Policy withFailureDelay(Duration delay) {
+            return new Policy(authentication, maxConnections, idleTimeoutSeconds, authenticationTimeoutSeconds, maxMessageBytes, statements,
+                    logConnections, tls, delay);
+        }
+
+        boolean openToOtherHosts() {
+            return authentication.equals("off");
+        }
+
+        boolean admits(HypergraphDatabase database, InetAddress peer) {
+            return peer.isLoopbackAddress() || openToOtherHosts() || authenticationRequired(database);
+        }
+
+        void delayFailure() {
+            if (!failureDelay.isZero()) {
+                try {
+                    Thread.sleep(failureDelay);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
 
         boolean authenticationRequired(HypergraphDatabase database) {
@@ -107,6 +138,15 @@ final class Server implements AutoCloseable {
     void serve() {
         LOG.log(System.Logger.Level.INFO, "listening on {0}:{1}{2}", listener.getInetAddress().getHostAddress(), String.valueOf(port()),
                 policy.tls().isPresent() ? " with TLS" : "");
+        if (!listener.getInetAddress().isLoopbackAddress()) {
+            if (policy.openToOtherHosts()) {
+                LOG.log(System.Logger.Level.WARNING, "authentication = off and the server listens on {0}: every client that can reach this port "
+                        + "has full access as the system administrator", listener.getInetAddress().getHostAddress());
+            } else if (!policy.authenticationRequired(database)) {
+                LOG.log(System.Logger.Level.WARNING, "the database has no users, so connections from other hosts are refused until "
+                        + "CREATE USER creates one");
+            }
+        }
         while (running) {
             try {
                 Socket socket = listener.accept();
@@ -157,6 +197,10 @@ final class Server implements AutoCloseable {
             session.origin(socket.getInetAddress().getHostAddress());
             InputStream in = new BufferedInputStream(socket.getInputStream());
             Writer out = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
+            if (!policy.admits(database, socket.getInetAddress())) {
+                refuseOtherHost(out, connection, peer);
+                return;
+            }
             int failures = 0;
             boolean pending = policy.authenticationRequired(database);
             timeout(socket, session);
@@ -172,6 +216,10 @@ final class Server implements AutoCloseable {
                     LOG.log(System.Logger.Level.INFO, "connection {0} received from {1}", connection, peer);
                 }
                 active = true;
+                if (!policy.admits(database, socket.getInetAddress())) {
+                    refuseOtherHost(out, connection, peer);
+                    return;
+                }
                 if (!session.authenticated() && policy.authenticationRequired(database)) {
                     if (!authenticate(session, request.get(), out, connection, peer) && ++failures >= MAX_AUTHENTICATION_ATTEMPTS) {
                         LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} closed after {2} failed authentication attempts",
@@ -211,6 +259,14 @@ final class Server implements AutoCloseable {
                         connection, peer, (System.nanoTime() - started) / 1_000_000);
             }
         }
+    }
+
+    private static final String OTHER_HOSTS = "this database has no users, so it only accepts connections from its own host; "
+            + "create a user with CREATE USER, or set authentication = off to let other hosts in without authentication";
+
+    private void refuseOtherHost(Writer out, long connection, String peer) throws IOException {
+        LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} refused: no users exist and the client is not on this host", connection, peer);
+        WireProtocol.respond(out, "error [AUTHENTICATION_REQUIRED]: " + OTHER_HOSTS);
     }
 
     private boolean unsettled(Socket socket, Session session, boolean unsettled) {
@@ -268,6 +324,7 @@ final class Server implements AutoCloseable {
                 return true;
             }
             LOG.log(System.Logger.Level.WARNING, "password authentication failed for user \"{0}\" from {1}", user, peer);
+            policy.delayFailure();
             WireProtocol.respond(out, "error [AUTHENTICATION_FAILED]: authentication failed");
             return false;
         }
