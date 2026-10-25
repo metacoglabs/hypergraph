@@ -38,6 +38,7 @@ class PermissionsTest {
         admin.executeAll("""
                 CREATE NODE TYPE Patient (mrn STRING INDEXED);
                 CREATE NODE TYPE Doctor (name STRING);
+                CREATE NODE TYPE Secret (mrn STRING INDEXED);
                 CREATE SET EDGE TYPE Encounter ROLES (patient, doctor);
                 CREATE USER root PASSWORD 'root-password' ROLE admin;
                 CREATE USER clerk PASSWORD 'clerk-password' ROLE none;
@@ -194,8 +195,11 @@ class PermissionsTest {
         }
         try (Session root = login("root", "root-password")) {
             String last = assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("ALTER USER root ROLE reader")).getMessage();
-            assertTrue(last.contains("last admin"), last);
-            assertTrue(assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("DROP USER root")).getMessage().contains("last admin"));
+            assertTrue(last.contains("no admin of the default tenant who can sign in"), last);
+            assertTrue(assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("DROP USER root")).getMessage()
+                    .contains("no admin of the default tenant who can sign in"));
+            assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("ALTER USER root VALID UNTIL '2000-01-01'"));
+            root.execute("ALTER USER root VALID UNTIL '2999-01-01'");
             root.execute("ALTER USER ops ROLE admin");
             root.execute("ALTER USER root ROLE reader");
         }
@@ -248,5 +252,86 @@ class PermissionsTest {
         }
         assertEquals(0, database.connections("ops"));
         assertEquals(0, database.connections("clerk"));
+    }
+
+    @Test
+    void reviewFindingsStayFixed() {
+        admin.executeAll("""
+                INSERT NODE Secret 's1' {mrn: 'S-1'};
+                INSERT NODE Patient 'lone' {mrn: 'L-1'} AS $lone;
+                INSERT EDGE Encounter MEMBERS ($p AS patient, $d AS doctor) AS $e2;
+                EVIDENCE 'lab report' SOURCE $p AS $ev;
+                GRANT WRITE ON TYPE Patient TO clerk;
+                """);
+        try (Session clerk = login("clerk", "clerk-password")) {
+            assertTrue(admin.execute("TRACE @" + id("ev")).render().contains("lab report"));
+            assertFalse(clerk.execute("TRACE @" + id("ev")).render().contains("lab report"));
+            String present = assertThrows(HStoreException.InvalidSchema.class, () -> clerk.execute("DESCRIBE @Doctor:'d1'")).getMessage();
+            String absent = assertThrows(HStoreException.InvalidSchema.class, () -> clerk.execute("DESCRIBE @Doctor:'nobody'")).getMessage();
+            assertEquals(present, absent);
+            String cascade = assertThrows(HStoreException.InvalidSchema.class, () -> clerk.execute("DELETE @" + id("p"))).getMessage();
+            assertTrue(cascade.contains("member of a hyperedge"), cascade);
+            clerk.execute("DELETE @" + id("lone"));
+            String known = clerk.execute("EXPLAIN MATCH NODE n:Patient WHERE n.mrn = 'S-1'").message();
+            String unknown = clerk.execute("EXPLAIN MATCH NODE n:Patient WHERE n.mrn = 'nowhere'").message();
+            assertEquals(unknown.replace("nowhere", "?"), known.replace("S-1", "?"));
+            admin.execute("GRANT WRITE ON TYPE Encounter TO clerk");
+            assertThrows(HStoreException.InvalidSchema.class, () -> clerk.execute("INTERSECT @" + id("e") + ", @" + id("e2") + " INTO $both"));
+
+            clerk.execute("BEGIN");
+            assertEquals("1", cell(clerk.execute("MATCH NODE n:Patient RETURN count(*)")));
+            long before = database.engine().transactions().current().id();
+            admin.execute("REVOKE READ ON TYPE Patient FROM clerk");
+            assertThrows(HStoreException.InvalidSchema.class, () -> clerk.execute("MATCH NODE n:Patient RETURN count(*)"));
+            clerk.execute("ROLLBACK");
+            assertThrows(HStoreException.InvalidSchema.class, () -> clerk.execute("AT GENERATION " + before + " MATCH NODE n:Patient RETURN count(*)"));
+        }
+        assertEquals(1, admin.execute("SHOW GRANTS FOR clerk").rows().size());
+    }
+
+    @Test
+    void concurrentAdminRemovalsCannotBothCommit() {
+        admin.execute("CREATE USER second PASSWORD 'second-password' ROLE admin");
+        try (Session root = login("root", "root-password"); Session other = login("second", "second-password")) {
+            root.execute("BEGIN");
+            other.execute("BEGIN");
+            root.execute("ALTER USER second ROLE writer");
+            other.execute("ALTER USER root ROLE writer");
+            root.execute("COMMIT");
+            assertThrows(HStoreException.class, () -> other.execute("COMMIT"));
+        }
+        assertEquals(1, admin.execute("SHOW USERS").rows().stream().filter(row -> row.get(2).render().equals("ADMIN")
+                && row.get(1).render().equals("0")).count());
+    }
+
+    @Test
+    void tenantAdminsCannotLiftLimitsOnAdmins() {
+        admin.executeAll("""
+                CREATE TENANT acme;
+                CREATE USER boss PASSWORD 'boss-password' TENANT acme ROLE admin CONNECTION LIMIT 2;
+                CREATE USER peer PASSWORD 'peer-password' TENANT acme ROLE admin VALID UNTIL '2000-01-01';
+                CREATE USER staff PASSWORD 'staff-password' TENANT acme ROLE writer;
+                """);
+        try (Session boss = login("boss", "boss-password")) {
+            assertThrows(HStoreException.InvalidSchema.class, () -> boss.execute("ALTER USER boss CONNECTION LIMIT -1"));
+            assertThrows(HStoreException.InvalidSchema.class, () -> boss.execute("ALTER USER peer VALID UNTIL 'infinity'"));
+            assertThrows(HStoreException.InvalidSchema.class, () -> boss.execute("ALTER USER peer ROLE writer"));
+            boss.execute("ALTER USER boss PASSWORD 'boss-password-2'");
+            boss.execute("ALTER USER staff CONNECTION LIMIT 1 VALID UNTIL '2999-01-01' ROLE reader");
+        }
+    }
+
+    @Test
+    void sessionsEndedByAChangeStayEndedUntilTheySignIn() {
+        try (Session ops = login("ops", "ops-password")) {
+            admin.execute("ALTER USER ops ROLE writer");
+            assertThrows(HStoreException.InvalidSchema.class, () -> ops.execute("WHOAMI"));
+            admin.execute("ALTER USER ops ROLE reader");
+            assertThrows(HStoreException.InvalidSchema.class, () -> ops.execute("WHOAMI"));
+            assertEquals(0, database.connections("ops"));
+            assertTrue(ops.authenticate("ops", "ops-password"));
+            assertTrue(cell(ops.execute("WHOAMI")).equals("ops"));
+            assertEquals(1, database.connections("ops"));
+        }
     }
 }

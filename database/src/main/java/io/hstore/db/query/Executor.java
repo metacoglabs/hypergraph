@@ -158,9 +158,8 @@ final class Executor {
                 if (!session.principal().global() && Security.users(writer.engineView()).size() <= 1) {
                     throw HStoreException.invalid("cannot drop the last user: the server would stop asking for credentials");
                 }
-                if (user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN && Security.globalAdmins(writer.engineView()) == 1
-                        && Security.users(writer.engineView()).size() > 1) {
-                    throw HStoreException.invalid("cannot drop the last admin of the default tenant while other users remain");
+                if (Security.globalAdmin(user) && Security.users(writer.engineView()).size() > 1) {
+                    Security.keepAnotherGlobalAdmin(writer.transaction(), name);
                 }
                 Security.dropUser(writer.transaction(), name);
                 return QueryResult.message("dropped user " + name);
@@ -411,11 +410,18 @@ final class Executor {
 
     private QueryResult alterUser(Writer writer, Statement.AlterUser alter) {
         Security.User user = governedUser(writer, alter.name());
+        boolean attributes = alter.role().isPresent() || alter.validUntil().isPresent() || alter.connectionLimit().isPresent();
+        if (attributes && user.role() == Role.ADMIN && !session.principal().global()) {
+            throw HStoreException.invalid("only an admin of the default tenant can change the role, password expiry or connection limit "
+                    + "of an admin");
+        }
+        boolean demoted = alter.role().filter(role -> role != Role.ADMIN).isPresent();
+        boolean expires = alter.validUntil().isPresent() && alter.validUntil().getAsLong() <= System.currentTimeMillis();
+        if (Security.globalAdmin(user) && (demoted || expires)) {
+            Security.keepAnotherGlobalAdmin(writer.transaction(), user.name());
+        }
         List<String> changes = new ArrayList<>();
         alter.role().filter(role -> role != user.role()).ifPresent(role -> {
-            if (user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN && Security.globalAdmins(writer.engineView()) == 1) {
-                throw HStoreException.invalid("cannot change the role of the last admin of the default tenant");
-            }
             Security.setRole(writer.transaction(), user.name(), role);
             changes.add("role " + role);
         });
@@ -555,7 +561,9 @@ final class Executor {
             }
             return rows.toList();
         });
-        database().statistics().observe(reader.tenant(), plan.chosen().path().kind(), plan.chosen().rows(), produced.get());
+        if (reader.principal().role().readsEveryType()) {
+            database().statistics().observe(reader.tenant(), plan.chosen().path().kind(), plan.chosen().rows(), produced.get());
+        }
         boolean aggregate = match.projections().stream().anyMatch(projection -> Evaluator.isAggregate(projection.expr()));
         List<List<Cell>> rows = aggregate
                 ? List.of(match.projections().stream().map(projection -> Evaluator.isAggregate(projection.expr())
@@ -728,7 +736,7 @@ final class Executor {
             default -> throw HStoreException.invalid(algebra.op() + " does not produce a hyperedge");
         };
         long created = writer.edge(writer.require(leftId).type().name());
-        writer.transaction().load(created, result.values().toList());
+        writer.loadIncidences(created, result.values().toList());
         algebra.into().ifPresent(name -> session.bind(name, created));
         return QueryResult.table(List.of("edge", "cardinality"), List.of(List.of(atomCell(writer, created), QueryResult.number(result.size()))));
     }

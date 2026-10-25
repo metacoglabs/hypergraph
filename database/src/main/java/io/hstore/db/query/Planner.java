@@ -55,6 +55,7 @@ final class Planner {
     private static final double ENTRIES_PER_PAGE = 128;
     private static final double TREE_DEPTH = 3;
     private static final int MAX_INTERSECTED = 4;
+    private static final double BLIND_SELECTIVITY = 0.1;
 
     private final Reader reader;
     private final Statistics statistics;
@@ -144,7 +145,7 @@ final class Planner {
         }
         List<Expr> consumed = parts.stream().flatMap(part -> part.sources().stream()).toList();
         AccessPath path = new AccessPath.Intersection(parts.stream().map(Candidate::path).toList());
-        double corrected = rows * statistics.correction(reader.tenant(), path.kind());
+        double corrected = rows * correction(path);
         double access = parts.stream().mapToDouble(part -> scanCost(part.path(), part.rows())).sum();
         return new Candidate(path, consumed, corrected, access + VERIFY_WEIGHT * corrected * verificationWeight(conjuncts, consumed));
     }
@@ -157,7 +158,7 @@ final class Planner {
     }
 
     private Candidate candidate(AccessPath path, List<Expr> sources, double rows, List<Expr> conjuncts) {
-        double corrected = rows * statistics.correction(reader.tenant(), path.kind());
+        double corrected = rows * correction(path);
         return new Candidate(path, sources, corrected,
                 scanCost(path, corrected) + VERIFY_WEIGHT * corrected * verificationWeight(conjuncts, sources));
     }
@@ -202,7 +203,14 @@ final class Planner {
         };
     }
 
+    private double correction(AccessPath path) {
+        return reader.principal().role().readsEveryType() ? statistics.correction(reader.tenant(), path.kind()) : 1.0;
+    }
+
     private double indexEstimate(AccessPath.IndexRange range) {
+        if (!reader.principal().role().readsEveryType()) {
+            return Math.ceil(reader.countOfType(range.type().id()) * BLIND_SELECTIVITY);
+        }
         TypeTag tag = Reader.indexedTag(range.type(), range.property()).orElseThrow();
         OptionalInt key = reader.schema().existingPropertyKey(range.property());
         if (key.isEmpty()) {

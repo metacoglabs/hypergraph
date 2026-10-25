@@ -332,7 +332,13 @@ public final class Studio implements AutoCloseable {
             session.close();
             throw HttpFailure.unauthorized("user and password are required");
         }
-        Sessions.Entry entry = sessions.open(session);
+        Sessions.Entry entry;
+        try {
+            entry = sessions.open(session);
+        } catch (RuntimeException full) {
+            session.close();
+            throw full;
+        }
         LOG.log(System.Logger.Level.INFO, "studio session opened for user={0} role={1} from {2}",
                 session.principal().user(), session.principal().role(), request.peer());
         boolean secure = options.tls().isPresent() || request.headers().getOrDefault("X-Forwarded-Proto", List.of()).contains("https");

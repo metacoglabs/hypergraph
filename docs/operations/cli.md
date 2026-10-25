@@ -214,7 +214,7 @@ A violated invariant aborts the check with the offending page and a reason such 
 `leaf keys out of order in <schema>` or `unbalanced tree in <schema>`.
 
 The report ends with a tenant isolation line. Older versions could leave a hyperedge with a member from another
-tenant; the check lists each such membership with the `REMOVE` statement that undoes it. With `--repair-tenants`
+tenant; the check lists each such membership, on every active branch, with the statement that undoes it. With `--repair-tenants`
 (after the directory), `check` first removes all of them in one transaction and lists what it removed:
 
 ```
@@ -223,7 +223,7 @@ tenant isolation: removed 1 memberships that crossed tenants:
   REMOVE @14 FROM @12   -- member of tenant 1 in an edge of tenant 2
 generation 160, recovered 0 commits from the log
 …
-tenant isolation: no hyperedge on main has a member from another tenant
+tenant isolation: no hyperedge on any branch has a member from another tenant
 ```
 
 A check that finds no such membership, and every repair, records that the database is clean, which silences the

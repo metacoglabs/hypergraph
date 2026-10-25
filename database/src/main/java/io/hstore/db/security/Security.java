@@ -237,7 +237,24 @@ public final class Security {
     }
 
     public static long globalAdmins(View view) {
-        return users(view).stream().filter(user -> user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN).count();
+        return users(view).stream().filter(Security::globalAdmin).count();
+    }
+
+    public static boolean globalAdmin(User user) {
+        return user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN;
+    }
+
+    public static void keepAnotherGlobalAdmin(Transaction txn, String leaving) {
+        long now = System.currentTimeMillis();
+        List<User> others = users(txn).stream()
+                .filter(user -> globalAdmin(user) && !user.name().equals(leaving) && !Access.options(txn, user.name()).expired(now))
+                .toList();
+        if (others.isEmpty()) {
+            throw HStoreException.invalid("this would leave no admin of the default tenant who can sign in; "
+                    + "create or restore another one first");
+        }
+        others.forEach(user -> txn.merge(USERS, userKey(user.name()),
+                current -> current.filter(Security::globalAdmin).isPresent(), current -> current));
     }
 
     public static boolean expired(View view, String name) {

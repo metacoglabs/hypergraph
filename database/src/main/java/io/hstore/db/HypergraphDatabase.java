@@ -33,6 +33,7 @@ import io.hstore.engine.txn.TxnOptions;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -95,12 +96,22 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public List<TenantMemberships.Crossing> repairTenantMemberships() {
-        return write(writer -> TenantMemberships.repair(writer.transaction()));
+        List<TenantMemberships.Crossing> removed = new ArrayList<>();
+        for (Branch branch : engine.branches().stream().filter(Branch::isActive).toList()) {
+            removed.addAll(write(options.transaction().onBranch(branch.id()), Principal.SYSTEM,
+                    writer -> TenantMemberships.repair(writer.transaction(), branch.name())));
+        }
+        write(writer -> {
+            if (!TenantMemberships.checked(writer.transaction())) {
+                TenantMemberships.markChecked(writer.transaction());
+            }
+            return null;
+        });
+        return removed;
     }
 
     public Scram.Server scram(Optional<byte[]> channelBinding) {
-        return new Scram.Server(name -> read(reader -> Security.user(reader.engineView(), name)
-                .filter(user -> !Security.expired(reader.engineView(), user.name()))).map(Security::verifier), scramSecret,
+        return new Scram.Server(name -> read(reader -> Security.user(reader.engineView(), name)).map(Security::verifier), scramSecret,
                 Security.ITERATIONS, channelBinding);
     }
 

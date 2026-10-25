@@ -28,6 +28,7 @@ import io.hstore.engine.topology.Weight;
 import io.hstore.engine.tree.Entry;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.txn.IncidentEdge;
+import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.View;
 
 import java.util.HashMap;
@@ -51,6 +52,7 @@ public sealed class Reader permits Writer {
 
     private Boolean onlyDefaultTenant;
     private final Map<Integer, Optional<Access.Privilege>> grantedTypes = new HashMap<>();
+    private long grantsGeneration = -1;
 
     Reader(HypergraphDatabase database, View view, Principal principal) {
         this.database = database;
@@ -95,7 +97,16 @@ public sealed class Reader permits Writer {
     }
 
     private Optional<Access.Privilege> privilege(int type) {
-        return grantedTypes.computeIfAbsent(type, found -> Access.onType(view, principal.user(), found));
+        long current = database.engine().transactions().current().id();
+        if (current != grantsGeneration) {
+            grantedTypes.clear();
+            grantsGeneration = current;
+        }
+        return grantedTypes.computeIfAbsent(type, found -> {
+            try (Snapshot latest = database.engine().snapshot()) {
+                return Access.onType(latest, principal.user(), found);
+            }
+        });
     }
 
     public TypeDef requireReadableType(String name) {
@@ -192,7 +203,7 @@ public sealed class Reader permits Writer {
     }
 
     public OptionalLong find(String type, String key) {
-        return type(type).map(found -> view.resolve(tenant(), found.id(), key)).orElse(OptionalLong.empty());
+        return type(type).map(found -> view.resolve(tenant(), requireReadableType(found.name()).id(), key)).orElse(OptionalLong.empty());
     }
 
     public long resolve(String type, String key) {

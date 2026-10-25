@@ -197,6 +197,20 @@ public final class Writer extends Reader {
         txn.load(edge, Arrays.asList(incidences));
     }
 
+    public void loadIncidences(long edge, List<Incidence> incidences) {
+        requireMembership(edge, MemberSpec.PLAIN);
+        Atom container = require(edge);
+        for (Incidence incidence : incidences) {
+            requireVisible(incidence.member());
+            for (String role : roles(incidence.roleSet())) {
+                if (!container.type().allowsRole(role)) {
+                    throw HStoreException.invalid(container.type().name() + " does not declare role '" + role + "'");
+                }
+            }
+        }
+        txn.load(edge, incidences);
+    }
+
     public void qualify(long edge, long member, long qualifier) {
         requireMembership(edge, MemberSpec.PLAIN);
         requireVisible(member);
@@ -323,6 +337,14 @@ public final class Writer extends Reader {
     public void delete(long atom) {
         principal().requireWrite();
         Atom target = requireWritable(atom);
+        if (!principal().role().writesEveryType()) {
+            engineView().incident(atom).forEach(incident -> engineView().atom(incident.edge())
+                    .filter(record -> record.tenant() == tenant() && !writable(record.type()))
+                    .ifPresent(record -> {
+                        throw HStoreException.invalid("cannot delete atom " + atom + ": it is a member of a hyperedge that user "
+                                + principal().user() + " may not change");
+                    }));
+        }
         Security.charge(txn, tenant(), new Usage(-1, target.isEdge() ? -1 : 0, 0));
         txn.delete(PropertySlots.PROPERTIES, atom);
         txn.delete(Embedding.EMBEDDINGS, atom);

@@ -163,7 +163,7 @@ bytes` and the connection is closed. A connection whose first request starts lik
 without a reply, so a web page cannot use a browser to post HQL to the port.
 
 If a user is dropped or its password changes, the next statement on each of its open connections fails with
-`user NAME was dropped or its password changed; authenticate again`, and so does every statement after it until the
+`user NAME was dropped, or its password or role changed; authenticate again`, and so does every statement after it until the
 connection sends a successful `AUTHENTICATE`.
 
 Without `tls = on` the password travels in clear text. With TLS the server completes the handshake before it

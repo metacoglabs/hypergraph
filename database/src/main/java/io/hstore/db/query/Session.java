@@ -38,6 +38,7 @@ public final class Session implements AutoCloseable {
     private boolean authenticated;
     private Optional<Security.User> credentials = Optional.empty();
     private boolean renewing;
+    private boolean stale;
     private Optional<String> origin = Optional.empty();
     private int failedAuthentications;
     private Optional<ScramAttempt> scram = Optional.empty();
@@ -112,7 +113,8 @@ public final class Session implements AutoCloseable {
             throw malformed;
         }
         Optional<Principal> found = outcome instanceof Scram.Outcome.Accepted(String user, String _)
-                ? database.read(reader -> Security.user(reader.engineView(), user)).map(Security::principal)
+                ? database.read(reader -> Security.user(reader.engineView(), user)
+                .filter(stored -> !Security.expired(reader.engineView(), stored.name()))).map(Security::principal)
                 : Optional.empty();
         if (found.isEmpty()) {
             attempt.reservation().failed();
@@ -139,6 +141,7 @@ public final class Session implements AutoCloseable {
 
     private void signIn(Principal found) {
         database.enter(found);
+        stale = false;
         counted.ifPresent(database::leave);
         counted = Optional.of(found.user());
         principal = found;
@@ -160,6 +163,9 @@ public final class Session implements AutoCloseable {
     public boolean credentialsCurrent() {
         if (!authenticated) {
             return true;
+        }
+        if (stale) {
+            return false;
         }
         Optional<Security.User> stored = database.read(reader -> Security.user(reader.engineView(), principal.user()));
         boolean current = stored.isPresent() && credentials.isPresent()
@@ -192,7 +198,8 @@ public final class Session implements AutoCloseable {
     public QueryResult execute(Statement statement) {
         if (!(statement instanceof Statement.Authenticate) && !credentialsCurrent()) {
             close();
-            throw HStoreException.invalid("user " + principal.user() + " was dropped or its password changed; authenticate again");
+            stale = true;
+            throw HStoreException.invalid("user " + principal.user() + " was dropped, or its password or role changed; authenticate again");
         }
         QueryResult result = dispatch(statement);
         if (statement instanceof Statement.AlterUser(String name, Optional<String> password, var _, var _, var _)

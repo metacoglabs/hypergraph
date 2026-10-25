@@ -27,8 +27,8 @@ tenant.
 | users of other tenants, `CREATE/ALTER TENANT`, `GRANT MONITOR`, `GRANT MAINTAIN` | yes | no | no | no | no |
 | DDL (`CREATE … TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`); the schema is shared by every tenant | yes | no | no | no | no |
 | branches (`USE BRANCH`, `SHOW BRANCHES`, `CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY` | yes | no | no | no | no |
-| `STATS` and Studio's dashboard | yes | with `MONITOR` | with `MONITOR` | with `MONITOR` | with `MONITOR` |
-| `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | with `MAINTAIN` | with `MAINTAIN` | with `MAINTAIN` | with `MAINTAIN` |
+| `STATS` and Studio's dashboard | yes | no | with `MONITOR` (default tenant) | with `MONITOR` (default tenant) | with `MONITOR` (default tenant) |
+| `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | no | with `MAINTAIN` (default tenant) | with `MAINTAIN` (default tenant) | with `MAINTAIN` (default tenant) |
 | switch tenant (`USE TENANT`, `Principal.inTenant`) | yes | no | no | no | no |
 
 ### Privileges on types
@@ -48,9 +48,21 @@ READER, WRITER and ADMIN cover every type of their tenant, like PostgreSQL's `pg
 - A hyperedge the user can read shows the ids of all its members, including members of types it cannot read,
   the way a foreign-key column shows the key of a row in a table you cannot select from. Those members have no
   label, properties or incidences for the user, and adding one to an edge fails as if it did not exist.
-- Writing to a hyperedge needs `WRITE` on the edge's type; the members added must be readable.
-- Grants are kept in slot `GRANTS` = 75 (schema 110), keyed by user and type, and read per statement, so a grant or
-  revoke applies to the next statement of every open session. `DROP USER` removes the user's grants.
+- Writing to a hyperedge needs `WRITE` on the edge's type; the members added must be readable, also for set
+  algebra `INTO`. Deleting an atom also removes it from every hyperedge that contains it, so a user with
+  `ROLE none` may only delete an atom when it can write every hyperedge of its tenant that holds it.
+- Referring to an atom by key (`@T:'key'`) needs `READ` on `T`; without it the reference fails with the
+  privilege error whether or not the key exists, so keys of unreadable types cannot be probed.
+- Evidence and assertions (`TRACE`, `EVIDENCE`, `QUALIFY` policies) belong to the tenant, not to a type, so a user
+  with `ROLE none` neither sees nor records them.
+- `EXPLAIN` for a user with `ROLE none` estimates property-index ranges as a tenth of the type's readable atoms
+  instead of counting the index, whose entries span every type, and neither uses nor feeds the tenant's
+  cardinality feedback.
+- Grants are kept in slot `GRANTS` = 75 (schema 110), keyed by user and type. `Reader` reads them from the latest
+  committed generation of main, not from the statement's snapshot, so a grant or revoke applies to the next
+  statement of every open session, inside an open transaction too, and `AT GENERATION` or `AS OF` cannot bring
+  back a revoked privilege. As in PostgreSQL, statements that already ran keep their effect. `DROP USER`
+  removes the user's grants, so a user later created with the same name starts without them.
 
 ### Capabilities
 
@@ -73,9 +85,15 @@ DDL stay with global admins.
 
 ### Changing roles
 
-`ALTER USER u ROLE r` changes the role; `u`'s open sessions then fail with "authenticate again", so the new role
-applies at once. The last ADMIN of the default tenant cannot change its role, and cannot be dropped while other
-users exist, so the database never loses its last global admin.
+`ALTER USER u ROLE r` changes the role; `u`'s open sessions then fail with "authenticate again" until they sign in
+again, so the new role applies at once. Only a global admin may change the role, password expiry or connection
+limit of an ADMIN, so a tenant admin cannot lift limits put on itself or on another admin of its tenant.
+
+A change that would leave the default tenant without an ADMIN whose password still works (dropping one while other
+users exist, giving it another role, or expiring its password now) is refused. The statement also places a
+commit-time precondition on every other such admin, so two concurrent transactions that each remove a different
+admin cannot both commit. Should every admin still be lost (for example to a forgotten password), `hstore shell` on
+the data directory runs as the built-in `system` admin, like PostgreSQL's single-user mode.
 
 `USE MAIN` is open to everyone. Without `TENANT`, `CREATE USER` puts the new user in the session's current
 tenant. A tenant admin who names another tenant, or another tenant's user, gets the same error as for a name that
@@ -139,13 +157,13 @@ The raw engine `View` is available as `reader.engineView()` for code that works 
 tenant and quota records, the SCRAM secret, the shared schema listing, branch merges and `DIFF` (global admins
 only), materialized view maintenance (filtered by the view's tenant), and records that carry their own tenant
 stamp (evidence, qualifiers, state, signals). `TenantBoundaryTest` in the database and server modules lists the
-files allowed to call it, each with its reason, and fails when any other file does, or when a listed file no
-longer needs it. Adding a raw read therefore means stating why it is safe in that list.
+files allowed to call it, or to reach data around `Reader` through `writer.transaction()` or engine snapshots, each
+with its reason, and fails when any other file does, or when a listed file no longer needs it. Adding a raw read therefore means stating why it is safe in that list.
 
 Writes call `require`, so a principal cannot modify an atom it cannot see. A hyperedge may only gain members that
 are visible to the writer (`Writer.incidence`, also used by `Writer.qualify`), so a tenant cannot reference another
 tenant's atoms. Evidence sources, assertion sources and the evidence list of `QUALIFY` must be atoms, evidence or
-assertions of the writer's tenant (`Provenance.record/assertion`). `hstore check` lists any membership on main
+assertions of the writer's tenant (`Provenance.record/assertion`). `hstore check` lists any membership on an active branch
 whose member belongs to a different tenant than its edge, with the `REMOVE` statement that undoes it, and
 `hstore check <dir> --repair-tenants` removes them in one transaction. Databases written before these checks
 existed could have such memberships from `QUALIFY`. A new database, and one that `hstore check` found clean or
