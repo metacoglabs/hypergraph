@@ -19,8 +19,12 @@ final class Views {
     }
 
     static OptionalLong resolve(Tree<Postings<CanonicalName>> canonical, int tenant, int type, String key) {
+        return resolve(canonical, tenant, type, key, EngineSlots.canonicalKey(tenant, type, key));
+    }
+
+    static OptionalLong resolve(Tree<Postings<CanonicalName>> canonical, int tenant, int type, String key, long hash) {
         CanonicalName wanted = new CanonicalName(tenant, type, key);
-        return EngineSlots.CANONICAL_INDEX.stream(canonical, EngineSlots.canonicalKey(tenant, type, key))
+        return EngineSlots.CANONICAL_INDEX.stream(canonical, hash)
                 .filter(entry -> entry.value().equals(wanted))
                 .mapToLong(Entry::key)
                 .findFirst();

@@ -13,6 +13,7 @@ import io.hstore.db.stats.Statistics;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.txn.View;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -75,9 +76,12 @@ final class Planner {
         });
         List<Expr> conjuncts = match.where().map(Planner::conjuncts).orElse(List.of());
         List<Candidate> candidates = new ArrayList<>();
-        universe = reader.population(match.edges());
+        double population;
+        try (View.Unrecorded _ = reader.view().unrecorded()) {
+            universe = reader.population(match.edges());
+            population = type.map(found -> (double) reader.countOfType(found.id())).orElse(universe);
+        }
         double catalogSize = universe;
-        double population = type.map(found -> (double) reader.countOfType(found.id())).orElse(catalogSize);
         Candidate catalogScan = candidate(new AccessPath.AllAtoms(match.edges()), List.of(), catalogSize, conjuncts);
         candidates.add(new Candidate(catalogScan.path(), List.of(), catalogScan.rows(), catalogScan.cost() + VERIFY_WEIGHT * catalogScan.rows()));
         type.ifPresent(found -> candidates.add(candidate(new AccessPath.TypeScan(found), List.of(), population, conjuncts)));
@@ -157,6 +161,12 @@ final class Planner {
     }
 
     private double estimate(AccessPath path, double population) {
+        try (View.Unrecorded _ = reader.view().unrecorded()) {
+            return unrecordedEstimate(path, population);
+        }
+    }
+
+    private double unrecordedEstimate(AccessPath path, double population) {
         return switch (path) {
             case AccessPath.Incident(List<Long> atoms) -> {
                 double[] degrees = atoms.stream().mapToDouble(reader::degree).sorted().toArray();
