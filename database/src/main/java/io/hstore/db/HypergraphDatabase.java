@@ -12,6 +12,7 @@ import io.hstore.db.schema.SchemaSlots;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
+import io.hstore.db.security.Scram;
 import io.hstore.db.security.SignIns;
 import io.hstore.db.semantic.Embedding;
 import io.hstore.db.semantic.SemanticPlane;
@@ -49,6 +50,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final Statistics statistics;
     private final MaterializedViews views;
     private final SignIns signIns = new SignIns();
+    private final byte[] scramSecret;
 
     private HypergraphDatabase(Path directory, DatabaseOptions options) {
         this.options = options;
@@ -62,6 +64,31 @@ public final class HypergraphDatabase implements AutoCloseable {
         engine.onCheckpoint(semantic::persist);
         this.statistics = new Statistics(engine);
         this.views = new MaterializedViews(this);
+        this.scramSecret = prepareSignIns();
+    }
+
+    private byte[] prepareSignIns() {
+        boolean ready = read(reader -> Security.scramSecret(reader.view()).isPresent()
+                && Security.users(reader.view()).stream().noneMatch(Security::legacy));
+        if (!ready) {
+            write(writer -> {
+                if (Security.scramSecret(writer.transaction()).isEmpty()) {
+                    Security.createScramSecret(writer.transaction());
+                }
+                Security.upgradeLegacyUsers(writer.transaction());
+                return null;
+            });
+        }
+        return read(reader -> Security.scramSecret(reader.view())).orElseThrow();
+    }
+
+    public Scram.Server scram(Optional<byte[]> channelBinding) {
+        return new Scram.Server(name -> read(reader -> Security.user(reader.view(), name)).map(Security::verifier), scramSecret,
+                Security.ITERATIONS, channelBinding);
+    }
+
+    public SignIns signIns() {
+        return signIns;
     }
 
     public static List<Slot<?>> extensionSlots() {

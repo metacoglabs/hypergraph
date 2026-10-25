@@ -8,6 +8,7 @@ import io.hstore.db.query.Ast.Statement;
 import io.hstore.db.query.Parser;
 import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
+import io.hstore.db.security.Scram;
 import io.hstore.engine.HStoreException;
 
 import java.io.BufferedInputStream;
@@ -25,6 +26,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -220,6 +222,17 @@ final class Server implements AutoCloseable {
                     refuseOtherHost(out, connection, peer);
                     return;
                 }
+                if (request.get().startsWith(SASL)) {
+                    boolean before = session.authenticated();
+                    if (!sasl(session, request.get(), out, socket, connection, peer) && !before && ++failures >= MAX_AUTHENTICATION_ATTEMPTS) {
+                        LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} closed after {2} failed authentication attempts",
+                                connection, peer, failures);
+                        return;
+                    }
+                    timeout(socket, session);
+                    unsettled = unsettled(socket, session, unsettled);
+                    continue;
+                }
                 if (!session.authenticated() && policy.authenticationRequired(database)) {
                     if (!authenticate(session, request.get(), out, connection, peer) && ++failures >= MAX_AUTHENTICATION_ATTEMPTS) {
                         LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} closed after {2} failed authentication attempts",
@@ -307,29 +320,71 @@ final class Server implements AutoCloseable {
             WireProtocol.respond(out, "error [" + failure.code() + "]: " + failure.getMessage());
             return false;
         }
-        if (statements.size() == 1 && statements.getFirst() instanceof Statement.Authenticate(String user, String password)) {
-            boolean accepted;
-            try {
-                accepted = session.authenticate(user, password);
-            } catch (HStoreException refused) {
-                WireProtocol.respond(out, "error [" + refused.code() + "]: " + refused.getMessage());
-                return false;
-            }
-            if (accepted) {
-                if (policy.logConnections()) {
-                    LOG.log(System.Logger.Level.INFO, "connection {0} authorized: user={1} tenant={2} role={3}",
-                            connection, user, session.principal().tenant(), session.principal().role());
-                }
-                WireProtocol.respond(out, "authenticated as " + user);
-                return true;
-            }
-            LOG.log(System.Logger.Level.WARNING, "password authentication failed for user \"{0}\" from {1}", user, peer);
-            policy.delayFailure();
-            WireProtocol.respond(out, "error [AUTHENTICATION_FAILED]: authentication failed");
+        if (statements.stream().anyMatch(statement -> statement instanceof Statement.Authenticate)) {
+            refuseCleartext(out, connection, peer);
             return false;
         }
-        WireProtocol.respond(out, "error [AUTHENTICATION_REQUIRED]: authenticate first: AUTHENTICATE <user> PASSWORD '<password>'");
+        WireProtocol.respond(out, "error [AUTHENTICATION_REQUIRED]: authenticate first with SASL " + Scram.MECHANISM
+                + "; see the wire protocol documentation");
         return false;
+    }
+
+    static final String SASL = "SASL ";
+    static final String UPGRADE = "this server no longer accepts passwords in clear text; upgrade your HStore client to version "
+            + Main.VERSION + " or later, which signs in with " + Scram.MECHANISM;
+
+    private void refuseCleartext(Writer out, long connection, String peer) throws IOException {
+        LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} sent a clear-text password, which is refused; the client needs an upgrade",
+                connection, peer);
+        WireProtocol.respond(out, "error [AUTHENTICATION_FAILED]: " + UPGRADE);
+    }
+
+    private boolean sasl(Session session, String request, Writer out, Socket socket, long connection, String peer) throws IOException {
+        String[] parts = request.substring(SASL.length()).strip().split(" ");
+        try {
+            if (parts.length == 2) {
+                String serverFirst = session.scramFirst(parts[0], decode(parts[1]), channelBinding(socket));
+                WireProtocol.respond(out, "sasl " + Base64.getEncoder().encodeToString(serverFirst.getBytes(StandardCharsets.UTF_8)));
+                return true;
+            }
+            if (parts.length == 1 && !parts[0].isEmpty()) {
+                Optional<String> serverFinal = session.scramFinal(decode(parts[0]));
+                if (serverFinal.isPresent()) {
+                    if (policy.logConnections()) {
+                        LOG.log(System.Logger.Level.INFO, "connection {0} authorized: user={1} tenant={2} role={3} method={4}",
+                                connection, session.principal().user(), session.principal().tenant(), session.principal().role(),
+                                socket instanceof SSLSocket ? Scram.MECHANISM_PLUS : Scram.MECHANISM);
+                    }
+                    WireProtocol.respond(out, "authenticated as " + session.principal().user() + "\nsasl "
+                            + Base64.getEncoder().encodeToString(serverFinal.get().getBytes(StandardCharsets.UTF_8)));
+                    return true;
+                }
+                LOG.log(System.Logger.Level.WARNING, "password authentication failed for user \"{0}\" from {1}",
+                        session.scramUser().orElse(""), peer);
+                policy.delayFailure();
+                WireProtocol.respond(out, "error [AUTHENTICATION_FAILED]: authentication failed");
+                return false;
+            }
+            WireProtocol.respond(out, "error [AUTHENTICATION_FAILED]: expected SASL <mechanism> <client-first-message> or SASL <client-final-message>");
+            return false;
+        } catch (HStoreException failure) {
+            LOG.log(System.Logger.Level.WARNING, "connection {0} from {1}: SASL sign-in failed: {2}", connection, peer, failure.getMessage());
+            WireProtocol.respond(out, "error [" + (failure instanceof HStoreException.ResourceLimit ? failure.code() : "AUTHENTICATION_FAILED")
+                    + "]: " + failure.getMessage());
+            return false;
+        }
+    }
+
+    private static String decode(String base64) {
+        try {
+            return new String(Base64.getDecoder().decode(base64), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw HStoreException.invalid("malformed SCRAM message: not base64");
+        }
+    }
+
+    private static Optional<byte[]> channelBinding(Socket socket) {
+        return socket instanceof SSLSocket secure ? Scram.endPointOf(secure.getSession().getLocalCertificates()) : Optional.empty();
     }
 
     private String execute(Session session, String script, long connection) {
@@ -340,6 +395,11 @@ final class Server implements AutoCloseable {
         } catch (HStoreException failure) {
             LOG.log(System.Logger.Level.INFO, "connection {0}: {1}", connection, failure.getMessage());
             return "error [" + failure.code() + "]: " + failure.getMessage();
+        }
+        if (statements.stream().anyMatch(sourced -> sourced.statement() instanceof Statement.Authenticate)) {
+            LOG.log(System.Logger.Level.WARNING, "connection {0} sent a clear-text password, which is refused; the client needs an upgrade",
+                    connection);
+            return "error [AUTHENTICATION_FAILED]: " + UPGRADE;
         }
         for (Parser.Sourced sourced : statements) {
             Statement statement = sourced.statement();

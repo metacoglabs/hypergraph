@@ -14,7 +14,7 @@ last step of shutdown, which also removes the `hstore-0.log.lck` lock file.
 ## Line format
 
 ```
-2026-10-04 06:33:30.334 IST [28997] LOG:  [server] connection 2 authorized: user=admin tenant=0 role=ADMIN
+2026-10-04 06:33:30.334 IST [28997] LOG:  [server] connection 2 authorized: user=admin tenant=0 role=ADMIN method=SCRAM-SHA-256
 └──────────── timestamp ───────────┘ └pid┘ └sev┘  └component┘ └──────────────── message ────────────────┘
 ```
 
@@ -129,7 +129,9 @@ and in Docker it is the last line of `docker logs`. The storage-integrity failur
 | Severity | Message |
 |---|---|
 | LOG | `connection {n} received from /{ip}:{port}` |
-| LOG | `connection {n} authorized: user={user} tenant={tenantId} role={ROLE}` |
+| LOG | `connection {n} authorized: user={user} tenant={tenantId} role={ROLE} method={SCRAM-SHA-256 or SCRAM-SHA-256-PLUS}` |
+| WARNING | `connection {n} from /{ip}:{port} sent a clear-text password, which is refused; the client needs an upgrade`: a client older than 0.2.0 tried `AUTHENTICATE`. |
+| WARNING | `connection {n} from /{ip}:{port}: SASL sign-in failed: {reason}`: a malformed or throttled SCRAM exchange. |
 | WARNING | `password authentication failed for user "{user}" from /{ip}:{port}` (logged whatever `log_connections` says). Control characters in the user name, as in every log message, are written as `\n`, `\r` or `\uXXXX`. |
 | WARNING | `connection {n} from /{ip}:{port} closed after 5 failed authentication attempts`: any five rejected requests (wrong password or not `AUTHENTICATE`) before login close the connection. |
 | LOG | `disconnection: connection {n} from /{ip}:{port} session time {ms} ms` |

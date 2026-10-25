@@ -684,6 +684,12 @@ show          = "SHOW" ( "TENANTS" | "USERS" ) ;                                
 `SHOW TENANTS` columns: `id, name, atoms, edges, payload bytes, max atoms, max edges`; `SHOW USERS`: `user,
 tenant, role` (tenant id). The tenancy model is specified in [security](security.md).
 
+A password must be 8 to 1,024 characters long. In its place `CREATE USER` and `ALTER USER` accept a SCRAM-SHA-256
+verifier (`hstore verifier` prints one), so the password never reaches the server. `AUTHENTICATE` works in
+embedded sessions (`hstore shell`, `hstore exec`, the Java API) and in Studio's console. The wire protocol refuses
+it, because it would carry the password in clear text; clients sign in there with SCRAM, and `hstore connect`
+turns an `AUTHENTICATE` typed at its prompt into that exchange ([wire protocol](../operations/wire-protocol.md#authentication)).
+
 ```sql
 CREATE TENANT clinic_b QUOTA (atoms 3, edges 1);
 ALTER TENANT clinic_b QUOTA (payload_bytes 1048576, query_pages 100000);

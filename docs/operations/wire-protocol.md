@@ -56,8 +56,10 @@ sequenceDiagram
     else accepted
         S-->>C: banner "hstore connection 6 at generation 159; authentication required"
         loop until authenticated
-            C->>S: "AUTHENTICATE admin PASSWORD 'pw-secret'"
-            S-->>C: "authenticated as admin" or "error [AUTHENTICATION_FAILED]: authentication failed"
+            C->>S: "SASL SCRAM-SHA-256 <base64 client-first-message>"
+            S-->>C: "sasl <base64 server-first-message>"
+            C->>S: "SASL <base64 client-final-message>"
+            S-->>C: "authenticated as admin" and "sasl <base64 server-final-message>", or "error [AUTHENTICATION_FAILED]: authentication failed"
         end
         Note over C,S: the 5th rejected request closes the connection
         loop requests
@@ -80,23 +82,52 @@ or when it is `auto` and at least one user exists.
 
 ### Authentication
 
-While a connection is unauthenticated, each request must contain exactly one `AUTHENTICATE` statement:
+Clients sign in with SCRAM-SHA-256 ([RFC 5802](https://www.rfc-editor.org/rfc/rfc5802),
+[RFC 7677](https://www.rfc-editor.org/rfc/rfc7677)), the same mechanism PostgreSQL uses. The password never
+crosses the connection: the client proves that it knows it, and the server proves in turn that it holds the
+user's verifier, so a client also detects a server that only pretends to be the database. The exchange takes two
+requests. Each SCRAM message travels base64-encoded on one line:
 
-```
-AUTHENTICATE <user> PASSWORD '<password>'
-```
+| Step | Client sends | Server answers |
+|---|---|---|
+| 1 | `SASL <mechanism> <base64 client-first-message>` | `sasl <base64 server-first-message>` |
+| 2 | `SASL <base64 client-final-message>` | `authenticated as <user>` and, on a second line, `sasl <base64 server-final-message>` |
 
-`<user>` is an identifier or a quoted string. Inside quoted strings, `'` is escaped as `''`. Possible
-replies:
+`<mechanism>` is `SCRAM-SHA-256`, or `SCRAM-SHA-256-PLUS` on a TLS connection. With `-PLUS` the client uses
+the `tls-server-end-point` channel binding ([RFC 5929](https://www.rfc-editor.org/rfc/rfc5929)): it hashes the
+server's certificate, with SHA-256 unless the certificate is signed with SHA-384 or SHA-512, and mixes the hash
+into its proof. A proof relayed through a man in the middle, which presents a different certificate, then fails.
+The server rejects `-PLUS` without TLS, and on a TLS connection it rejects a client that announces channel binding
+support (gs2 flag `y`) without using it, since that means someone stripped it.
+
+The client must check the server's final message, `v=<server signature>`, before it trusts the connection.
+Passwords are hashed as UTF-8 without SASLprep normalisation, authorization identities and SCRAM extensions are
+not supported, and the iteration count is 600,000 for passwords set by this version (at least 4,096 for verifiers
+created elsewhere), so a client spends about half a second deriving the key.
+
+A user that does not exist gets a well-formed `server-first-message` with a salt derived from the user name and a
+secret kept in the database, the same every time, and fails only at the second step, exactly like a wrong
+password.
+
+Possible replies:
 
 | Reply | Meaning |
 |---|---|
-| `authenticated as <user>` | The session now runs as that user's principal (tenant and role). |
-| `error [AUTHENTICATION_FAILED]: authentication failed` | Unknown user or wrong password. |
-| `error [AUTHENTICATION_REQUIRED]: authenticate first: AUTHENTICATE <user> PASSWORD '<password>'` | Any other statement. |
-| `error [INVALID_SCHEMA]: syntax error …` | The request did not parse. |
+| `sasl …` | Continue with the next step. |
+| `authenticated as <user>` / `sasl …` | The session now runs as that user's principal (tenant and role). |
+| `error [AUTHENTICATION_FAILED]: authentication failed` | Unknown user or wrong password, answered after `authentication_failure_delay_ms`. |
+| `error [AUTHENTICATION_FAILED]: malformed SCRAM message: …`, `unsupported SASL mechanism …` | The client sent something the server cannot use. |
+| `error [AUTHENTICATION_FAILED]: this server no longer accepts passwords in clear text; upgrade your HStore client to version 0.2.0 or later, which signs in with SCRAM-SHA-256` | The client sent `AUTHENTICATE <user> PASSWORD '…'`, which older clients used. The password is not checked. |
+| `error [AUTHENTICATION_REQUIRED]: authenticate first with SASL SCRAM-SHA-256; see the wire protocol documentation` | Any other request. |
+| `error [ABORTED_RESOURCE_LIMIT]: too many failed sign-in attempts; …` | The throttle described below. |
 
-Every rejected request counts as a failed attempt. After `MAX_AUTHENTICATION_ATTEMPTS` = 5 failures, the
+An `AUTHENTICATE` statement is refused with the same upgrade message on an authenticated connection too; send a
+new SASL exchange to switch users. `hstore connect` turns an `AUTHENTICATE` typed in its shell into that
+exchange. `CREATE USER` and `ALTER USER … PASSWORD` still carry the password in the statement; use TLS for them,
+or pass a SCRAM verifier made on the client (`hstore verifier`, the format is
+`SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>` as in PostgreSQL) in place of the password.
+
+Every rejected request before sign-in counts as a failed attempt. After `MAX_AUTHENTICATION_ATTEMPTS` = 5 failures, the
 server logs a WARNING and closes the connection without replying further. Clients must reconnect to try
 again. `AUTHENTICATION_FAILED` and `AUTHENTICATION_REQUIRED` occur only in this handshake. They are protocol
 codes, not `HStoreException` codes.
@@ -107,7 +138,6 @@ request gets `AUTHENTICATION_REQUIRED`. An authenticated session may send `AUTHE
 outside a transaction only. That clears its variables and returns it to main. A session that fails 5 such attempts
 refuses further `AUTHENTICATE` statements.
 
-Passwords are verified with PBKDF2-HMAC-SHA256 (600,000 iterations for passwords set since the count was raised).
 A failed attempt is answered after `authentication_failure_delay_ms` (default 500). Every sign-in path shares one
 throttle: after 10 failures for a user name from one address, or 20 from one address over all names, within 15
 minutes, further attempts from that address get `error [ABORTED_RESOURCE_LIMIT]: too many failed sign-in
@@ -206,11 +236,16 @@ S: hstore connection 6 at generation 159; authentication required
 S: .
 C: SHOW TYPES;
 C: .
-S: error [AUTHENTICATION_REQUIRED]: authenticate first: AUTHENTICATE <user> PASSWORD '<password>'
+S: error [AUTHENTICATION_REQUIRED]: authenticate first with SASL SCRAM-SHA-256; see the wire protocol documentation
 S: .
-C: AUTHENTICATE admin PASSWORD 'pw-secret'
+C: SASL SCRAM-SHA-256 biwsbj1hZG1pbixyPWVwSmszWWlmWFVzSHVOaG51a2llMlExSw==
+C: .
+S: sasl cj1lcEprM1lpZlhVc0h1TmhudWtpZTJRMUtEZ2xDdGNNOFpLUTNpc3dtaGh1M2Fkdysscz1wZklhOHhpVVBFQUFlUnUreW9tMElBPT0saT02MDAwMDA=
+S: .
+C: SASL Yz1iaXdzLHI9ZXBKazNZaWZYVXNIdU5obnVraWUyUTFLRGdsQ3RjTThaS1EzaXN3bWhodTNhZHcrLHA9STNPN1V0alNHNlFFSXRJYURYalFzY1pXd25RUTNLMFphMm9VMUdJbk1KVT0=
 C: .
 S: authenticated as admin
+S: sasl dj1TbG1KOXMrVmVpZWVjMGprUjg0ZUU3ZHAxclVlbmNIVFVjUTJTb1l5eUpJPQ==
 S: .
 C: FORMAT JSON; MATCH NODE d:Drug WHERE d.class = 'statin' RETURN d.name;
 C: .
@@ -234,23 +269,71 @@ S: .
 
 ## Writing a client
 
-A complete client needs only a socket and the two framing functions. In Python:
+A complete client needs only a socket, the two framing functions and SCRAM, all from the Python standard
+library. Pass `tls_ca` (a CA or the server's own certificate) when the server runs with `tls = on`; the client
+then uses channel binding. The certificate hash below is SHA-256, which is right for certificates signed with
+SHA-256 (the usual case).
 
 ```python
+import base64
+import hashlib
+import hmac
+import os
 import socket
+import ssl
+
+
+def b64(text):
+    return base64.b64encode(text.encode()).decode()
+
+
+def unb64(text):
+    return base64.b64decode(text).decode()
+
 
 class HStore:
-    def __init__(self, host="127.0.0.1", port=7432, user=None, password=None):
-        self.stream = socket.create_connection((host, port)).makefile("rwb")
+    def __init__(self, host="127.0.0.1", port=7432, user=None, password=None, tls_ca=None):
+        self.sock = socket.create_connection((host, port))
+        if tls_ca:
+            context = ssl.create_default_context(cafile=tls_ca)
+            self.sock = context.wrap_socket(self.sock, server_hostname=host)
+        self.stream = self.sock.makefile("rwb")
         self.banner = self._receive()
         if self.banner.startswith("error"):
             raise ConnectionError(self.banner)
         if self.banner.endswith("authentication required"):
-            quote = lambda s: "'" + s.replace("'", "''") + "'"
-            reply = self.execute(f"AUTHENTICATE {quote(user)} PASSWORD {quote(password)}")
-            if reply.startswith("error"):
-                raise PermissionError(reply)
+            self._sign_in(user, password)
         self.execute("FORMAT JSON;")
+
+    def _sign_in(self, user, password):
+        binding = None
+        if isinstance(self.sock, ssl.SSLSocket):
+            binding = hashlib.sha256(self.sock.getpeercert(binary_form=True)).digest()
+        header = "p=tls-server-end-point,," if binding else "n,,"
+        nonce = base64.b64encode(os.urandom(18)).decode()
+        first_bare = "n=" + user.replace("=", "=3D").replace(",", "=2C") + ",r=" + nonce
+        mechanism = "SCRAM-SHA-256-PLUS" if binding else "SCRAM-SHA-256"
+        reply = self.execute(f"SASL {mechanism} {b64(header + first_bare)}")
+        if not reply.startswith("sasl "):
+            raise PermissionError(reply)
+        server_first = unb64(reply[5:])
+        fields = dict(part.split("=", 1) for part in server_first.split(","))
+        if not fields["r"].startswith(nonce) or int(fields["i"]) < 4096:
+            raise PermissionError("unexpected server-first-message")
+        salted = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(fields["s"]), int(fields["i"]))
+        client_key = hmac.digest(salted, b"Client Key", "sha256")
+        without_proof = "c=" + base64.b64encode(header.encode() + (binding or b"")).decode() + ",r=" + fields["r"]
+        auth_message = f"{first_bare},{server_first},{without_proof}".encode()
+        signature = hmac.digest(hashlib.sha256(client_key).digest(), auth_message, "sha256")
+        proof = base64.b64encode(bytes(a ^ b for a, b in zip(client_key, signature))).decode()
+        reply = self.execute(f"SASL {b64(without_proof + ',p=' + proof)}")
+        if reply.startswith("error"):
+            raise PermissionError(reply)
+        status, final = reply.split("\n", 1)
+        server_key = hmac.digest(salted, b"Server Key", "sha256")
+        expected = "v=" + base64.b64encode(hmac.digest(server_key, auth_message, "sha256")).decode()
+        if not hmac.compare_digest(unb64(final[5:]), expected):
+            raise PermissionError("the server could not prove that it knows the password")
 
     def execute(self, script):
         for line in script.split("\n"):

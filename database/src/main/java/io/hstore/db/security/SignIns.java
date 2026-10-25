@@ -47,7 +47,41 @@ public final class SignIns {
         this.clock = clock;
     }
 
-    public <T> Optional<T> attempt(String user, Optional<String> origin, Supplier<Optional<T>> check) {
+    public final class Reservation {
+        private final String user;
+        private final Key account;
+        private final List<Key> keys;
+        private final long now;
+        private boolean settled;
+
+        private Reservation(String user, Key account, List<Key> keys, long now) {
+            this.user = user;
+            this.account = account;
+            this.keys = keys;
+            this.now = now;
+        }
+
+        public String user() {
+            return user;
+        }
+
+        public void succeeded() {
+            if (!settled) {
+                settled = true;
+                windows.remove(account.name());
+                keys.stream().filter(key -> key != account).forEach(SignIns.this::release);
+            }
+        }
+
+        public void failed() {
+            if (!settled) {
+                settled = true;
+                SignIns.this.failed(user, now);
+            }
+        }
+    }
+
+    public Reservation reserve(String user, Optional<String> origin) {
         Key account = new Key(origin.map(address -> "account:" + user + "\n" + address).orElse("account:" + user), accountLimit);
         List<Key> keys = Stream.concat(Stream.of(account), origin.map(address -> new Key("origin:" + address, originLimit)).stream()).toList();
         long now = clock.getAsLong();
@@ -59,12 +93,22 @@ public final class SignIns {
                 throw HStoreException.limit("too many failed sign-in attempts; try again in " + wait + " seconds");
             }
         }
-        Optional<T> result = check.get();
+        return new Reservation(user, account, keys, now);
+    }
+
+    public <T> Optional<T> attempt(String user, Optional<String> origin, Supplier<Optional<T>> check) {
+        Reservation reservation = reserve(user, origin);
+        Optional<T> result;
+        try {
+            result = check.get();
+        } catch (RuntimeException failure) {
+            reservation.failed();
+            throw failure;
+        }
         if (result.isPresent()) {
-            windows.remove(account.name());
-            keys.stream().filter(key -> key != account).forEach(this::release);
+            reservation.succeeded();
         } else {
-            failed(user, now);
+            reservation.failed();
         }
         return result;
     }
