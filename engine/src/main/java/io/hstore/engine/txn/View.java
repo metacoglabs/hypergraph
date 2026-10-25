@@ -119,10 +119,12 @@ public abstract sealed class View permits Snapshot, Transaction {
     }
 
     public PostingCursor<IndexValues.Incident> incidentCursor(long atom) {
+        observeKey(EngineSlots.REVERSE, atom);
         return EngineSlots.REVERSE_INDEX.cursor(lazyTree(EngineSlots.REVERSE), atom);
     }
 
     public PostingCursor<IndexValues.Incident> incidentCursor(long atom, Predicate<? super IndexValues.Incident> accept) {
+        observeKey(EngineSlots.REVERSE, atom);
         return EngineSlots.REVERSE_INDEX.cursor(lazyTree(EngineSlots.REVERSE), atom, accept);
     }
 
