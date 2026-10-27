@@ -42,6 +42,7 @@ public final class Session implements AutoCloseable {
     private int failedAuthentications;
     private Optional<ScramAttempt> scram = Optional.empty();
     private Optional<String> scramUser = Optional.empty();
+    private Optional<String> clearTextRefusal = Optional.empty();
 
     private record ScramAttempt(Scram.Server server, SignIns.Reservation reservation) {
     }
@@ -125,6 +126,10 @@ public final class Session implements AutoCloseable {
 
     public Optional<String> scramUser() {
         return scramUser;
+    }
+
+    public void refuseClearTextPasswords(String reason) {
+        clearTextRefusal = Optional.of(reason);
     }
 
     private void requireCanAuthenticate() {
@@ -219,6 +224,9 @@ public final class Session implements AutoCloseable {
                 yield QueryResult.message("using tenant " + tenant.name());
             }
             case Statement.Authenticate(String user, String password) -> {
+                if (clearTextRefusal.isPresent()) {
+                    throw HStoreException.invalid(clearTextRefusal.get());
+                }
                 if (!authenticate(user, password)) {
                     throw HStoreException.invalid("authentication failed for user " + user);
                 }

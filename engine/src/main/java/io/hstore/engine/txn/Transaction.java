@@ -140,6 +140,11 @@ public final class Transaction extends View implements AutoCloseable {
     }
 
     @Override
+    public boolean recordsReads() {
+        return recording();
+    }
+
+    @Override
     void observeAtom(long atom, Optional<AtomRecord> record) {
         if (!recording() || slotReads.contains(EngineSlots.CATALOG) || atomReads.containsKey(atom)) {
             return;

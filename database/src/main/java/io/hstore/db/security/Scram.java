@@ -29,7 +29,9 @@ public final class Scram {
     public static final String MECHANISM = "SCRAM-SHA-256";
     public static final String MECHANISM_PLUS = "SCRAM-SHA-256-PLUS";
     public static final String CHANNEL_BINDING = "tls-server-end-point";
-    private static final String PREFIX = "SCRAM-SHA-256$";
+    public static final String PREFIX = "SCRAM-SHA-256$";
+    public static final int MIN_ITERATIONS = 4096;
+    public static final int MAX_ITERATIONS = 10_000_000;
     private static final int NONCE_BYTES = 18;
     private static final int MAX_MESSAGE = 4096;
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -42,7 +44,7 @@ public final class Scram {
     public record Verifier(int iterations, byte[] salt, byte[] storedKey, byte[] serverKey) {
 
         public static Verifier of(String password, byte[] salt, int iterations) {
-            return fromSaltedPassword(saltedPassword(password, salt, iterations), salt, iterations);
+            return fromSaltedPassword(saltedPassword(SaslPrep.prepare(password), salt, iterations), salt, iterations);
         }
 
         public static Verifier fromSaltedPassword(byte[] saltedPassword, byte[] salt, int iterations) {
@@ -67,7 +69,7 @@ public final class Scram {
                 byte[] salt = DECODE.decode(head[1]);
                 byte[] stored = DECODE.decode(keys[0]);
                 byte[] server = DECODE.decode(keys[1]);
-                if (iterations < 1 || salt.length == 0 || stored.length != 32 || server.length != 32) {
+                if (iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS || salt.length == 0 || stored.length != 32 || server.length != 32) {
                     return Optional.empty();
                 }
                 return Optional.of(new Verifier(iterations, salt, stored, server));
@@ -82,7 +84,7 @@ public final class Scram {
         }
 
         public boolean matches(String password) {
-            byte[] salted = saltedPassword(password, salt, iterations);
+            byte[] salted = saltedPassword(SaslPrep.prepare(password), salt, iterations);
             return MessageDigest.isEqual(sha256(hmac(salted, "Client Key")), storedKey);
         }
 
@@ -248,13 +250,13 @@ public final class Scram {
             } catch (NumberFormatException e) {
                 throw malformed("iteration count is not a number");
             }
-            if (iterations < 4096 || iterations > 10_000_000) {
-                throw malformed("iteration count " + iterations + " is outside 4096 to 10000000");
+            if (iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS) {
+                throw malformed("iteration count " + iterations + " is outside " + MIN_ITERATIONS + " to " + MAX_ITERATIONS);
             }
             byte[] bindData = concat(header.getBytes(StandardCharsets.UTF_8), channelBinding.orElse(new byte[0]));
             String withoutProof = "c=" + ENCODE.encodeToString(bindData) + ",r=" + combined;
             String authMessage = firstBare + "," + serverFirst + "," + withoutProof;
-            byte[] salted = saltedPassword(password, salt, iterations);
+            byte[] salted = saltedPassword(SaslPrep.prepare(password), salt, iterations);
             byte[] clientKey = hmac(salted, "Client Key");
             byte[] proof = xor(clientKey, hmac(sha256(clientKey), authMessage));
             serverSignature = hmac(hmac(salted, "Server Key"), authMessage);
