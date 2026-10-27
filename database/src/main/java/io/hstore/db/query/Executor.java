@@ -136,7 +136,7 @@ final class Executor {
             }
             case Statement.CreateTenant(String name, Map<String, Long> quota) -> write(writer -> {
                 Map<String, Long> limits = new LinkedHashMap<>(quota);
-                Long connections = limits.remove("connections");
+                Long connections = removeConnections(limits);
                 Security.Tenant tenant = Security.createTenant(writer.transaction(), name, Quota.UNLIMITED.with(limits));
                 if (connections != null) {
                     Access.setTenantConnectionLimit(writer.transaction(), tenant.id(), connections);
@@ -146,7 +146,7 @@ final class Executor {
             case Statement.AlterTenant(String name, Map<String, Long> quota) -> write(writer -> {
                 Security.Tenant tenant = Security.requireTenant(writer.engineView(), name);
                 Map<String, Long> limits = new LinkedHashMap<>(quota);
-                Long connections = limits.remove("connections");
+                Long connections = removeConnections(limits);
                 Security.setQuota(writer.transaction(), tenant, tenant.quota().with(limits));
                 if (connections != null) {
                     Access.setTenantConnectionLimit(writer.transaction(), tenant.id(), connections);
@@ -155,16 +155,13 @@ final class Executor {
             });
             case Statement.CreateUser(String name, String password, Optional<String> tenant, var role, var validUntil, var connectionLimit) ->
                     write(writer -> {
-                        int home = governedTenant(writer, tenant);
-                        if (home == Principal.DEFAULT_TENANT && role == Role.ADMIN && validUntil.isPresent() && validUntil.getAsLong() != Long.MAX_VALUE) {
-                            Security.keepAnotherGlobalAdmin(writer.transaction(), name);
-                        }
-                        Security.createUser(writer.transaction(), name, password, home, role);
+                        Security.createUser(writer.transaction(), name, password, governedTenant(writer, tenant), role);
                         Access.forget(writer.transaction(), name);
                         if (validUntil.isPresent() || connectionLimit.isPresent()) {
                             Access.setOptions(writer.transaction(), new Access.Options(name, validUntil.orElse(Long.MAX_VALUE),
                                     (int) connectionLimit.orElse(-1)));
                         }
+                        Security.keepAGlobalAdmin(writer.transaction());
                         return QueryResult.message("created user " + name + " with role " + role);
                     });
             case Statement.AlterUser alter -> write(writer -> alterUser(writer, alter));
@@ -173,10 +170,8 @@ final class Executor {
                 if (!session.principal().global() && Security.users(writer.engineView()).size() <= 1) {
                     throw HStoreException.invalid("cannot drop the last user: the server would stop asking for credentials");
                 }
-                if (Security.globalAdmin(user) && Security.users(writer.engineView()).size() > 1) {
-                    Security.keepAnotherGlobalAdmin(writer.transaction(), name);
-                }
                 Security.dropUser(writer.transaction(), name);
+                Security.keepAGlobalAdmin(writer.transaction());
                 return QueryResult.message("dropped user " + name);
             });
             case Statement.Grant(Access.Privilege privilege, Optional<String> type, String name) -> write(writer -> {
@@ -427,18 +422,25 @@ final class Executor {
                 .orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
     }
 
+    private static Long removeConnections(Map<String, Long> limits) {
+        Long connections = null;
+        for (String key : List.copyOf(limits.keySet())) {
+            if (key.equalsIgnoreCase("connections")) {
+                connections = limits.remove(key);
+            }
+        }
+        return connections;
+    }
+
     private QueryResult alterUser(Writer writer, Statement.AlterUser alter) {
         Security.User user = governedUser(writer, alter.name());
-        boolean attributes = alter.role().isPresent() || alter.validUntil().isPresent() || alter.connectionLimit().isPresent();
+        boolean attributes = alter.role().isPresent() || alter.validUntil().isPresent() || alter.connectionLimit().isPresent()
+                || alter.password().isPresent() && !user.name().equals(session.principal().user());
         if (attributes && user.role() == Role.ADMIN && !session.principal().global()) {
             throw HStoreException.invalid("only an admin of the default tenant can change the role, password expiry or connection limit "
-                    + "of an admin");
+                    + "of an admin, or the password of another admin");
         }
-        boolean demoted = alter.role().filter(role -> role != Role.ADMIN).isPresent();
-        boolean expires = alter.validUntil().isPresent() && alter.validUntil().getAsLong() != Long.MAX_VALUE;
-        if (Security.globalAdmin(user) && (demoted || expires)) {
-            Security.keepAnotherGlobalAdmin(writer.transaction(), user.name());
-        }
+        Security.keepUnchanged(writer.transaction(), user);
         List<String> changes = new ArrayList<>();
         alter.role().filter(role -> role != user.role()).ifPresent(role -> {
             Security.setRole(writer.transaction(), user.name(), role);
@@ -449,15 +451,13 @@ final class Executor {
             changes.add("password");
         });
         if (alter.validUntil().isPresent() || alter.connectionLimit().isPresent()) {
-            if (alter.role().isEmpty() && alter.password().isEmpty()) {
-                Security.keepUnchanged(writer.transaction(), user);
-            }
             Access.Options current = Access.options(writer.engineView(), user.name());
             Access.setOptions(writer.transaction(), new Access.Options(user.name(), alter.validUntil().orElse(current.validUntil()),
                     (int) alter.connectionLimit().orElse(current.connectionLimit())));
             alter.validUntil().ifPresent(_ -> changes.add("password expiry"));
             alter.connectionLimit().ifPresent(_ -> changes.add("connection limit"));
         }
+        Security.keepAGlobalAdmin(writer.transaction());
         return QueryResult.message(changes.isEmpty() ? "nothing changed for " + user.name() : "changed " + String.join(", ", changes) + " of " + user.name());
     }
 

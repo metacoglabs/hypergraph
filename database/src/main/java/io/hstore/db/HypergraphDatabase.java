@@ -153,6 +153,13 @@ public final class HypergraphDatabase implements AutoCloseable {
                 && read(reader -> Access.holds(reader.engineView(), principal.user(), capability));
     }
 
+    public void rejoin(Principal principal) {
+        synchronized (connections) {
+            connections.merge(principal.user(), 1, Integer::sum);
+            tenantConnections.merge(principal.home(), 1, Integer::sum);
+        }
+    }
+
     public void leave(Principal principal) {
         synchronized (connections) {
             connections.computeIfPresent(principal.user(), (_, count) -> count <= 1 ? null : count - 1);

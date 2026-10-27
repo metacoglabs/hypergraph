@@ -85,31 +85,38 @@ DDL stay with global admins.
 - `CONNECTION LIMIT n` caps the user's signed-in sessions (wire connections, Studio sessions and embedded sessions
   that authenticated) at `n`; `-1` means no limit. The next sign-in fails with `ABORTED_RESOURCE_LIMIT: too many
   connections for user u`. Global admins are exempt, as PostgreSQL exempts superusers. A session that signs in
-  again as the same user keeps its one count. A Studio session gives its count back when it closes, after
+  again gives back its old count before it takes the new one, so signing in again as the same user works at
+  `CONNECTION LIMIT 1`, and a user dropped and created in another tenant is counted there. A closed session runs
+  no further statement. A Studio session gives its count back when it closes, after
   `studio_session_minutes` without requests, or after 12 hours, whichever comes first; a background sweep notices
   idle sessions even when nobody uses Studio.
 - A per-user limit binds that user only. A tenant admin can create users, including other admins of its tenant,
   so to cap a whole tenant use the tenant's `connections` quota: `CREATE TENANT t QUOTA (connections 20)` or
-  `ALTER TENANT t QUOTA (connections 20)` (`-1` removes it). It counts every signed-in session of the tenant's users
+  `ALTER TENANT t QUOTA (connections 20)` (`-1` removes it; like every quota key, `connections` ignores case). It counts every signed-in session of the tenant's users
   and fails the next sign-in with `too many connections for tenant #id`. Only global admins change quotas.
 - User options live in slot `USER_OPTIONS` = 76 (schema 111) and tenant limits in `TENANT_OPTIONS` = 77 (schema
   112); a user or tenant without an entry has no expiry and no limit. `CREATE USER` clears any entry left under
   its name, and `GRANT`, `REVOKE` and `ALTER USER` place a commit-time precondition on the user's record, so a
-  grant or option that races `DROP USER` fails instead of passing to the next user created with that name.
+  grant or option that commits after a concurrent `DROP USER` fails. One that commits just before the `DROP USER`
+  can be left without a user, since the drop only removes the grants it saw; such a row is never shown by `SHOW
+  GRANTS` and never reaches a later user of that name, because `CREATE USER` clears it.
 
 ### Changing roles
 
 `ALTER USER u ROLE r` changes the role; `u`'s open sessions then fail with "authenticate again" until they sign in
 again, so the new role applies at once. Only a global admin may change the role, password expiry or connection
-limit of an ADMIN, so a tenant admin cannot lift limits put on itself or on another admin of its tenant.
+limit of an ADMIN, or the password of an ADMIN other than itself, so a tenant admin cannot lift limits put on
+itself or take over another admin of its tenant.
 
-The default tenant must keep an ADMIN whose password never expires. A change that would leave none (dropping one
-while other users exist, giving it another role, giving its password any `VALID UNTIL` other than `'infinity'`,
-or creating the first global admin with one) is refused: any expiry date eventually passes, so checking only
-that the password still works today would let a date one second ahead lock everyone out. The statement also
-places a commit-time precondition on the role record and the options record of every other such admin, so two
-concurrent transactions that each remove or expire a different admin cannot both commit, whichever records they
-write. Should every admin still be lost (for example to a forgotten password), `hstore shell` on
+While any user exists, the default tenant must keep an ADMIN whose password never expires. Every `CREATE USER`,
+`ALTER USER` and `DROP USER` checks this against the state it leaves behind and is refused if none would remain:
+dropping or demoting the last one, giving its password any `VALID UNTIL` other than `'infinity'`, or creating
+users in a database that has no such admin (so the first user must be one). Any expiry date eventually passes,
+so checking only that a password still works today would let a date one second ahead lock everyone out. The
+statement also places a commit-time precondition on the role record and the options record of every remaining
+such admin, so concurrent transactions that each remove or expire a different admin, or that create a user while
+another drops the last admin, cannot all commit, whichever records they write. Dropping the last user is allowed
+for a global admin and turns authentication off again under `authentication = auto`. Should every admin still be lost (for example to a forgotten password), `hstore shell` on
 the data directory runs as the built-in `system` admin, like PostgreSQL's single-user mode.
 
 `USE MAIN` is open to everyone. Without `TENANT`, `CREATE USER` puts the new user in the session's current
@@ -199,7 +206,7 @@ Shared, non-tenant-scoped structures:
 | dictionary | interned strings | ids only; property, state schema and model names are limited to 128 characters, and only a global admin can create an embedding model |
 | HNSW indexes | one per model | results filtered by `Reader.visible` ([semantic](semantic.md#tenant-visibility)); vectors must match the model's length, and a row the index cannot take is logged and skipped ([semantic](semantic.md#embedding-records)) |
 | payload store | append-only byte store | payloads are reachable only through tenant-checked properties and embeddings |
-| branches, history, statistics | engine-level | global admins only (`USE BRANCH`, `SHOW BRANCHES`, `MERGE`, `STATS`, `HISTORY`, `DIFF`; Studio `/api/stats` and `/api/history`) |
+| branches, history, statistics | engine-level | global admins only (`USE BRANCH`, `SHOW BRANCHES`, `MERGE`, `HISTORY`, `DIFF`; Studio `/api/history`); `STATS` and Studio `/api/stats` also for users with `MONITOR`, `CHECKPOINT` and `COMPACT` also for users with `MAINTAIN` |
 
 ```sql
 CREATE TENANT clinic_b;

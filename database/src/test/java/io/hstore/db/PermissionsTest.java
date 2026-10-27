@@ -327,6 +327,83 @@ class PermissionsTest {
     }
 
     @Test
+    void everyChangeLeavesAGlobalAdmin(@TempDir Path elsewhere) {
+        try (HypergraphDatabase fresh = HypergraphDatabase.open(elsewhere); Session system = new Session(fresh)) {
+            assertThrows(HStoreException.InvalidSchema.class, () -> system.execute("CREATE USER bob PASSWORD 'bob-password' ROLE reader"));
+            system.execute("CREATE USER root PASSWORD 'root-password' ROLE admin");
+            system.execute("BEGIN");
+            system.execute("DROP USER root");
+            assertThrows(HStoreException.InvalidSchema.class, () -> system.execute("CREATE USER bob PASSWORD 'bob-password' ROLE reader"));
+            system.execute("ROLLBACK");
+            try (Session dropping = new Session(fresh); Session creating = new Session(fresh)) {
+                dropping.execute("BEGIN");
+                creating.execute("BEGIN");
+                dropping.execute("DROP USER root");
+                creating.execute("CREATE USER bob PASSWORD 'bob-password' ROLE reader");
+                dropping.execute("COMMIT");
+                assertThrows(HStoreException.class, () -> creating.execute("COMMIT"));
+            }
+            assertEquals(List.of(), fresh.read(reader -> Security.users(reader.engineView())));
+        }
+    }
+
+    @Test
+    void restatingARoleStillGuardsAgainstARacingDrop() {
+        try (Session altering = new Session(database)) {
+            altering.execute("BEGIN");
+            altering.execute("ALTER USER ops ROLE reader VALID UNTIL '2000-01-01'");
+            admin.execute("DROP USER ops");
+            admin.execute("CREATE USER ops PASSWORD 'ops-new-password' ROLE reader");
+            assertThrows(HStoreException.class, () -> altering.execute("COMMIT"));
+        }
+        assertTrue(new Session(database).authenticate("ops", "ops-new-password"));
+    }
+
+    @Test
+    void signingInAgainAsARecreatedUserCountsInItsNewTenant() {
+        admin.executeAll("""
+                CREATE TENANT a;
+                CREATE TENANT b QUOTA (CONNECTIONS 1);
+                CREATE USER mover PASSWORD 'mover-password' TENANT a ROLE reader;
+                CREATE USER filler PASSWORD 'filler-password' TENANT b ROLE reader;
+                """);
+        int a = database.read(reader -> Security.requireTenant(reader.engineView(), "a").id());
+        int b = database.read(reader -> Security.requireTenant(reader.engineView(), "b").id());
+        try (Session mover = login("mover", "mover-password"); Session filler = login("filler", "filler-password")) {
+            assertTrue(filler.authenticated());
+            admin.executeAll("DROP USER mover; CREATE USER mover PASSWORD 'mover-password' TENANT b ROLE reader;");
+            assertThrows(HStoreException.ResourceLimit.class, () -> mover.authenticate("mover", "mover-password"));
+            assertEquals(1, database.tenantConnections(a));
+            assertEquals(1, database.tenantConnections(b));
+        }
+        assertEquals(0, database.tenantConnections(a));
+        assertEquals(0, database.tenantConnections(b));
+        admin.execute("ALTER TENANT b QUOTA (Connections -1)");
+    }
+
+    @Test
+    void aClosedSessionRunsNothing() {
+        Session ops = login("ops", "ops-password");
+        ops.close();
+        assertThrows(HStoreException.InvalidSchema.class, () -> ops.execute("BEGIN"));
+        assertEquals(0, database.connections("ops"));
+    }
+
+    @Test
+    void tenantAdminsChangeOnlyTheirOwnAdminPassword() {
+        admin.executeAll("""
+                CREATE TENANT acme;
+                CREATE USER boss PASSWORD 'boss-password' TENANT acme ROLE admin;
+                CREATE USER peer PASSWORD 'peer-password' TENANT acme ROLE admin;
+                """);
+        try (Session boss = login("boss", "boss-password")) {
+            assertThrows(HStoreException.InvalidSchema.class, () -> boss.execute("ALTER USER peer PASSWORD 'taken-over-1'"));
+            boss.execute("ALTER USER boss PASSWORD 'boss-password-2'");
+        }
+        assertTrue(new Session(database).authenticate("peer", "peer-password"));
+    }
+
+    @Test
     void concurrentExpiriesCannotLockEveryAdminOut() {
         admin.execute("CREATE USER second PASSWORD 'second-password' ROLE admin");
         try (Session root = login("root", "root-password"); Session other = login("second", "second-password")) {

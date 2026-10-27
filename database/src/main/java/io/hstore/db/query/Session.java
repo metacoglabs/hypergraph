@@ -44,6 +44,7 @@ public final class Session implements AutoCloseable {
     private Optional<ScramAttempt> scram = Optional.empty();
     private Optional<String> scramUser = Optional.empty();
     private Optional<Principal> counted = Optional.empty();
+    private boolean closed;
     private Optional<String> clearTextRefusal = Optional.empty();
 
     private record ScramAttempt(Scram.Server server, SignIns.Reservation reservation) {
@@ -145,11 +146,14 @@ public final class Session implements AutoCloseable {
     }
 
     private void signIn(Principal found) {
-        if (counted.filter(principal -> principal.user().equals(found.user())).isEmpty()) {
+        counted.ifPresent(database::leave);
+        try {
             database.enter(found);
-            counted.ifPresent(database::leave);
-            counted = Optional.of(found);
+        } catch (RuntimeException refused) {
+            counted.ifPresent(database::rejoin);
+            throw refused;
         }
+        counted = Optional.of(found);
         stale = false;
         principal = found;
         authenticated = true;
@@ -203,8 +207,11 @@ public final class Session implements AutoCloseable {
     }
 
     public QueryResult execute(Statement statement) {
+        if (closed) {
+            throw HStoreException.invalid("this session is closed");
+        }
         if (!(statement instanceof Statement.Authenticate) && !credentialsCurrent()) {
-            close();
+            release();
             stale = true;
             throw HStoreException.invalid("user " + principal.user() + " was dropped, or its password or role changed; authenticate again");
         }
@@ -364,11 +371,19 @@ public final class Session implements AutoCloseable {
 
     @Override
     public void close() {
-        transaction.ifPresent(Transaction::abort);
-        transaction = Optional.empty();
-        scram.ifPresent(pending -> pending.reservation().failed());
-        scram = Optional.empty();
-        counted.ifPresent(database::leave);
-        counted = Optional.empty();
+        closed = true;
+        release();
+    }
+
+    private void release() {
+        try {
+            transaction.ifPresent(Transaction::abort);
+        } finally {
+            transaction = Optional.empty();
+            scram.ifPresent(pending -> pending.reservation().failed());
+            scram = Optional.empty();
+            counted.ifPresent(database::leave);
+            counted = Optional.empty();
+        }
     }
 }

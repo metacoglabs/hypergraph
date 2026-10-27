@@ -50,6 +50,7 @@ final class Sessions implements AutoCloseable {
         }
     }
 
+    private static final System.Logger LOG = System.getLogger("hstore.studio");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final long LIFETIME_NANOS = Duration.ofHours(12).toNanos();
     private static final int MAX_SESSIONS = 4096;
@@ -62,7 +63,7 @@ final class Sessions implements AutoCloseable {
     Sessions(Duration idle) {
         this.idleNanos = idle.toNanos();
         long period = Math.clamp(idle.toMillis() / 4, 10, Duration.ofMinutes(1).toMillis());
-        sweeper.scheduleWithFixedDelay(this::expire, period, period, TimeUnit.MILLISECONDS);
+        sweeper.scheduleWithFixedDelay(this::sweep, period, period, TimeUnit.MILLISECONDS);
     }
 
     Entry open(Session session) {
@@ -87,14 +88,28 @@ final class Sessions implements AutoCloseable {
     }
 
     void close(String token) {
-        Optional.ofNullable(entries.remove(token)).ifPresent(entry -> entry.exclusively(session -> {
-            session.close();
-            return null;
-        }));
+        Optional.ofNullable(entries.remove(token)).ifPresent(entry -> {
+            try {
+                entry.exclusively(session -> {
+                    session.close();
+                    return null;
+                });
+            } catch (RuntimeException failure) {
+                LOG.log(System.Logger.Level.WARNING, "closing a studio session failed", failure);
+            }
+        });
     }
 
     int size() {
         return entries.size();
+    }
+
+    private void sweep() {
+        try {
+            expire();
+        } catch (RuntimeException failure) {
+            LOG.log(System.Logger.Level.WARNING, "closing idle studio sessions failed; the next sweep will try again", failure);
+        }
     }
 
     void expire() {
@@ -108,7 +123,7 @@ final class Sessions implements AutoCloseable {
 
     @Override
     public void close() {
-        sweeper.shutdownNow();
+        sweeper.shutdown();
         entries.keySet().stream().toList().forEach(this::close);
     }
 }

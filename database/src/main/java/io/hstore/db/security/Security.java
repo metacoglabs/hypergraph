@@ -254,19 +254,21 @@ public final class Security {
         return user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN;
     }
 
-    public static void keepAnotherGlobalAdmin(Transaction txn, String leaving) {
-        List<User> others = users(txn).stream()
-                .filter(user -> globalAdmin(user) && !user.name().equals(leaving) && neverExpires(Access.options(txn, user.name())))
-                .toList();
-        if (others.isEmpty()) {
-            throw HStoreException.invalid("this would leave no admin of the default tenant whose password never expires; "
-                    + "create or restore another one first");
+    public static void keepAGlobalAdmin(Transaction txn) {
+        List<User> all = users(txn);
+        if (all.isEmpty()) {
+            return;
         }
-        for (User other : others) {
-            txn.merge(USERS, userKey(other.name()), current -> current.filter(user -> user.name().equals(other.name()) && globalAdmin(user)).isPresent(),
+        List<User> admins = all.stream().filter(user -> globalAdmin(user) && neverExpires(Access.options(txn, user.name()))).toList();
+        if (admins.isEmpty()) {
+            throw HStoreException.invalid("this would leave no admin of the default tenant whose password never expires; "
+                    + "create or restore one first");
+        }
+        for (User admin : admins) {
+            txn.merge(USERS, userKey(admin.name()), current -> current.filter(user -> user.name().equals(admin.name()) && globalAdmin(user)).isPresent(),
                     current -> current);
-            txn.merge(Access.USER_OPTIONS, Hashing.of(other.name()), current -> neverExpires(current.filter(options -> options.user().equals(other.name()))
-                    .orElseGet(() -> Access.Options.defaults(other.name()))), current -> current);
+            txn.merge(Access.USER_OPTIONS, Hashing.of(admin.name()), current -> neverExpires(current.filter(options -> options.user().equals(admin.name()))
+                    .orElseGet(() -> Access.Options.defaults(admin.name()))), current -> current);
         }
     }
 
