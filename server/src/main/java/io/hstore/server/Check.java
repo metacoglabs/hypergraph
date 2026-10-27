@@ -3,19 +3,19 @@
 
 package io.hstore.server;
 
+import io.hstore.db.HypergraphDatabase;
+import io.hstore.db.security.TenantMemberships;
 import io.hstore.engine.StorageEngine;
-import io.hstore.engine.catalog.AtomRecord;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.maintenance.ReferenceCounter;
 import io.hstore.engine.tree.TreeVerifier;
 import io.hstore.engine.txn.Snapshot;
-import io.hstore.engine.txn.View;
 
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Stream;
+import java.util.stream.Collectors;
 
 final class Check {
 
@@ -25,9 +25,32 @@ final class Check {
     }
 
     static String run(StorageEngine engine) {
+        String report;
+        boolean clean;
+        boolean checked;
         try (Snapshot pinned = engine.snapshot()) {
-            return run(engine, pinned.catalog()) + "\n" + isolation(pinned);
+            List<TenantMemberships.Crossing> crossings = TenantMemberships.find(engine);
+            report = run(engine, pinned.catalog()) + "\n" + isolation(crossings);
+            clean = crossings.isEmpty();
+            checked = TenantMemberships.checked(pinned);
         }
+        if (clean && !checked) {
+            engine.write(txn -> {
+                TenantMemberships.markChecked(txn);
+                return null;
+            });
+        }
+        return report;
+    }
+
+    static String repair(HypergraphDatabase database) {
+        List<TenantMemberships.Crossing> removed = database.repairTenantMemberships();
+        if (removed.isEmpty()) {
+            return "tenant isolation: no hyperedge on any branch had a member from another tenant; nothing to repair";
+        }
+        return "tenant isolation: removed " + removed.size() + " memberships that crossed tenants:\n"
+                + removed.stream().map(crossing -> "  " + crossing.repair() + "   -- member of tenant " + crossing.memberTenant()
+                + " in an edge of tenant " + crossing.edgeTenant()).collect(Collectors.joining("\n"));
     }
 
     private static String run(StorageEngine engine, Generation generation) {
@@ -56,19 +79,14 @@ final class Check {
         return report.toString();
     }
 
-    private static String isolation(View view) {
-        List<String> crossings = view.atoms()
-                .flatMap(entry -> entry.value() instanceof AtomRecord.EdgeRecord edge
-                        ? view.edge(entry.key(), edge).memberIds()
-                        .filter(member -> view.atom(member).map(record -> record.tenant() != edge.tenant()).orElse(false))
-                        .mapToObj(member -> "  REMOVE @" + member + " FROM @" + entry.key() + "   -- member of tenant "
-                                + view.atom(member).orElseThrow().tenant() + " in an edge of tenant " + edge.tenant())
-                        : Stream.empty())
-                .toList();
+    private static String isolation(List<TenantMemberships.Crossing> found) {
+        List<String> crossings = found.stream().map(crossing -> "  " + crossing.repair() + "   -- member of tenant "
+                + crossing.memberTenant() + " in an edge of tenant " + crossing.edgeTenant()).toList();
         if (crossings.isEmpty()) {
-            return "tenant isolation: no hyperedge on main has a member from another tenant";
+            return "tenant isolation: no hyperedge on any branch has a member from another tenant";
         }
-        return "tenant isolation: " + crossings.size() + " memberships on main cross tenants; run as the edge's tenant:\n"
+        return "tenant isolation: " + crossings.size() + " memberships cross tenants; remove them with "
+                + "hstore check --repair-tenants, or run these as an admin of the default tenant:\n"
                 + String.join("\n", crossings.subList(0, Math.min(MAX_LISTED, crossings.size())))
                 + (crossings.size() > MAX_LISTED ? "\n  ... " + (crossings.size() - MAX_LISTED) + " more" : "");
     }

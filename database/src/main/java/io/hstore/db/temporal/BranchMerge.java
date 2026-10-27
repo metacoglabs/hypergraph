@@ -92,7 +92,7 @@ public final class BranchMerge {
             try (Snapshot base = database.engine().snapshotAt(branch.baseGeneration(), branch.parent());
                  Snapshot head = database.engine().snapshot(source)) {
                 Side changes = side(database.reader(base), database.reader(head), base, head);
-                List<Conflict> conflicts = conflicts(changes, side(database.reader(base), writer, base, writer.view()));
+                List<Conflict> conflicts = conflicts(changes, side(database.reader(base), writer, base, writer.engineView()));
                 requireMergeable(branch, conflicts, policy);
                 Set<Conflict> skipped = policy == Policy.TARGET ? new HashSet<>(conflicts) : Set.of();
                 return apply(writer.transaction(), database.reader(head), changes, skipped, source, target, conflicts);
@@ -197,10 +197,10 @@ public final class BranchMerge {
                     if (!txn.exists(edge)) {
                         continue;
                     }
-                    if (source.view().requireEdge(edge).kind() == EdgeKind.ORDERED) {
+                    if (source.engineView().requireEdge(edge).kind() == EdgeKind.ORDERED) {
                         boolean contested = changes.stream().anyMatch(change -> skipped.contains(new Conflict("membership", edge, change.member())));
                         if (!contested) {
-                            txn.load(edge, source.view().requireEdge(edge).stream().toList());
+                            txn.load(edge, source.engineView().requireEdge(edge).stream().toList());
                             members += changes.size();
                         }
                         continue;

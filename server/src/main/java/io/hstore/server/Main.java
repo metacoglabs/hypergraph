@@ -43,7 +43,7 @@ public final class Main {
               ping    HOST:PORT                              exit 0 when a server accepts connections
               verifier [--password PW]                       print a SCRAM-SHA-256 verifier to use as a CREATE USER password
               bench   <dir> [--scenario NAME] [--scale N]    adversarial storage benchmarks
-              check   <dir>                                  verify checksums and tree invariants
+              check   <dir> [--repair-tenants]               verify checksums and tree invariants; repair memberships across tenants
               config  [<dir>]                                print effective settings
               version
             settings are read from <dir>/hstore.conf, then HSTORE_<SETTING> variables, then --<setting> flags.
@@ -74,7 +74,7 @@ public final class Main {
         record Bench(Path directory, String scenario, int scale) implements Command {
         }
 
-        record Check(Path directory) implements Command {
+        record Check(Path directory, boolean repairTenants) implements Command {
         }
 
         record Config(Optional<Path> directory) implements Command {
@@ -159,7 +159,7 @@ public final class Main {
             case "verifier" -> new Command.Verifier(arguments.option("password").or(() -> Optional.ofNullable(environment.get("HSTORE_PASSWORD"))));
             case "bench" -> new Command.Bench(directory(arguments), arguments.option("scenario").orElse("all"),
                     Integer.parseInt(arguments.option("scale").orElse("1")));
-            case "check" -> new Command.Check(directory(arguments));
+            case "check" -> new Command.Check(directory(arguments), arguments.option("repair-tenants").isPresent());
             case "config" -> new Command.Config(arguments.positional().size() > 1 ? Optional.of(directory(arguments)) : Optional.empty());
             case "version", "--version" -> new Command.Version();
             case "help", "--help", "-h" -> new Command.Help();
@@ -250,9 +250,14 @@ public final class Main {
                 new Bench(directory, config(Optional.empty(), arguments).engineOptions(), scale).run(scenario);
                 yield 0;
             }
-            case Command.Check(Path directory) -> {
+            case Command.Check(Path directory, boolean repairTenants) -> {
                 ServerConfig config = config(Optional.of(directory), arguments);
                 Logging.configure(Level.WARNING, "", 1, 1);
+                if (repairTenants) {
+                    try (HypergraphDatabase database = HypergraphDatabase.open(directory, config.databaseOptions())) {
+                        IO.println(Check.repair(database));
+                    }
+                }
                 try (StorageEngine engine = StorageEngine.open(directory, config.engineOptions().withExtensions(
                         HypergraphDatabase.extensionSlots(), List.of()))) {
                     IO.println(Check.run(engine));
@@ -309,6 +314,10 @@ public final class Main {
         }
         Optional<SSLContext> tls = config.serverTls();
         HypergraphDatabase database = HypergraphDatabase.open(directory, config.databaseOptions());
+        if (!database.tenantMembershipsChecked()) {
+            log.log(System.Logger.Level.WARNING, "this database was written by a version that did not keep hyperedge members inside their "
+                    + "tenant; run hstore check on it to list memberships that cross tenants, and hstore check --repair-tenants to remove them");
+        }
         Server.Policy policy = Server.Policy.from(config, tls);
         Server server = new Server(database, config.address(), policy);
         Optional<Studio> studio = config.flag(Setting.STUDIO) ? Optional.of(new Studio(database, new Studio.Options(

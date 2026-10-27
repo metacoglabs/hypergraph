@@ -83,11 +83,11 @@ public final class Provenance {
     }
 
     public static Optional<Qualifier> qualifier(Reader reader, long id) {
-        return id == 0 ? Optional.empty() : reader.view().get(QUALIFIERS, id).filter(found -> found.tenant() == reader.tenant());
+        return id == 0 ? Optional.empty() : reader.engineView().get(QUALIFIERS, id).filter(found -> found.tenant() == reader.tenant());
     }
 
     public static Optional<Evidence> evidence(Reader reader, long id) {
-        return reader.view().get(EVIDENCE, id).filter(found -> found.tenant() == reader.tenant());
+        return reader.engineView().get(EVIDENCE, id).filter(found -> found.tenant() == reader.tenant());
     }
 
     public static Stream<Member> effective(Reader reader, long edge, EvidencePolicy policy) {

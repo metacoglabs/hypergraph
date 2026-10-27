@@ -89,8 +89,8 @@ public sealed interface AccessPath {
             Dictionary dictionary = reader.database().engine().dictionary();
             List<PostingCursor<IndexValues.Incident>> cursors = legs.stream()
                     .map(leg -> leg.roles().isEmpty()
-                            ? reader.view().incidentCursor(leg.atom())
-                            : reader.view().incidentCursor(leg.atom(), accepting(dictionary, leg.roles())))
+                            ? reader.incidentCursor(leg.atom())
+                            : reader.incidentCursor(leg.atom(), accepting(dictionary, leg.roles())))
                     .toList();
             return PostingCursor.intersect(cursors);
         }
@@ -118,7 +118,7 @@ public sealed interface AccessPath {
 
         public LongStream scan(Reader reader) {
             return reader.visible(edge)
-                    ? reader.view().edge(edge).map(found -> found.membership().keys()).orElseGet(LongStream::empty)
+                    ? reader.hyperedge(edge).map(found -> found.membership().keys()).orElseGet(LongStream::empty)
                     : LongStream.empty();
         }
     }

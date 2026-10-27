@@ -14,7 +14,7 @@ usage: hstore <command> [options]
   ping    HOST:PORT                              exit 0 when a server accepts connections
   verifier [--password PW]                       print a SCRAM-SHA-256 verifier to use as a CREATE USER password
   bench   <dir> [--scenario NAME] [--scale N]    adversarial storage benchmarks
-  check   <dir>                                  verify checksums and tree invariants
+  check   <dir> [--repair-tenants]               verify checksums and tree invariants; repair memberships across tenants
   config  [<dir>]                                print effective settings
   version
 ```
@@ -212,6 +212,22 @@ reference counts match the trees: 20 pages in use, 423 waiting for older readers
 
 A violated invariant aborts the check with the offending page and a reason such as
 `leaf keys out of order in <schema>` or `unbalanced tree in <schema>`.
+
+The report ends with a tenant isolation line. Older versions could leave a hyperedge with a member from another
+tenant; the check lists each such membership, on every active branch, with the statement that undoes it. With `--repair-tenants`
+(after the directory), `check` first removes all of them, in one transaction per branch, and lists what it removed:
+
+```
+$ hstore check /srv/hstore --repair-tenants
+tenant isolation: removed 1 memberships that crossed tenants:
+  USE TENANT globex; REMOVE @14 FROM @12;   -- member of tenant 1 in an edge of tenant 2
+generation 160, recovered 0 commits from the log
+…
+tenant isolation: no hyperedge on any branch has a member from another tenant
+```
+
+A check that finds no such membership, and every repair, records that the database is clean, which silences the
+startup warning of `hstore serve` (see [logging](logging.md)).
 
 ### `bench`
 

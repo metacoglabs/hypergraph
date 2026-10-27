@@ -7,8 +7,12 @@ import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.query.Parser;
 import io.hstore.db.query.Session;
+import io.hstore.db.security.Principal;
+import io.hstore.db.security.Role;
 import io.hstore.engine.Dictionary;
 import io.hstore.engine.EngineOptions;
+import io.hstore.engine.StorageEngine;
+import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.topology.Validity;
 import io.hstore.engine.topology.Weight;
@@ -37,6 +41,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -470,6 +475,49 @@ class ServerTest {
         }
     }
 
+    @Test
+    void checkFindsAndRepairsMembershipsAcrossTenants() throws Exception {
+        DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
+        long[] ids;
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
+            assertTrue(database.tenantMembershipsChecked());
+            Session admin = new Session(database);
+            admin.executeAll("""
+                    CREATE NODE TYPE Patient;
+                    CREATE SET EDGE TYPE Encounter ROLES (patient);
+                    CREATE TENANT acme;
+                    CREATE TENANT globex;
+                    """);
+            Session acme = new Session(database, new Principal("a", 1, Role.ADMIN));
+            Session globex = new Session(database, new Principal("g", 2, Role.ADMIN));
+            acme.executeAll("INSERT NODE Patient 'p' AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            globex.executeAll("INSERT NODE Patient 'q' AS $q; INSERT EDGE Encounter MEMBERS ($q AS patient) AS $g;");
+            long p = acme.variables().get("p");
+            long g = globex.variables().get("g");
+            database.write(writer -> {
+                writer.transaction().upsert(g, p, _ -> Incidence.of(p));
+                return null;
+            });
+            database.engine().createBranch("side", Branch.MAIN);
+            ids = new long[]{p, g};
+        }
+        try (StorageEngine engine = StorageEngine.open(directory, options.engine().withExtensions(HypergraphDatabase.extensionSlots(), List.of()))) {
+            String report = Check.run(engine);
+            assertTrue(report.contains("2 memberships cross tenants"), report);
+            assertTrue(report.contains("USE TENANT globex; USE BRANCH side; REMOVE @" + ids[0] + " FROM @" + ids[1] + ";"), report);
+        }
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
+            String repaired = Check.repair(database);
+            assertTrue(repaired.contains("removed 2 memberships") && repaired.contains("REMOVE @" + ids[0] + " FROM @" + ids[1]), repaired);
+            assertTrue(database.tenantMembershipsChecked());
+            assertTrue(Check.repair(database).contains("nothing to repair"));
+            assertEquals(1L, (long) database.read(reader -> reader.engineView().cardinality(ids[1])));
+        }
+        try (StorageEngine engine = StorageEngine.open(directory, options.engine().withExtensions(HypergraphDatabase.extensionSlots(), List.of()))) {
+            assertTrue(Check.run(engine).contains("no hyperedge on any branch has a member from another tenant"));
+        }
+    }
+
     private static List<String> exchange(InetSocketAddress address, String payload) throws Exception {
         try (Socket socket = new Socket(address.getHostString(), address.getPort())) {
             socket.setSoTimeout(10_000);
@@ -514,15 +562,25 @@ class ServerTest {
                     """);
             long patient = admin.variables().get("a");
             long edge = admin.variables().get("e");
-            assertTrue(Check.run(database.engine()).contains("no hyperedge on main has a member from another tenant"));
+            assertTrue(Check.run(database.engine()).contains("no hyperedge on any branch has a member from another tenant"));
             database.write(writer -> {
                 writer.transaction().insert(edge, new Incidence(patient, Dictionary.NO_ROLES, Weight.ONE,
                         Validity.ALWAYS.from(), Validity.ALWAYS.to(), 0, 0));
                 return null;
             });
+            database.engine().createBranch("side", Branch.MAIN);
             String report = Check.run(database.engine());
-            assertTrue(report.contains("1 memberships on main cross tenants"), report);
-            assertTrue(report.contains("REMOVE @" + patient + " FROM @" + edge), report);
+            assertTrue(report.contains("2 memberships cross tenants"), report);
+            List<String> statements = report.lines().filter(line -> line.startsWith("  USE TENANT"))
+                    .map(line -> line.substring(2, line.indexOf("   -- "))).toList();
+            assertEquals(Set.of("USE TENANT globex; REMOVE @" + patient + " FROM @" + edge + ";",
+                    "USE TENANT globex; USE BRANCH side; REMOVE @" + patient + " FROM @" + edge + ";"), Set.copyOf(statements));
+            for (String statement : statements) {
+                try (Session global = new Session(database, new Principal("root", Principal.DEFAULT_TENANT, Role.ADMIN))) {
+                    global.executeAll(statement);
+                }
+            }
+            assertTrue(Check.run(database.engine()).contains("no hyperedge on any branch has a member from another tenant"));
         }
     }
 

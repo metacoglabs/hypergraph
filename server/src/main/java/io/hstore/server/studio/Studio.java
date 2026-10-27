@@ -282,7 +282,7 @@ public final class Studio implements AutoCloseable {
 
     private Json describe(Session session) {
         Principal principal = session.principal();
-        String tenant = database.read(reader -> Security.tenant(reader.view(), principal.tenant())
+        String tenant = database.read(reader -> Security.tenant(reader.engineView(), principal.tenant())
                 .map(Security.Tenant::name).orElse("#" + principal.tenant()));
         String branch = database.engine().branches().stream().filter(candidate -> candidate.id() == session.branch())
                 .map(Branch::name).findFirst().orElse("main");
@@ -431,7 +431,7 @@ public final class Studio implements AutoCloseable {
         Session session = session(request).session();
         return Response.json(database.read(session.branch(), session.principal(), reader -> JsonFields.object()
                 .put("generation", reader.generation())
-                .put("types", JsonFields.array(reader.schema().types(reader.view()).stream()
+                .put("types", JsonFields.array(reader.schema().types(reader.engineView()).stream()
                         .sorted(Comparator.comparing(TypeDef::kind).thenComparing(TypeDef::name))
                         .map(type -> type(reader, type))))
                 .put("branches", JsonFields.array(database.engine().branches().stream()

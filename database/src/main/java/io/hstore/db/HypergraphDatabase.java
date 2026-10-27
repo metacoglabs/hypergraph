@@ -14,6 +14,7 @@ import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
 import io.hstore.db.security.Scram;
 import io.hstore.db.security.SignIns;
+import io.hstore.db.security.TenantMemberships;
 import io.hstore.db.semantic.Embedding;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.signal.Signals;
@@ -31,6 +32,7 @@ import io.hstore.engine.txn.TxnOptions;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -77,15 +79,42 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     private byte[] prepareSignIns() {
-        if (read(reader -> Security.scramSecret(reader.view())).isEmpty()) {
+        if (read(reader -> Security.scramSecret(reader.engineView())).isEmpty()) {
             write(writer -> {
                 if (Security.scramSecret(writer.transaction()).isEmpty()) {
                     Security.createScramSecret(writer.transaction());
                 }
+                if (!TenantMemberships.checked(writer.transaction()) && writer.transaction().atoms().findAny().isEmpty()) {
+                    TenantMemberships.markChecked(writer.transaction());
+                }
                 return null;
             });
         }
-        return read(reader -> Security.scramSecret(reader.view())).orElseThrow();
+        return read(reader -> Security.scramSecret(reader.engineView())).orElseThrow();
+    }
+
+    public boolean tenantMembershipsChecked() {
+        return read(reader -> TenantMemberships.checked(reader.engineView()));
+    }
+
+    public List<TenantMemberships.Crossing> repairTenantMemberships() {
+        List<TenantMemberships.Crossing> removed = new ArrayList<>();
+        for (int round = 0; round < 5 && (round == 0 || !TenantMemberships.find(engine).isEmpty()); round++) {
+            for (Branch branch : engine.branches().stream().filter(Branch::isActive).toList()) {
+                removed.addAll(write(options.transaction().onBranch(branch.id()), Principal.SYSTEM,
+                        writer -> TenantMemberships.repair(writer.transaction(), branch.name())));
+            }
+        }
+        if (!TenantMemberships.find(engine).isEmpty()) {
+            throw HStoreException.invalid("memberships across tenants kept appearing while they were being removed; run the repair again");
+        }
+        write(writer -> {
+            if (!TenantMemberships.checked(writer.transaction())) {
+                TenantMemberships.markChecked(writer.transaction());
+            }
+            return null;
+        });
+        return removed;
     }
 
     public Scram.Server scram(Optional<byte[]> channelBinding) {
@@ -93,7 +122,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public Scram.Server scram(Optional<byte[]> channelBinding, Consumer<Security.User> used) {
-        return new Scram.Server(name -> read(reader -> Security.user(reader.view(), name)).flatMap(user -> {
+        return new Scram.Server(name -> read(reader -> Security.user(reader.engineView(), name)).flatMap(user -> {
             if (Security.legacy(user)) {
                 warnLegacy(user.name());
                 return Optional.empty();
@@ -114,7 +143,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public List<String> usersWithOldPasswords() {
-        return read(reader -> Security.legacyUsers(reader.view()));
+        return read(reader -> Security.legacyUsers(reader.engineView()));
     }
 
     public SignIns signIns() {
@@ -213,12 +242,12 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public TxnOptions transactionOptions(Principal principal) {
-        long tenantPages = read(reader -> Security.quota(reader.view(), principal.tenant()).maxTransactionPages());
+        long tenantPages = read(reader -> Security.quota(reader.engineView(), principal.tenant()).maxTransactionPages());
         return options.transaction().withMaxPages(Math.min(options.transactionPages(), tenantPages));
     }
 
     public long queryPageBudget(Principal principal) {
-        long tenantPages = read(reader -> Security.quota(reader.view(), principal.tenant()).maxQueryPages());
+        long tenantPages = read(reader -> Security.quota(reader.engineView(), principal.tenant()).maxQueryPages());
         return Math.min(options.defaultQueryPages(), tenantPages);
     }
 
@@ -231,7 +260,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public Optional<Security.User> signIn(String user, String password, Optional<String> origin) {
-        return signIns.attempt(user, origin, () -> read(reader -> Security.signIn(reader.view(), user, password)))
+        return signIns.attempt(user, origin, () -> read(reader -> Security.signIn(reader.engineView(), user, password)))
                 .map(found -> Security.legacy(found) ? convert(found, password) : found);
     }
 
@@ -255,7 +284,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public boolean requiresAuthentication() {
-        return read(reader -> Security.hasUsers(reader.view()));
+        return read(reader -> Security.hasUsers(reader.engineView()));
     }
 
     public <T> T write(TxnOptions txnOptions, Principal principal, Function<? super Writer, T> work) {

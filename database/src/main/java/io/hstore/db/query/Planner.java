@@ -77,7 +77,7 @@ final class Planner {
         List<Expr> conjuncts = match.where().map(Planner::conjuncts).orElse(List.of());
         List<Candidate> candidates = new ArrayList<>();
         double population;
-        try (View.Unrecorded _ = reader.view().unrecorded()) {
+        try (View.Unrecorded _ = reader.unrecorded()) {
             universe = reader.population(match.edges());
             population = type.map(found -> (double) reader.countOfType(found.id())).orElse(universe);
         }
@@ -175,7 +175,7 @@ final class Planner {
     }
 
     private double estimate(AccessPath path, double population) {
-        try (View.Unrecorded _ = reader.view().unrecorded()) {
+        try (View.Unrecorded _ = reader.unrecorded()) {
             return unrecordedEstimate(path, population);
         }
     }
@@ -208,7 +208,7 @@ final class Planner {
         if (key.isEmpty()) {
             return 0;
         }
-        return PropertyIndex.estimate(reader.view().scan(PropertySlots.PROPERTY_INDEX), reader.tenant(), key.getAsInt(), tag,
+        return PropertyIndex.estimate(reader.engineView().scan(PropertySlots.PROPERTY_INDEX), reader.tenant(), key.getAsInt(), tag,
                 PropertyIndex.lowerKey(tag, range.low()), PropertyIndex.upperKey(tag, range.high()));
     }
 

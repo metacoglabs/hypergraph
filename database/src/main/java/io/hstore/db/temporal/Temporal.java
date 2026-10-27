@@ -48,15 +48,14 @@ public final class Temporal {
         if (!reader.visible(atom)) {
             return LongStream.empty();
         }
-        return reader.view().incident(atom)
-                .filter(incident -> reader.owns(incident.edge()))
-                .filter(incident -> reader.view().incidence(incident.edge(), atom).map(found -> found.validAt(instant)).orElse(false))
+        return reader.incidentEdges(atom)
+                .filter(incident -> reader.incidence(incident.edge(), atom).map(found -> found.validAt(instant)).orElse(false))
                 .mapToLong(IncidentEdge::edge);
     }
 
     public static Stream<Delta> diff(Reader before, Reader after) {
-        Tree<AtomRecord> left = before.view().scan(EngineSlots.CATALOG);
-        Tree<AtomRecord> right = after.view().scan(EngineSlots.CATALOG);
+        Tree<AtomRecord> left = before.engineView().scan(EngineSlots.CATALOG);
+        Tree<AtomRecord> right = after.engineView().scan(EngineSlots.CATALOG);
         return TreeDiff.diff(left, right).flatMap(delta -> switch (delta) {
             case TreeDiff.Delta.Added<AtomRecord>(long atom, AtomRecord record) -> Stream.concat(
                     Stream.of(new Delta.AtomCreated(atom, record)), membersOf(after, atom, record));
@@ -69,13 +68,13 @@ public final class Temporal {
         if (!(record instanceof EdgeRecord edge) || edge.members() instanceof Ref.Empty) {
             return Stream.empty();
         }
-        Hyperedge empty = Hyperedge.empty(atom, edge.kind(), reader.view().source());
-        return changes(empty, reader.view().edge(atom, edge), atom);
+        Hyperedge empty = Hyperedge.empty(atom, edge.kind(), reader.engineView().source());
+        return changes(empty, reader.engineView().edge(atom, edge), atom);
     }
 
     private static Stream<Delta> changedMembers(Reader before, Reader after, long atom, AtomRecord was, AtomRecord now) {
         if (was instanceof EdgeRecord from && now instanceof EdgeRecord to) {
-            return changes(before.view().edge(atom, from), after.view().edge(atom, to), atom);
+            return changes(before.engineView().edge(atom, from), after.engineView().edge(atom, to), atom);
         }
         return Stream.empty();
     }

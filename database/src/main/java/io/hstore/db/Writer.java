@@ -76,7 +76,7 @@ public final class Writer extends Reader {
                 .orElseThrow(() -> HStoreException.invalid(type + " has no declared property '" + property + "'"));
         TypeDef updated = schema().alter(txn, current.withProperty(new PropertyDef(property, existing.type(), true, existing.required())));
         int key = schema().propertyKey(property);
-        List<Integer> tenants = Security.tenants(view()).stream().map(Security.Tenant::id).toList();
+        List<Integer> tenants = Security.tenants(engineView()).stream().map(Security.Tenant::id).toList();
         txn.apply("backfill " + type + "." + property, workspace -> tenants.forEach(tenant ->
                 EngineSlots.TYPE_INDEX.stream(workspace.tree(EngineSlots.TYPES), EngineSlots.typeKey(tenant, updated.id())).toList()
                         .forEach(entry -> workspace.get(PropertySlots.PROPERTIES, entry.key())
@@ -90,8 +90,8 @@ public final class Writer extends Reader {
         TypeDef current = requireType(type);
         TypeDef updated = schema().alter(txn, current.withJsonIndex(new JsonIndex(path, tag)));
         int key = schema().propertyKey(path);
-        for (Security.Tenant tenant : Security.tenants(view())) {
-            Reader scoped = new Reader(database, view(), principal().inTenant(tenant.id()));
+        for (Security.Tenant tenant : Security.tenants(engineView())) {
+            Reader scoped = new Reader(database, engineView(), principal().inTenant(tenant.id()));
             for (long owner : scoped.atoms(type).boxed().toList()) {
                 scoped.document(owner).ifPresent(json -> json.select(path)
                         .filter(value -> !(value instanceof Value.Null))
@@ -309,7 +309,7 @@ public final class Writer extends Reader {
             }
             return semantic.model(model);
         });
-        semantic.validate(view(), model, id, vector);
+        semantic.validate(engineView(), model, id, vector);
         long ref = writePayload(Embedding.encode(vector));
         Embedding embedding = new Embedding(id, version, vector.length, ref);
         txn.put(Embedding.EMBEDDINGS, atom, embedding);
