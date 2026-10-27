@@ -8,12 +8,19 @@ import io.hstore.db.Reader;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.value.Value;
-import io.hstore.engine.tree.Tree;
-import io.hstore.engine.tree.TreeAlgebra;
+import io.hstore.engine.Dictionary;
+import io.hstore.engine.index.IndexValues;
+import io.hstore.engine.index.PostingCursor;
 
 import java.util.Arrays;
+import java.util.BitSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.LongStream;
 
 public sealed interface AccessPath {
@@ -52,21 +59,51 @@ public sealed interface AccessPath {
         }
     }
 
-    record Incident(List<Long> atoms) implements AccessPath {
+    record Incident(List<Leg> legs) implements AccessPath {
+        public record Leg(long atom, List<String> roles) {
+            public Leg {
+                roles = List.copyOf(roles);
+            }
+
+            String describe() {
+                return "@" + atom + (roles.isEmpty() ? "" : " AS " + String.join("&", roles));
+            }
+        }
+
+        public Incident {
+            legs = List.copyOf(legs);
+        }
+
         public String kind() {
             return "incident";
         }
 
         public String describe() {
-            return "IncidentIntersection" + atoms.stream().map(atom -> "@" + atom).toList();
+            return "IncidentIntersection" + legs.stream().map(Leg::describe).toList();
         }
 
         public LongStream scan(Reader reader) {
-            if (!atoms.stream().allMatch(reader::visible)) {
+            if (legs.isEmpty() || !legs.stream().allMatch(leg -> reader.visible(leg.atom()))) {
                 return LongStream.empty();
             }
-            List<Tree<?>> postings = atoms.stream().<Tree<?>>map(atom -> reader.view().incidentTree(atom)).toList();
-            return TreeAlgebra.intersectKeys(postings);
+            Dictionary dictionary = reader.database().engine().dictionary();
+            List<PostingCursor<IndexValues.Incident>> cursors = legs.stream()
+                    .map(leg -> leg.roles().isEmpty()
+                            ? reader.view().incidentCursor(leg.atom())
+                            : reader.view().incidentCursor(leg.atom(), accepting(dictionary, leg.roles())))
+                    .toList();
+            return PostingCursor.intersect(cursors);
+        }
+
+        private static Predicate<IndexValues.Incident> accepting(Dictionary dictionary, List<String> roles) {
+            BitSet accepted = dictionary.roleSetsWithAll(roles);
+            return incident -> accepted.get(incident.roleSet());
+        }
+
+        static Incident merge(List<Leg> legs) {
+            Map<Long, Set<String>> roles = new LinkedHashMap<>();
+            legs.forEach(leg -> roles.computeIfAbsent(leg.atom(), _ -> new LinkedHashSet<>()).addAll(leg.roles()));
+            return new Incident(roles.entrySet().stream().map(entry -> new Leg(entry.getKey(), List.copyOf(entry.getValue()))).toList());
         }
     }
 

@@ -228,6 +228,21 @@ class SerializableTest {
     }
 
     @Test
+    void phantomThroughARoleFilteredMatchIsRejected() {
+        long bx = admin.variables().get("bx");
+        long by = admin.variables().get("by");
+        String booked = "MATCH EDGE e:Booking WHERE e HAS @Room:'r1' AS room AND e HAS @Room:'r1' RETURN count(*)";
+        begin(true);
+        assertEquals("0", cell(a.execute(booked)));
+        assertEquals("0", cell(b.execute(booked)));
+        a.execute("ADD @Room:'r1' TO @" + bx + " AS room");
+        b.execute("ADD @Room:'r1' TO @" + by + " AS room");
+        String message = onlySecondFails(commitBoth());
+        assertTrue(message.contains("incident edges of atom"), message);
+        assertEquals("1", count(booked));
+    }
+
+    @Test
     void countThenInsertThroughIncidenceIsRejected() {
         begin(true);
         assertEquals("0", cell(a.execute(BOOKED_R1)));

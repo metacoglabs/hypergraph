@@ -9,6 +9,8 @@ import io.hstore.engine.catalog.AtomRecord;
 import io.hstore.engine.catalog.EngineSlots;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.catalog.Symbol;
+import io.hstore.engine.index.IndexValues;
+import io.hstore.engine.index.PostingCursor;
 import io.hstore.engine.topology.Hyperedge;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.tree.Entry;
@@ -19,6 +21,7 @@ import io.hstore.engine.tree.Tree;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.LongConsumer;
+import java.util.function.Predicate;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
@@ -117,6 +120,16 @@ public abstract sealed class View permits Snapshot, Transaction {
     public void forEachIncidentEdge(long atom, LongConsumer action) {
         observeKey(EngineSlots.REVERSE, atom);
         EngineSlots.REVERSE_INDEX.forEachPosting(lazyTree(EngineSlots.REVERSE), atom, action);
+    }
+
+    public PostingCursor<IndexValues.Incident> incidentCursor(long atom) {
+        observeKey(EngineSlots.REVERSE, atom);
+        return EngineSlots.REVERSE_INDEX.cursor(lazyTree(EngineSlots.REVERSE), atom);
+    }
+
+    public PostingCursor<IndexValues.Incident> incidentCursor(long atom, Predicate<? super IndexValues.Incident> accept) {
+        observeKey(EngineSlots.REVERSE, atom);
+        return EngineSlots.REVERSE_INDEX.cursor(lazyTree(EngineSlots.REVERSE), atom, accept);
     }
 
     public Tree<?> incidentTree(long atom) {

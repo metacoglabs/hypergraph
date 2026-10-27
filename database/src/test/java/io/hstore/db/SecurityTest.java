@@ -302,6 +302,31 @@ class SecurityTest {
     }
 
     @Test
+    void roleFilteredMatchesStayInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmePatient = alice.variables().get("p");
+            long acmeEdge = alice.variables().get("e");
+            long globexPatient = bob.variables().get("p");
+            long globexEdge = bob.variables().get("e");
+            int patient = database.engine().dictionary().roleSet(List.of("patient"));
+            database.write(writer -> {
+                writer.transaction().upsert(globexEdge, acmePatient, _ -> new Incidence(acmePatient, patient, Weight.ONE,
+                        Long.MIN_VALUE, Long.MAX_VALUE, 0, 0));
+                return null;
+            });
+            String query = "MATCH EDGE e:Encounter WHERE e HAS @" + acmePatient + " AS patient RETURN e";
+            assertEquals(List.of("@" + acmeEdge), alice.execute(query).rows().stream()
+                    .map(row -> row.getFirst().render().split(" ")[0]).toList());
+            assertEquals("1", cell(alice.execute("MATCH EDGE e WHERE e HAS @" + acmePatient + " AS patient RETURN count(*)")));
+            assertEquals("0", cell(bob.execute("MATCH EDGE e:Encounter WHERE e HAS @" + acmePatient + " AS patient RETURN count(*)")));
+            assertEquals("0", cell(bob.execute("MATCH EDGE e:Encounter WHERE e HAS @" + acmePatient + " AS patient AND e HAS @"
+                    + globexPatient + " AS patient RETURN count(*)")));
+        }
+    }
+
+    @Test
     void qualifyOnlyAcceptsVisibleMembers() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");

@@ -10,11 +10,15 @@ import io.hstore.engine.index.IndexValues.Marker;
 import io.hstore.engine.index.Postings;
 import io.hstore.engine.tree.Entry;
 import io.hstore.engine.tree.Tree;
+import io.hstore.engine.tree.TreeCursor;
 import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.TransactionManager;
 
+import java.util.BitSet;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,6 +34,9 @@ public final class Dictionary {
     private final ConcurrentHashMap<Symbol, Integer> ids = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, Symbol> symbols = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, List<String>> roleLists = new ConcurrentHashMap<>();
+    private final Object roleSetsLock = new Object();
+    private final Map<Integer, Symbol> rememberedRoleSets = new HashMap<>();
+    private volatile Map<Integer, BitSet> roleSetsByRole;
 
     Dictionary(TransactionManager transactions) {
         this.transactions = transactions;
@@ -116,16 +123,52 @@ public final class Dictionary {
     }
 
     public List<Integer> roleSetsContaining(String role) {
-        OptionalInt roleId = roleId(role);
-        if (roleId.isEmpty()) {
-            return List.of();
+        return roleSetsWithAll(List.of(role)).stream().boxed().toList();
+    }
+
+    public BitSet roleSetsWithAll(Collection<String> roles) {
+        if (roles.isEmpty()) {
+            throw new IllegalArgumentException("at least one role is required");
         }
-        try (Snapshot snapshot = transactions.snapshot(Branch.MAIN)) {
-            return snapshot.scan(EngineSlots.SYMBOLS).stream()
-                    .filter(entry -> entry.value() instanceof Symbol.Group(int namespace, List<Integer> members)
-                            && namespace == ROLE_SET && members.contains(roleId.getAsInt()))
-                    .map(entry -> (int) entry.key())
-                    .toList();
+        List<OptionalInt> roleIds = roles.stream().distinct().map(this::roleId).toList();
+        if (roleIds.stream().anyMatch(OptionalInt::isEmpty)) {
+            return new BitSet();
+        }
+        Map<Integer, BitSet> byRole = roleSetsByRole();
+        BitSet accepted = (BitSet) byRole.getOrDefault(roleIds.getFirst().getAsInt(), new BitSet()).clone();
+        roleIds.stream().skip(1).forEach(id -> accepted.and(byRole.getOrDefault(id.getAsInt(), new BitSet())));
+        return accepted;
+    }
+
+    private Map<Integer, BitSet> roleSetsByRole() {
+        Map<Integer, BitSet> loaded = roleSetsByRole;
+        if (loaded != null) {
+            return loaded;
+        }
+        synchronized (roleSetsLock) {
+            if (roleSetsByRole == null) {
+                Map<Integer, BitSet> byRole = new HashMap<>();
+                try (Snapshot snapshot = transactions.snapshot(Branch.MAIN)) {
+                    TreeCursor<Symbol> cursor = snapshot.scan(EngineSlots.SYMBOLS).cursor();
+                    for (boolean found = cursor.seek(0); found && cursor.hasNext(); cursor.advance()) {
+                        addRoleSet(byRole, (int) cursor.key(), cursor.value());
+                    }
+                }
+                rememberedRoleSets.forEach((id, symbol) -> addRoleSet(byRole, id, symbol));
+                rememberedRoleSets.clear();
+                roleSetsByRole = Map.copyOf(byRole);
+            }
+            return roleSetsByRole;
+        }
+    }
+
+    private static void addRoleSet(Map<Integer, BitSet> byRole, int id, Symbol symbol) {
+        if (symbol instanceof Symbol.Group(int namespace, List<Integer> members) && namespace == ROLE_SET) {
+            members.forEach(role -> byRole.compute(role, (_, current) -> {
+                BitSet updated = current == null ? new BitSet() : (BitSet) current.clone();
+                updated.set(id);
+                return updated;
+            }));
         }
     }
 
@@ -152,5 +195,16 @@ public final class Dictionary {
     private void remember(int id, Symbol symbol) {
         ids.put(symbol, id);
         symbols.put(id, symbol);
+        if (symbol instanceof Symbol.Group group && group.namespace() == ROLE_SET) {
+            synchronized (roleSetsLock) {
+                if (roleSetsByRole == null) {
+                    rememberedRoleSets.put(id, symbol);
+                } else {
+                    Map<Integer, BitSet> byRole = new HashMap<>(roleSetsByRole);
+                    addRoleSet(byRole, id, symbol);
+                    roleSetsByRole = Map.copyOf(byRole);
+                }
+            }
+        }
     }
 }

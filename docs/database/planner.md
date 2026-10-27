@@ -2,7 +2,7 @@
 
 This page describes how a `MATCH` statement ([HQL](hql.md#match)) is planned and executed:
 `query/Planner.java`, `query/AccessPath.java`, `query/Evaluator.java`, `query/Executor.java#query`,
-`stats/Statistics.java`, `engine/.../tree/TreeAlgebra.java` and `engine/.../page/IoTrace.java`.
+`stats/Statistics.java`, `engine/.../index/PostingCursor.java` and `engine/.../page/IoTrace.java`.
 
 ## Pipeline
 
@@ -11,7 +11,7 @@ flowchart TD
   P["Parser: Ast.Match"] --> PL["Planner.plan"]
   PL --> C1["candidate: CatalogScan"]
   PL --> C2["candidate: TypeScan"]
-  PL --> C3["candidate per sargable conjunct:<br/>IncidentIntersection / MemberScan / IndexRange / Lookup / SemanticCandidates"]
+  PL --> C3["candidate per sargable conjunct:<br/>IncidentIntersection (all CONTAINS / HAS merged) / MemberScan / IndexRange / Lookup / SemanticCandidates"]
   C1 & C2 & C3 --> CH["choose min cost"]
   CH --> RS["residual = conjuncts not exactly consumed,<br/>sorted by cost class"]
   RS --> EX["Executor.query (inside IoTrace with page budget)"]
@@ -40,7 +40,7 @@ drive an access path; a predicate inside `OR` or `NOT` is always evaluated as a 
 |---|---|---|---|---|
 | `AllAtoms(edges)` | `catalog-scan` | always | `Reader.allAtoms` (full catalog scan, tenant-filtered) | no |
 | `TypeScan(type)` | `type-scan` | `MATCH x:Type` | `Reader.atomsOfType` (type posting list of the tenant) | no |
-| `Incident(atoms)` | `incident` | `x CONTAINS (r1..rn)`, `x HAS r [AS role]` on an edge match | leapfrog intersection of the incidence trees of `r1..rn` | yes, except `HAS … AS role` |
+| `Incident(legs)` | `incident` | every `x CONTAINS (r1..rn)` and `x HAS r [AS role]` conjunct of an edge match, merged into one path with one leg per distinct atom | leapfrog intersection of the legs' reverse-index postings, each filtered by the roles its leg requires | yes |
 | `Members(edge)` | `members` | `x IN r` | keys of `r`'s membership tree | yes |
 | `IndexRange(type, p, lo, hi, …)` | `property-index` | `x.p op literal`, `literal op x.p`, `x.p BETWEEN a AND b` on an `INDEXED` declared property; the same forms with `json(x, '$.path')` in place of `x.p` when the type has a JSON index on exactly `'$.path'` (`Planner.indexed`) | `Reader.range` | yes |
 | `Semantic(text, k, consistency)` | `semantic` | `x SIMILAR TO 'text' TOP k` | `Reader.similar` | no |
@@ -48,43 +48,64 @@ drive an access path; a predicate inside `OR` or `NOT` is always evaluated as a 
 
 `!=` on an indexed property maps to a `TypeScan` (`Planner.range`, case `NE`). A path is **exact** when every atom
 it yields satisfies the conjunct that produced it (`Planner.exact`); an exact conjunct is dropped from the residual
-filters. `HAS r AS role` is not exact because the incidence tree only says that `r` is a member, not in which role.
+filters. `HAS r AS role` is exact because every reverse-index posting carries the role set of its incidence
+(`IndexValues.Incident(roleSet, locator)`), kept in step with the membership by the derivation that maintains the
+index, so the role check runs on the posting.
 
 Paths other than `TypeScan` may yield atoms of the wrong kind or type (an incidence set contains hyperedges of every
 type), so `Executor.admits` re-checks `isEdge` and the type id for them.
 
-### Incidence intersection (`CONTAINS`)
+### Incidence intersection (`CONTAINS`, `HAS`)
 
-`Incident.scan` obtains, for every referenced atom, its reverse-index tree `View.incidentTree(atom)` — the sorted
-set of hyperedge ids the atom belongs to (see [topology](../storage/topology.md)) — and calls
-`TreeAlgebra.intersectKeys(trees)`:
+`Planner.plan` collects every `CONTAINS` and `HAS` conjunct on the match variable into one `Incident` path. Each
+distinct atom becomes a leg, and a leg requires every role that any of its conjuncts names:
+`c HAS @1 AS actor AND c HAS @1 AS reviewer AND c CONTAINS (@1, @2)` has the legs `@1 AS actor&reviewer` and `@2`.
+All of those conjuncts are consumed exactly. `OR` of such conjuncts becomes a `Union` of single-conjunct paths and is
+exact when each part is.
 
-1. If any tree is empty the result is empty.
-2. The key window is `[max(tree.summary().min), min(tree.summary().max)]`; an empty window returns immediately
-   without touching leaves.
-3. Cursors are opened over each tree ordered by ascending size, with a summary predicate
-   `summary.overlaps(low, high)` that prunes subtrees outside the window.
-4. A leapfrog join (`TreeAlgebra.Leapfrog`) repeatedly `seek`s each cursor to the current candidate: if the
-   cursor lands on the candidate, one more tree agrees; otherwise the landed key becomes the new candidate with one
-   agreeing tree. After either case the join checks whether all trees agree and emits the key, so a single tree
-   (`CONTAINS (one ref)`, `HAS`) degenerates to an ordered scan of that tree.
+`Incident.scan` returns nothing unless every leg's atom is visible to the reader. Otherwise it opens one cursor per
+leg with `View.incidentCursor(atom)`, or `View.incidentCursor(atom, filter)` when the leg names roles, and calls
+`PostingCursor.intersect`:
+
+1. Role names become the set of role-set ids that contain all of them (`Dictionary.roleSetsWithAll`). Role sets
+   are interned for the whole database, and symbol ids only grow, so the dictionary keeps a role-to-role-sets index
+   and on each call reads only symbols above the highest id it has seen. An unknown role name gives an empty set,
+   and the leg matches nothing.
+2. A cursor reads the posting list in place: the key and value arrays of an inline list, or a `TreeCursor` over a
+   promoted postings tree. `seek` moves on keys only and never decodes a value.
+3. Cursors are ordered by ascending posting count. A leapfrog join `seek`s each cursor to the current candidate: if
+   the cursor lands on the candidate, one more leg agrees; otherwise the landed key becomes the new candidate with
+   one agreeing leg. When all legs agree, each leg with roles checks the role set of its posting for that key. The
+   key is emitted if every leg accepts it, and the search continues at the key plus one either way, which a cursor
+   reaches by stepping instead of searching. A single leg (`CONTAINS (one ref)`, `HAS`) is an ordered scan of that
+   leg's postings.
+
+Role sets are checked only where all legs agree, never while a cursor skips. A hub atom with a million postings and
+a rare role, intersected with a leaf atom in two hyperedges, costs two role checks and the seeks of the leaf's two
+keys, the same work as scanning the leaf and verifying the hub's role on each candidate.
 
 ```mermaid
 sequenceDiagram
-  participant A as incidentTree(@ines) [smallest]
-  participant B as incidentTree(@ada)
-  Note over A,B: candidate = max(minA, minB)
+  participant A as incidentCursor(@ines, patient) [smallest]
+  participant B as incidentCursor(@ada, provider)
+  Note over A,B: candidate = first accepted key of A
   A->>A: seek(candidate) → key k1
-  B->>B: seek(k1) → key k2 (> k1)
+  B->>B: seek(k1) → next accepted key k2 (> k1)
   A->>A: seek(k2) → k2 (agree 1)
   B->>B: seek(k2) → k2 (agree 2 = all) ⇒ emit k2
-  Note over A,B: candidate = k2 + 1, repeat until a seek runs past high
+  Note over A,B: candidate = k2 + 1, repeat until a cursor runs out
 ```
 
 Each `seek` descends the B+-tree from the cursor's position using the counted-tree structure, so the cost is
 `O(Σ_i min(|T_i|, k · log|T_i|))` for `k` emitted keys plus skipped runs, instead of the
-`O(Σ|T_i|)` of a merge join. Results are emitted in ascending edge-id order, which is the order of all other
-access paths too.
+`O(Σ|T_i|)` of a merge join. Role checks add one value read per key on which all legs agree. Results are emitted in ascending edge-id
+order, which is the order of all other access paths too.
+
+The estimate for the path uses each leg's degree, so a leg with roles is counted as if every posting had the role.
+Cardinality feedback for the `incident` kind corrects that over time.
+
+The reverse index is keyed by member, not by tenant, so an edge id from a posting is only used after
+`Executor.admits` has read it through the tenant-filtered `Reader`.
 
 ### Property index ranges
 
@@ -181,7 +202,7 @@ estimate always wins.
 | `Fixed` | 1 |
 | `Semantic` | `k` |
 | `IndexRange` | `PostingIndex.countRange` over the order-key window of the tree selected by `Reader.indexedTag` — exact count of postings in the window, assembled from subtree weights without visiting leaves |
-| `Incident(r1..rn)` | `d1 × Π_{i≥2} min(1, d_i / N)`, with degrees `d` sorted ascending and `N` the catalog size (independence assumption) |
+| `Incident(legs)` | `d1 × Π_{i≥2} min(1, d_i / N)`, with the legs' degrees `d` sorted ascending and `N` the catalog size (independence assumption); role filters are not counted |
 
 The independence estimate is a lower bound for correlated members; in the demo dataset
 `CONTAINS (@ines, @ada)` is estimated at 1 row and produces 3.
