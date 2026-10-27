@@ -561,14 +561,14 @@ class ServerTest {
                     """);
             long patient = admin.variables().get("a");
             long edge = admin.variables().get("e");
-            assertTrue(Check.run(database.engine()).contains("no hyperedge on main has a member from another tenant"));
+            assertTrue(Check.run(database.engine()).contains("no hyperedge on any branch has a member from another tenant"));
             database.write(writer -> {
                 writer.transaction().insert(edge, new Incidence(patient, Dictionary.NO_ROLES, Weight.ONE,
                         Validity.ALWAYS.from(), Validity.ALWAYS.to(), 0, 0));
                 return null;
             });
             String report = Check.run(database.engine());
-            assertTrue(report.contains("1 memberships on main cross tenants"), report);
+            assertTrue(report.contains("1 memberships cross tenants"), report);
             assertTrue(report.contains("REMOVE @" + patient + " FROM @" + edge), report);
         }
     }
