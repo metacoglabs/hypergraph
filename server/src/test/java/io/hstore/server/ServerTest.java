@@ -41,6 +41,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -503,7 +504,7 @@ class ServerTest {
         try (StorageEngine engine = StorageEngine.open(directory, options.engine().withExtensions(HypergraphDatabase.extensionSlots(), List.of()))) {
             String report = Check.run(engine);
             assertTrue(report.contains("2 memberships cross tenants"), report);
-            assertTrue(report.contains("USE BRANCH side; REMOVE @" + ids[0] + " FROM @" + ids[1]), report);
+            assertTrue(report.contains("USE TENANT globex; USE BRANCH side; REMOVE @" + ids[0] + " FROM @" + ids[1] + ";"), report);
         }
         try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
             String repaired = Check.repair(database);
@@ -567,9 +568,19 @@ class ServerTest {
                         Validity.ALWAYS.from(), Validity.ALWAYS.to(), 0, 0));
                 return null;
             });
+            database.engine().createBranch("side", Branch.MAIN);
             String report = Check.run(database.engine());
-            assertTrue(report.contains("1 memberships cross tenants"), report);
-            assertTrue(report.contains("REMOVE @" + patient + " FROM @" + edge), report);
+            assertTrue(report.contains("2 memberships cross tenants"), report);
+            List<String> statements = report.lines().filter(line -> line.startsWith("  USE TENANT"))
+                    .map(line -> line.substring(2, line.indexOf("   -- "))).toList();
+            assertEquals(Set.of("USE TENANT globex; REMOVE @" + patient + " FROM @" + edge + ";",
+                    "USE TENANT globex; USE BRANCH side; REMOVE @" + patient + " FROM @" + edge + ";"), Set.copyOf(statements));
+            for (String statement : statements) {
+                try (Session global = new Session(database, new Principal("root", Principal.DEFAULT_TENANT, Role.ADMIN))) {
+                    global.executeAll(statement);
+                }
+            }
+            assertTrue(Check.run(database.engine()).contains("no hyperedge on any branch has a member from another tenant"));
         }
     }
 

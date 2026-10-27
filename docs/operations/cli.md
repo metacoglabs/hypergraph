@@ -220,7 +220,7 @@ tenant; the check lists each such membership, on every active branch, with the s
 ```
 $ hstore check /srv/hstore --repair-tenants
 tenant isolation: removed 1 memberships that crossed tenants:
-  REMOVE @14 FROM @12   -- member of tenant 1 in an edge of tenant 2
+  USE TENANT globex; REMOVE @14 FROM @12;   -- member of tenant 1 in an edge of tenant 2
 generation 160, recovered 0 commits from the log
 …
 tenant isolation: no hyperedge on any branch has a member from another tenant
