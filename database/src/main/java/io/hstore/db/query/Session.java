@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 public final class Session implements AutoCloseable {
@@ -44,7 +45,7 @@ public final class Session implements AutoCloseable {
     private Optional<String> scramUser = Optional.empty();
     private Optional<String> clearTextRefusal = Optional.empty();
 
-    private record ScramAttempt(Scram.Server server, SignIns.Reservation reservation) {
+    private record ScramAttempt(Scram.Server server, SignIns.Reservation reservation, Optional<Security.User> user) {
     }
     private Format format = Format.TABLE;
 
@@ -79,7 +80,7 @@ public final class Session implements AutoCloseable {
 
     public boolean authenticate(String user, String password) {
         requireCanAuthenticate();
-        Optional<Principal> found = database.authenticate(user, password, origin);
+        Optional<Security.User> found = database.signIn(user, password, origin);
         if (found.isEmpty()) {
             failedAuthentications++;
             return false;
@@ -92,11 +93,12 @@ public final class Session implements AutoCloseable {
         requireCanAuthenticate();
         scram.ifPresent(pending -> pending.reservation().failed());
         scram = Optional.empty();
-        Scram.Server server = database.scram(channelBinding);
+        AtomicReference<Security.User> used = new AtomicReference<>();
+        Scram.Server server = database.scram(channelBinding, used::set);
         String serverFirst = server.first(mechanism, clientFirst);
         scramUser = Optional.of(server.user());
         SignIns.Reservation reservation = database.signIns().reserve(server.user(), origin);
-        scram = Optional.of(new ScramAttempt(server, reservation));
+        scram = Optional.of(new ScramAttempt(server, reservation, Optional.ofNullable(used.get())));
         return serverFirst;
     }
 
@@ -111,8 +113,8 @@ public final class Session implements AutoCloseable {
             failedAuthentications++;
             throw malformed;
         }
-        Optional<Principal> found = outcome instanceof Scram.Outcome.Accepted(String user, String _)
-                ? database.read(reader -> Security.user(reader.view(), user)).map(Security::principal)
+        Optional<Security.User> found = outcome instanceof Scram.Outcome.Accepted(String user, String _)
+                ? database.read(reader -> Security.user(reader.view(), user)).filter(current -> attempt.user().equals(Optional.of(current)))
                 : Optional.empty();
         if (found.isEmpty()) {
             attempt.reservation().failed();
@@ -141,10 +143,10 @@ public final class Session implements AutoCloseable {
         }
     }
 
-    private void signIn(Principal found) {
-        principal = found;
+    private void signIn(Security.User found) {
+        principal = Security.principal(found);
         authenticated = true;
-        credentials = database.read(reader -> Security.user(reader.view(), found.user()));
+        credentials = Optional.of(found);
         renewing = false;
         variables.clear();
         branch = Branch.MAIN;

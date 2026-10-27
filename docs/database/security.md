@@ -134,10 +134,13 @@ record User(String name, String salt, String hash, int iterations, int tenant, R
   users slot does not let anyone sign in without guessing the password first.
 - Passwords go through SASLprep ([RFC 4013](https://www.rfc-editor.org/rfc/rfc4013)) before PBKDF2, as in
   PostgreSQL: a password made only of ASCII characters is used as it is; otherwise non-ASCII spaces become
-  spaces, characters such as the soft hyphen are dropped and the result is NFKC-normalized. When the result would
-  contain a character that SASLprep prohibits, or one unassigned in Unicode 3.2, the original password is used
-  unchanged. The client applies the same rule, so `p\u00e4ssword` typed precomposed or decomposed signs in either
-  way, and passwords set through other SCRAM clients and libraries match.
+  spaces, characters such as the soft hyphen are dropped and the result is NFKC-normalized with the current
+  Unicode tables, as PostgreSQL does. When the password holds a character unassigned in Unicode 3.2 (checked before
+  and after normalizing), or the result holds one that SASLprep prohibits, the original password is used
+  unchanged. Five CJK compatibility ideographs whose decomposition Unicode corrected after 3.2 (U+2F868, U+2F874,
+  U+2F91F, U+2F95F, U+2F9BF) therefore normalize as in PostgreSQL rather than as in Unicode 3.2. The client and the
+  Python client in the [wire protocol](../operations/wire-protocol.md#writing-a-client) apply the same rule (they
+  agree on every code point), so `p\u00e4ssword` typed precomposed or decomposed signs in either way.
 - Older versions stored the hex `SaltedPassword` itself. That value is exactly what a SCRAM client derives from
   the password, so a copy of it from an old backup would be as good as the password. This version therefore never
   uses an old record for SCRAM: such a user cannot sign in over the wire protocol, the server answers it as it

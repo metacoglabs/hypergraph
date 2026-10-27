@@ -455,7 +455,7 @@ class ServerTest {
                     }
                 }
                 try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")))) {
-                    assertTrue(admin.execute("AUTHENTICATE admin PASSWORD 'pw-secret'; WHOAMI;").contains("upgrade your HStore client"));
+                    assertTrue(admin.execute("AUTHENTICATE admin PASSWORD 'pw-secret'; WHOAMI;").contains("must be sent on its own"));
                     admin.execute("CREATE USER other PASSWORD 'other-secret' ROLE reader;");
                     assertTrue(admin.execute("AT GENERATION 1 AUTHENTICATE other PASSWORD 'other-secret'; WHOAMI;").startsWith("error"));
                     assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
