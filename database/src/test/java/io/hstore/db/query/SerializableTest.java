@@ -115,6 +115,39 @@ class SerializableTest {
     }
 
     @Test
+    void writeSkewThroughAnUndeclaredPropertyIsRejected() {
+        String flagged = "MATCH NODE n:Account WHERE n.flag = true RETURN count(*)";
+        begin(true);
+        assertEquals("0", cell(a.execute(flagged)));
+        assertEquals("0", cell(b.execute(flagged)));
+        a.execute("SET @Account:'x'.flag = true");
+        b.execute("SET @Account:'y'.flag = true");
+        onlySecondFails(commitBoth());
+        assertEquals("1", count(flagged));
+    }
+
+    @Test
+    void readingAnUndeclaredPropertyOfOneAtomIsRecorded() {
+        begin(true);
+        assertEquals("null", cell(a.execute("MATCH NODE n:Account WHERE n = @Account:'x' RETURN n.flag")));
+        assertEquals("null", cell(b.execute("MATCH NODE n:Account WHERE n = @Account:'y' RETURN n.flag")));
+        a.execute("SET @Account:'y'.flag = true");
+        b.execute("SET @Account:'x'.flag = true");
+        onlySecondFails(commitBoth());
+    }
+
+    @Test
+    void undeclaredPropertiesDoNotConflictUnderSnapshot() {
+        String flagged = "MATCH NODE n:Account WHERE n.flag = true RETURN count(*)";
+        begin(false);
+        assertEquals("0", cell(a.execute(flagged)));
+        assertEquals("0", cell(b.execute(flagged)));
+        a.execute("SET @Account:'x'.flag = true");
+        b.execute("SET @Account:'y'.flag = true");
+        bothCommit(commitBoth());
+    }
+
+    @Test
     void indexedPredicatesIgnoreChangesOutsideTheirRange() {
         a.execute("BEGIN SERIALIZABLE");
         assertEquals("2", cell(a.execute(ON_CALL)));
