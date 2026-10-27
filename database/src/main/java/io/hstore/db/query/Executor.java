@@ -161,7 +161,7 @@ final class Executor {
                             Access.setOptions(writer.transaction(), new Access.Options(name, validUntil.orElse(Long.MAX_VALUE),
                                     (int) connectionLimit.orElse(-1)));
                         }
-                        Security.keepAGlobalAdmin(writer.transaction());
+                        Security.keepAGlobalAdmin(writer.transaction(), hadGlobalAdmin());
                         return QueryResult.message("created user " + name + " with role " + role);
                     });
             case Statement.AlterUser alter -> write(writer -> alterUser(writer, alter));
@@ -171,7 +171,7 @@ final class Executor {
                     throw HStoreException.invalid("cannot drop the last user: the server would stop asking for credentials");
                 }
                 Security.dropUser(writer.transaction(), name);
-                Security.keepAGlobalAdmin(writer.transaction());
+                Security.keepAGlobalAdmin(writer.transaction(), hadGlobalAdmin());
                 return QueryResult.message("dropped user " + name);
             });
             case Statement.Grant(Access.Privilege privilege, Optional<String> type, String name) -> write(writer -> {
@@ -422,6 +422,10 @@ final class Executor {
                 .orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
     }
 
+    private boolean hadGlobalAdmin() {
+        return database().read(reader -> Security.hasGlobalAdmin(reader.engineView()));
+    }
+
     private static Long removeConnections(Map<String, Long> limits) {
         Long connections = null;
         for (String key : List.copyOf(limits.keySet())) {
@@ -457,7 +461,7 @@ final class Executor {
             alter.validUntil().ifPresent(_ -> changes.add("password expiry"));
             alter.connectionLimit().ifPresent(_ -> changes.add("connection limit"));
         }
-        Security.keepAGlobalAdmin(writer.transaction());
+        Security.keepAGlobalAdmin(writer.transaction(), hadGlobalAdmin());
         return QueryResult.message(changes.isEmpty() ? "nothing changed for " + user.name() : "changed " + String.join(", ", changes) + " of " + user.name());
     }
 

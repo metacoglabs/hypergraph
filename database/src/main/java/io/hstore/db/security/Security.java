@@ -254,9 +254,13 @@ public final class Security {
         return user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN;
     }
 
-    public static void keepAGlobalAdmin(Transaction txn) {
+    public static boolean hasGlobalAdmin(View view) {
+        return users(view).stream().anyMatch(Security::globalAdmin);
+    }
+
+    public static void keepAGlobalAdmin(Transaction txn, boolean hadGlobalAdmin) {
         List<User> all = users(txn);
-        if (all.isEmpty()) {
+        if (all.isEmpty() || !hadGlobalAdmin && all.stream().noneMatch(Security::globalAdmin)) {
             return;
         }
         List<User> admins = all.stream().filter(user -> globalAdmin(user) && neverExpires(Access.options(txn, user.name()))).toList();

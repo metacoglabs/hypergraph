@@ -108,10 +108,11 @@ again, so the new role applies at once. Only a global admin may change the role,
 limit of an ADMIN, or the password of an ADMIN other than itself, so a tenant admin cannot lift limits put on
 itself or take over another admin of its tenant.
 
-While any user exists, the default tenant must keep an ADMIN whose password never expires. Every `CREATE USER`,
-`ALTER USER` and `DROP USER` checks this against the state it leaves behind and is refused if none would remain:
-dropping or demoting the last one, giving its password any `VALID UNTIL` other than `'infinity'`, or creating
-users in a database that has no such admin (so the first user must be one). Any expiry date eventually passes,
+Once the default tenant has an ADMIN, it must keep one whose password never expires while any user exists. Every
+`CREATE USER`, `ALTER USER` and `DROP USER` checks this against the state it leaves behind and is refused if none
+would remain: dropping or demoting the last one, giving its password any `VALID UNTIL` other than `'infinity'`,
+creating the first global admin with an expiry, or dropping the last admin and creating other users in the same
+transaction. An embedded application may still create tenant users before any global admin exists. Any expiry date eventually passes,
 so checking only that a password still works today would let a date one second ahead lock everyone out. The
 statement also places a commit-time precondition on the role record and the options record of every remaining
 such admin, so concurrent transactions that each remove or expire a different admin, or that create a user while

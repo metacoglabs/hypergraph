@@ -329,8 +329,9 @@ class PermissionsTest {
     @Test
     void everyChangeLeavesAGlobalAdmin(@TempDir Path elsewhere) {
         try (HypergraphDatabase fresh = HypergraphDatabase.open(elsewhere); Session system = new Session(fresh)) {
-            assertThrows(HStoreException.InvalidSchema.class, () -> system.execute("CREATE USER bob PASSWORD 'bob-password' ROLE reader"));
+            system.execute("CREATE USER early PASSWORD 'early-password' ROLE reader");
             system.execute("CREATE USER root PASSWORD 'root-password' ROLE admin");
+            system.execute("DROP USER early");
             system.execute("BEGIN");
             system.execute("DROP USER root");
             assertThrows(HStoreException.InvalidSchema.class, () -> system.execute("CREATE USER bob PASSWORD 'bob-password' ROLE reader"));
