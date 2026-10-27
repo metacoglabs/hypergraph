@@ -19,6 +19,8 @@ import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.random.RandomGenerator;
@@ -219,6 +221,26 @@ class PostingCursorTest {
             assertTrue(dictionary.roleSetsWithAll(List.of("actor", "unknown")).isEmpty());
             assertEquals(actorSets.stream().boxed().toList(), dictionary.roleSetsContaining("actor"));
             assertThrows(IllegalArgumentException.class, () -> dictionary.roleSetsWithAll(List.of()));
+            engine.checkpoint();
+        }
+        try (StorageEngine engine = StorageEngine.open(directory, EngineTest.small())) {
+            assertEquals(3, engine.dictionary().roleSetsWithAll(List.of("actor")).cardinality());
+        }
+    }
+
+    @Test
+    void everyNewRoleSetIsVisibleToTheThreadThatCreatedIt() throws Exception {
+        try (StorageEngine engine = StorageEngine.open(directory, EngineTest.small())) {
+            Dictionary dictionary = engine.dictionary();
+            dictionary.roleSet(List.of("actor"));
+            List<CompletableFuture<Void>> threads = IntStream.range(0, 8).mapToObj(thread -> CompletableFuture.runAsync(() -> {
+                for (int i = 0; i < 50; i++) {
+                    int created = dictionary.roleSet(List.of("actor", "role-" + thread + "-" + i));
+                    assertTrue(dictionary.roleSetsWithAll(List.of("actor")).get(created));
+                }
+            })).toList();
+            CompletableFuture.allOf(threads.toArray(CompletableFuture[]::new)).get(60, TimeUnit.SECONDS);
+            assertEquals(401, dictionary.roleSetsWithAll(List.of("actor")).cardinality());
         }
     }
 }
