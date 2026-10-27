@@ -38,6 +38,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.function.UnaryOperator;
 
 public final class Writer extends Reader {
@@ -250,7 +251,16 @@ public final class Writer extends Reader {
     public void unset(long atom, String name) {
         principal().requireWrite();
         require(atom);
-        schema().existingPropertyKey(name).ifPresent(key -> updateBag(atom, key, bag -> bag.without(key)));
+        OptionalInt key = schema().existingPropertyKey(name);
+        if (key.isPresent()) {
+            updateBag(atom, key.getAsInt(), bag -> bag.without(key.getAsInt()));
+            return;
+        }
+        bag(atom);
+        txn.merge(PropertySlots.PROPERTIES, atom, current -> {
+            OptionalInt created = schema().existingPropertyKey(name);
+            return created.isEmpty() || current.orElse(PropertyBag.EMPTY).get(created.getAsInt()).isEmpty();
+        }, current -> current);
     }
 
     private Value externalizeLargeText(Value value) {

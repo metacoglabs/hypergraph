@@ -338,8 +338,10 @@ public sealed class Reader permits Writer {
 
     public LongStream range(String type, String property, Optional<Value> low, Optional<Value> high, boolean lowInclusive, boolean highInclusive) {
         TypeDef definition = requireType(type);
-        Predicate<Value> accept = candidate -> low.map(bound -> lowInclusive ? candidate.compareTo(bound) >= 0 : candidate.compareTo(bound) > 0).orElse(true)
-                && high.map(bound -> highInclusive ? candidate.compareTo(bound) <= 0 : candidate.compareTo(bound) < 0).orElse(true);
+        Predicate<Value> accept = candidate -> low.map(bound -> comparable(candidate, bound)
+                        && (lowInclusive ? candidate.compareTo(bound) >= 0 : candidate.compareTo(bound) > 0)).orElse(true)
+                && high.map(bound -> comparable(candidate, bound)
+                        && (highInclusive ? candidate.compareTo(bound) <= 0 : candidate.compareTo(bound) < 0)).orElse(true);
         OptionalInt key = schema().existingPropertyKey(property);
         if (key.isEmpty() && !property.startsWith("$")) {
             if (view.recordsReads()) {
@@ -363,6 +365,10 @@ public sealed class Reader permits Writer {
         }
         return atomsOfType(definition.id())
                 .filter(atom -> bag(atom).get(key.getAsInt()).map(Property::value).filter(accept).isPresent());
+    }
+
+    private static boolean comparable(Value candidate, Value bound) {
+        return candidate.tag() == bound.tag() ? !(candidate instanceof Value.Null) : candidate.tag().numeric() && bound.tag().numeric();
     }
 
     public static Optional<TypeTag> indexedTag(TypeDef type, String property) {

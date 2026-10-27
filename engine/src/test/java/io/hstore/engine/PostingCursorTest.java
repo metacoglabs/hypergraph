@@ -8,6 +8,8 @@ import io.hstore.engine.index.PostingCursor;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.topology.Weight;
+import io.hstore.engine.txn.CrashPoint;
+import io.hstore.engine.txn.Durability;
 import io.hstore.engine.txn.IncidentEdge;
 import io.hstore.engine.txn.View;
 
@@ -20,7 +22,9 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.random.RandomGenerator;
@@ -225,6 +229,36 @@ class PostingCursorTest {
         }
         try (StorageEngine engine = StorageEngine.open(directory, EngineTest.small())) {
             assertEquals(3, engine.dictionary().roleSetsWithAll(List.of("actor")).cardinality());
+        }
+    }
+
+    @Test
+    void aRoleSetStillBeingCommittedIsInTheFirstLoadedMap() throws Exception {
+        CountDownLatch syncing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean armed = new AtomicBoolean(false);
+        EngineOptions options = EngineTest.small().withDurability(Durability.SYNC).withFaults(reached -> {
+            if (reached == CrashPoint.WAL_SYNC && armed.compareAndSet(true, false)) {
+                syncing.countDown();
+                try {
+                    release.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        });
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            Dictionary dictionary = engine.dictionary();
+            dictionary.roleSet(List.of("actor"));
+            dictionary.roleSet(List.of("extra"));
+            armed.set(true);
+            CompletableFuture<Integer> first = CompletableFuture.supplyAsync(() -> dictionary.roleSet(List.of("actor", "extra")));
+            assertTrue(syncing.await(10, TimeUnit.SECONDS));
+            int id = dictionary.roleSet(List.of("actor", "extra"));
+            boolean seen = dictionary.roleSetsWithAll(List.of("actor")).get(id);
+            release.countDown();
+            assertEquals(id, first.get(10, TimeUnit.SECONDS));
+            assertTrue(seen, "role set " + id + " missing from the first load");
         }
     }
 

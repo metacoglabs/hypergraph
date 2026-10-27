@@ -408,7 +408,8 @@ final class Server implements AutoCloseable {
         try {
             statements = Parser.sourced(script);
         } catch (HStoreException failure) {
-            LOG.log(System.Logger.Level.INFO, "connection {0}: {1}", connection, failure.getMessage());
+            LOG.log(System.Logger.Level.INFO, "connection {0}: {1}", connection,
+                    Parser.mentionsAuthenticate(script) ? "a script with AUTHENTICATE could not be parsed" : failure.getMessage());
             return "error [" + failure.code() + "]: " + failure.getMessage();
         }
         if (statements.stream().map(Parser.Sourced::statement).anyMatch(Server::signsIn)) {
