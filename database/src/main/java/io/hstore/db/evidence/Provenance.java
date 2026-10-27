@@ -54,7 +54,7 @@ public final class Provenance {
     }
 
     public static long record(Writer writer, Evidence evidence) {
-        writer.principal().requireWrite();
+        requireTenantWrite(writer);
         requireReferable(writer, evidence.source());
         long id = writer.database().engine().transactions().allocateAtom();
         writer.transaction().put(EVIDENCE, id, evidence.withTenant(writer.tenant()));
@@ -62,7 +62,7 @@ public final class Provenance {
     }
 
     public static long assertion(Writer writer, Qualifier qualifier) {
-        writer.principal().requireWrite();
+        requireTenantWrite(writer);
         requireReferable(writer, qualifier.source());
         qualifier.evidence().forEach(support -> requireReferable(writer, support));
         long id = writer.database().engine().transactions().allocateAtom();
@@ -76,6 +76,13 @@ public final class Provenance {
         return id;
     }
 
+    private static void requireTenantWrite(Writer writer) {
+        writer.principal().requireWrite();
+        if (!writer.principal().role().writesEveryType()) {
+            throw HStoreException.invalid("user " + writer.principal().user() + " needs the WRITER or ADMIN role to record evidence and assertions");
+        }
+    }
+
     private static void requireReferable(Reader reader, long id) {
         if (id != 0 && !reader.visible(id) && evidence(reader, id).isEmpty() && qualifier(reader, id).isEmpty()) {
             throw HStoreException.invalid("atom " + id + " does not exist");
@@ -83,11 +90,15 @@ public final class Provenance {
     }
 
     public static Optional<Qualifier> qualifier(Reader reader, long id) {
-        return id == 0 ? Optional.empty() : reader.engineView().get(QUALIFIERS, id).filter(found -> found.tenant() == reader.tenant());
+        return id == 0 || !reader.principal().role().readsEveryType()
+                ? Optional.empty()
+                : reader.engineView().get(QUALIFIERS, id).filter(found -> found.tenant() == reader.tenant());
     }
 
     public static Optional<Evidence> evidence(Reader reader, long id) {
-        return reader.engineView().get(EVIDENCE, id).filter(found -> found.tenant() == reader.tenant());
+        return reader.principal().role().readsEveryType()
+                ? reader.engineView().get(EVIDENCE, id).filter(found -> found.tenant() == reader.tenant())
+                : Optional.empty();
     }
 
     public static Stream<Member> effective(Reader reader, long edge, EvidencePolicy policy) {

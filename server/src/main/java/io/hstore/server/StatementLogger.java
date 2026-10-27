@@ -50,22 +50,24 @@ final class StatementLogger {
         return switch (statement) {
             case Statement.CreateType _, Statement.CreateIndex _, Statement.CreateJsonIndex _, Statement.CreateView _,
                  Statement.CreateBranch _, Statement.DropBranch _, Statement.CreateTenant _, Statement.AlterTenant _,
-                 Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.CheckpointAt _ -> Category.DDL;
+                 Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.Grant _, Statement.Revoke _, Statement.CheckpointAt _ -> Category.DDL;
             case Statement.Query _, Statement.Explain _, Statement.Rank _, Statement.Members _, Statement.IncidentTo _, Statement.Describe _,
                  Statement.Gather _, Statement.Reduce _, Statement.Scatter _, Statement.Propagate _, Statement.Neighbors _,
                  Statement.OverlapJoin _, Statement.Closure _, Statement.PatternQuery _, Statement.Expand _, Statement.History _,
                  Statement.Stats _, Statement.ShowTypes _, Statement.ShowBranches _, Statement.ShowViews _, Statement.ShowView _,
                  Statement.ShowTenants _, Statement.ShowUsers _, Statement.WhoAmI _, Statement.DiffBranches _,
-                 Statement.DiffGenerations _, Statement.ResolveSignals _, Statement.Trace _ -> Category.READ;
+                 Statement.DiffGenerations _, Statement.ResolveSignals _, Statement.Trace _, Statement.ShowGrants _ -> Category.READ;
             default -> Category.MOD;
         };
     }
 
     static String describe(Statement statement, String script) {
         return switch (statement) {
-            case Statement.CreateUser(String name, String _, Optional<String> tenant, Role role) ->
+            case Statement.CreateUser(String name, String _, Optional<String> tenant, Role role, var _, var _) ->
                     "CREATE USER " + name + " PASSWORD '***'" + tenant.map(found -> " TENANT " + found).orElse("") + " ROLE " + role;
-            case Statement.AlterUser(String name, String _) -> "ALTER USER " + name + " PASSWORD '***'";
+            case Statement.AlterUser(String name, Optional<String> password, var role, var _, var _) -> "ALTER USER " + name
+                    + password.map(_ -> " PASSWORD '***'").orElse("") + role.map(found -> " ROLE " + found).orElse("")
+                    + (password.isEmpty() && role.isEmpty() ? " (options)" : "");
             case Statement.Authenticate(String user, String _) -> "AUTHENTICATE " + user + " PASSWORD '***'";
             default -> abbreviate(script);
         };

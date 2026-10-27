@@ -11,6 +11,7 @@ import io.hstore.db.security.Principal;
 import io.hstore.db.security.Role;
 import io.hstore.engine.Dictionary;
 import io.hstore.engine.EngineOptions;
+import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.StorageEngine;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.topology.Incidence;

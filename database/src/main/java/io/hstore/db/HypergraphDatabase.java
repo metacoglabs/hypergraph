@@ -12,6 +12,7 @@ import io.hstore.db.schema.SchemaSlots;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
+import io.hstore.db.security.Access;
 import io.hstore.db.security.Scram;
 import io.hstore.db.security.SignIns;
 import io.hstore.db.security.TenantMemberships;
@@ -60,6 +61,8 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final Statistics statistics;
     private final MaterializedViews views;
     private final SignIns signIns = new SignIns();
+    private final Map<String, Integer> connections = new ConcurrentHashMap<>();
+    private final Map<Integer, Integer> tenantConnections = new ConcurrentHashMap<>();
     private final byte[] scramSecret;
     private final Map<String, Long> legacyWarnings = new ConcurrentHashMap<>();
 
@@ -148,6 +151,52 @@ public final class HypergraphDatabase implements AutoCloseable {
 
     public SignIns signIns() {
         return signIns;
+    }
+
+    public void enter(Principal principal) {
+        Access.Options limits = read(reader -> Access.options(reader.engineView(), principal.user()));
+        int tenantLimit = read(reader -> Access.tenantConnectionLimit(reader.engineView(), principal.home()));
+        synchronized (connections) {
+            if (!principal.global()) {
+                if (limits.connectionLimit() >= 0 && connections(principal.user()) >= limits.connectionLimit()) {
+                    throw HStoreException.limit("too many connections for user " + principal.user() + " (connection limit "
+                            + limits.connectionLimit() + ")");
+                }
+                if (tenantLimit >= 0 && tenantConnections(principal.home()) >= tenantLimit) {
+                    throw HStoreException.limit("too many connections for tenant #" + principal.home() + " (connection limit "
+                            + tenantLimit + ")");
+                }
+            }
+            connections.merge(principal.user(), 1, Integer::sum);
+            tenantConnections.merge(principal.home(), 1, Integer::sum);
+        }
+    }
+
+    public boolean holds(Principal principal, Access.Privilege capability) {
+        return principal.global() || principal.home() == Principal.DEFAULT_TENANT
+                && read(reader -> Access.holds(reader.engineView(), principal.user(), capability));
+    }
+
+    public void rejoin(Principal principal) {
+        synchronized (connections) {
+            connections.merge(principal.user(), 1, Integer::sum);
+            tenantConnections.merge(principal.home(), 1, Integer::sum);
+        }
+    }
+
+    public void leave(Principal principal) {
+        synchronized (connections) {
+            connections.computeIfPresent(principal.user(), (_, count) -> count <= 1 ? null : count - 1);
+            tenantConnections.computeIfPresent(principal.home(), (_, count) -> count <= 1 ? null : count - 1);
+        }
+    }
+
+    public int tenantConnections(int tenant) {
+        return tenantConnections.getOrDefault(tenant, 0);
+    }
+
+    public int connections(String user) {
+        return connections.getOrDefault(user, 0);
     }
 
     public static List<Slot<?>> extensionSlots() {

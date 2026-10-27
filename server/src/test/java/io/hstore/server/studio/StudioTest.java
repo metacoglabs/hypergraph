@@ -141,6 +141,22 @@ class StudioTest {
     }
 
     @Test
+    void theDashboardOpensToMonitors() throws Exception {
+        try (Session session = new Session(database)) {
+            session.execute("CREATE USER watcher PASSWORD 'watcher-pass' ROLE reader");
+        }
+        HttpResponse<String> signedIn = post("/api/login", "{\"user\":\"watcher\",\"password\":\"watcher-pass\"}", Optional.empty(), true);
+        Optional<String> cookie = signedIn.headers().firstValue("Set-Cookie").map(header -> header.substring(0, header.indexOf(';')));
+        assertEquals(403, get("/api/stats", cookie).statusCode());
+        try (Session session = new Session(database)) {
+            session.execute("GRANT MONITOR TO watcher");
+        }
+        assertEquals(200, get("/api/stats", cookie).statusCode());
+        List<Json> generations = ((Json.Array) object(get("/api/history", cookie).body()).get("generations")).items();
+        assertTrue(generations.stream().allMatch(generation -> ((Json.Obj) generation).fields().keySet().equals(Set.of("id"))));
+    }
+
+    @Test
     void studioServesHttpsWithSecureCookies() throws Exception {
         Path certificate = Path.of(StudioTest.class.getResource("/tls/certificate.pem").toURI());
         Path key = Path.of(StudioTest.class.getResource("/tls/key.pem").toURI());

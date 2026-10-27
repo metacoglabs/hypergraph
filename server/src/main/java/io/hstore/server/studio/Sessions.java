@@ -11,6 +11,9 @@ import java.util.Base64;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
@@ -47,15 +50,20 @@ final class Sessions implements AutoCloseable {
         }
     }
 
+    private static final System.Logger LOG = System.getLogger("hstore.studio");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final long LIFETIME_NANOS = Duration.ofHours(12).toNanos();
     private static final int MAX_SESSIONS = 4096;
 
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
     private final long idleNanos;
+    private final ScheduledExecutorService sweeper = Executors.newSingleThreadScheduledExecutor(
+            Thread.ofVirtual().name("studio-session-sweeper").factory());
 
     Sessions(Duration idle) {
         this.idleNanos = idle.toNanos();
+        long period = Math.clamp(idle.toMillis() / 4, 10, Duration.ofMinutes(1).toMillis());
+        sweeper.scheduleWithFixedDelay(this::sweep, period, period, TimeUnit.MILLISECONDS);
     }
 
     Entry open(Session session) {
@@ -80,17 +88,31 @@ final class Sessions implements AutoCloseable {
     }
 
     void close(String token) {
-        Optional.ofNullable(entries.remove(token)).ifPresent(entry -> entry.exclusively(session -> {
-            session.close();
-            return null;
-        }));
+        Optional.ofNullable(entries.remove(token)).ifPresent(entry -> {
+            try {
+                entry.exclusively(session -> {
+                    session.close();
+                    return null;
+                });
+            } catch (RuntimeException failure) {
+                LOG.log(System.Logger.Level.WARNING, "closing a studio session failed", failure);
+            }
+        });
     }
 
     int size() {
         return entries.size();
     }
 
-    private void expire() {
+    private void sweep() {
+        try {
+            expire();
+        } catch (RuntimeException failure) {
+            LOG.log(System.Logger.Level.WARNING, "closing idle studio sessions failed; the next sweep will try again", failure);
+        }
+    }
+
+    void expire() {
         long now = System.nanoTime();
         entries.values().stream()
                 .filter(entry -> (now - entry.lastUsed > idleNanos || now - entry.opened > LIFETIME_NANOS) && !entry.lock.isLocked())
@@ -101,6 +123,7 @@ final class Sessions implements AutoCloseable {
 
     @Override
     public void close() {
+        sweeper.shutdown();
         entries.keySet().stream().toList().forEach(this::close);
     }
 }

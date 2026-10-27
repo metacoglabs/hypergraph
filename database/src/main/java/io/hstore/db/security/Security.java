@@ -32,6 +32,7 @@ public final class Security {
     }
 
     public static final int ITERATIONS = 600_000;
+    private static final System.Logger LOG = System.getLogger("hstore.security");
     private static final long SCRAM_SECRET = 0x5343_5241_4D00_0000L;
     private static final int SCRAM_SECRET_WORDS = 4;
     public static final int MIN_PASSWORD_LENGTH = 8;
@@ -70,7 +71,7 @@ public final class Security {
     public static final Slot<Usage> USAGE = Slot.primary(46, "tenant-usage", new TreeSchema<>(83, "tenant-usage", FingerprintMode.SET,
             USAGE_CODEC, EntryMeasure.keyed(usage -> Hashing.of(usage.atoms(), usage.edges(), usage.payloadBytes()))));
 
-    public static final List<Slot<?>> SLOTS = List.of(TENANTS, USERS, USAGE);
+    public static final List<Slot<?>> SLOTS = List.of(TENANTS, USERS, USAGE, Access.GRANTS, Access.USER_OPTIONS, Access.TENANT_OPTIONS);
 
     public static final Tenant DEFAULT = new Tenant(Principal.DEFAULT_TENANT, "default", Quota.UNLIMITED);
 
@@ -234,6 +235,58 @@ public final class Security {
     public static void dropUser(Transaction txn, String name) {
         user(txn, name).orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
         txn.delete(USERS, userKey(name));
+        Access.forget(txn, name);
+    }
+
+    public static void setRole(Transaction txn, String name, Role role) {
+        User current = user(txn, name).orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
+        txn.put(USERS, userKey(name), new User(current.name(), current.salt(), current.hash(), current.iterations(), current.tenant(), role));
+    }
+
+    public static void keepUnchanged(Transaction txn, User user) {
+        txn.merge(USERS, userKey(user.name()), current -> current.equals(Optional.of(user)), current -> current);
+    }
+
+    public static long globalAdmins(View view) {
+        return users(view).stream().filter(Security::globalAdmin).count();
+    }
+
+    public static boolean globalAdmin(User user) {
+        return user.tenant() == Principal.DEFAULT_TENANT && user.role() == Role.ADMIN;
+    }
+
+    public static boolean hasGlobalAdmin(View view) {
+        return users(view).stream().anyMatch(Security::globalAdmin);
+    }
+
+    public static void keepAGlobalAdmin(Transaction txn, boolean hadGlobalAdmin) {
+        List<User> all = users(txn);
+        if (all.isEmpty() || !hadGlobalAdmin && all.stream().noneMatch(Security::globalAdmin)) {
+            return;
+        }
+        List<User> admins = all.stream().filter(user -> globalAdmin(user) && neverExpires(Access.options(txn, user.name()))).toList();
+        if (admins.isEmpty()) {
+            throw HStoreException.invalid("this would leave no admin of the default tenant whose password never expires; "
+                    + "create or restore one first");
+        }
+        for (User admin : admins) {
+            txn.merge(USERS, userKey(admin.name()), current -> current.filter(user -> user.name().equals(admin.name()) && globalAdmin(user)).isPresent(),
+                    current -> current);
+            txn.merge(Access.USER_OPTIONS, Hashing.of(admin.name()), current -> neverExpires(current.filter(options -> options.user().equals(admin.name()))
+                    .orElseGet(() -> Access.Options.defaults(admin.name()))), current -> current);
+        }
+    }
+
+    private static boolean neverExpires(Access.Options options) {
+        return options.validUntil() == Long.MAX_VALUE;
+    }
+
+    public static boolean expired(View view, String name) {
+        boolean expired = Access.options(view, name).expired(System.currentTimeMillis());
+        if (expired) {
+            LOG.log(System.Logger.Level.WARNING, "user \"{0}\" tried to sign in after its password expired", name);
+        }
+        return expired;
     }
 
     public static Optional<User> user(View view, String name) {
@@ -253,7 +306,7 @@ public final class Security {
         if (stored.isEmpty()) {
             derive(password, UNKNOWN_USER_SALT, ITERATIONS);
         }
-        return stored.filter(user -> matches(user, password));
+        return stored.filter(user -> matches(user, password)).filter(user -> !expired(view, user.name()));
     }
 
     public static boolean hasUsers(View view) {

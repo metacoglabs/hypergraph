@@ -22,7 +22,7 @@ public record Quota(long maxAtoms, long maxEdges, long maxPayloadBytes, long max
                 case "transaction_pages" -> new Quota(quota.maxAtoms, quota.maxEdges, quota.maxPayloadBytes, value, quota.maxQueryPages);
                 case "query_pages" -> new Quota(quota.maxAtoms, quota.maxEdges, quota.maxPayloadBytes, quota.maxTransactionPages, value);
                 default -> throw HStoreException.invalid("unknown quota '" + limit.getKey()
-                        + "', expected atoms, edges, payload_bytes, transaction_pages or query_pages");
+                        + "', expected atoms, edges, payload_bytes, transaction_pages, query_pages or connections");
             };
         }
         return quota;

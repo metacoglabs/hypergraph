@@ -9,7 +9,7 @@ in [wire protocol](../operations/wire-protocol.md) and [Studio](../operations/st
 
 ```java
 record Principal(String user, int tenant, Role role, int home)
-enum Role { ADMIN, WRITER, READER }
+enum Role { ADMIN, WRITER, READER, NONE }
 ```
 
 `tenant` is the tenant a session currently works in and `home` is the tenant the user belongs to. They only
@@ -17,16 +17,108 @@ differ after an admin of the default tenant runs `USE TENANT`. An ADMIN whose ho
 **global admin** (`Principal.global()`); an ADMIN of any other tenant is a **tenant admin** and never leaves its
 tenant.
 
-| Capability | global admin | tenant admin | WRITER | READER |
-|---|:---:|:---:|:---:|:---:|
-| read atoms of its tenant | yes | yes | yes | yes |
-| insert, update, delete atoms, members, properties, embeddings, evidence, state, signals | yes | yes | yes | no |
-| create, alter and drop users of its own tenant; `SHOW USERS`, `SHOW TENANTS` (own tenant only) | yes | yes | no | no |
-| create, refresh, drop and read materialized views (`SHOW VIEWS` lists names for every role) | yes | yes | no | no |
-| users of other tenants, `CREATE/ALTER TENANT` | yes | no | no | no |
-| DDL (`CREATE … TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`); the schema is shared by every tenant | yes | no | no | no |
-| branches (`USE BRANCH`, `SHOW BRANCHES`, `CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY`, `STATS`, `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | no | no | no |
-| switch tenant (`USE TENANT`, `Principal.inTenant`) | yes | no | no | no |
+| Capability | global admin | tenant admin | WRITER | READER | NONE |
+|---|:---:|:---:|:---:|:---:|:---:|
+| read atoms of its tenant | yes | yes | yes | yes | types with a READ grant |
+| insert, update, delete atoms, members, properties, embeddings, state, signals | yes | yes | yes | no | types with a WRITE grant |
+| record evidence and assertions (`EVIDENCE`, `QUALIFY`) | yes | yes | yes | no | no |
+| create, alter and drop users of its own tenant, grant and revoke type privileges to them; `SHOW USERS`, `SHOW TENANTS` (own tenant only), `SHOW GRANTS FOR` | yes | yes | no | no | no |
+| create, refresh, drop and read materialized views (`SHOW VIEWS` lists names for every role) | yes | yes | no | no | no |
+| users of other tenants, `CREATE/ALTER TENANT`, `GRANT MONITOR`, `GRANT MAINTAIN` | yes | no | no | no | no |
+| DDL (`CREATE … TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`); the schema is shared by every tenant | yes | no | no | no | no |
+| branches (`USE BRANCH`, `SHOW BRANCHES`, `CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY` | yes | no | no | no | no |
+| `STATS` and Studio's dashboard | yes | no | with `MONITOR` (default tenant) | with `MONITOR` (default tenant) | with `MONITOR` (default tenant) |
+| `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | no | with `MAINTAIN` (default tenant) | with `MAINTAIN` (default tenant) | with `MAINTAIN` (default tenant) |
+| switch tenant (`USE TENANT`, `Principal.inTenant`) | yes | no | no | no | no |
+
+### Privileges on types
+
+READER, WRITER and ADMIN cover every type of their tenant, like PostgreSQL's `pg_read_all_data` and
+`pg_write_all_data`. A user with `ROLE none` starts with no access to data and receives it per type:
+
+- `GRANT READ ON TYPE T TO u` lets `u` see atoms of `T`; `GRANT WRITE ON TYPE T TO u` also lets it create them and
+  change their properties, members, documents, embeddings, state and signals. `WRITE` includes `READ`.
+  `REVOKE WRITE` leaves `READ`; `REVOKE READ` removes both. Grants on types are refused for users whose role
+  already covers every type.
+- An atom of a type the user cannot read is hidden wherever an atom of another tenant is hidden, with the one
+  exception in the next point: `Reader.visible`, `atom`, `require` and every lookup built on them (see the
+  isolation model below) check the type as well as the tenant, so `DESCRIBE`, properties, its own incidences,
+  degrees, matches and semantic hits leave it out. Naming the type
+  in `MATCH`, `RANK`, `PATTERN` or a HORA statement fails with `no READ privilege on type T`, as `SELECT` on a table
+  without the privilege fails in PostgreSQL.
+- A hyperedge the user can read shows all its members, including members of types it cannot read: their ids and
+  what the edge itself records about each membership (role, weight, validity, qualifier), the way a foreign-key
+  column shows the key of a row in a table you cannot select from. An atom of another tenant never appears there.
+  Those members have no label, properties or incidences of their own for the user, and adding one to an edge
+  fails as if it did not exist. Keep such data in edge types the user cannot read when even the ids must stay
+  hidden.
+- Writing to a hyperedge needs `WRITE` on the edge's type; the members added must be readable, also for set
+  algebra `INTO`. Deleting an atom also removes it from every hyperedge that contains it, so a user with
+  `ROLE none` may only delete an atom when it can write every hyperedge of its tenant that holds it.
+- Referring to an atom by key (`@T:'key'`) needs `READ` on `T`; without it the reference fails with the
+  privilege error whether or not the key exists, so keys of unreadable types cannot be probed.
+- Evidence and assertions (`TRACE`, `EVIDENCE`, `QUALIFY` policies) belong to the tenant, not to a type, so a user
+  with `ROLE none` neither sees nor records them.
+- `EXPLAIN` for a user with `ROLE none` estimates property-index ranges as a tenth of the type's readable atoms
+  instead of counting the index, whose entries span every type, and neither uses nor feeds the tenant's
+  cardinality feedback.
+- Grants are kept in slot `GRANTS` = 75 (schema 110), keyed by user and type. `Reader` reads them from the latest
+  committed generation of main, not from the statement's snapshot, so a grant or revoke applies to the next
+  statement of every open session, inside an open transaction too, and `AT GENERATION` or `AS OF` cannot bring
+  back a revoked privilege. As in PostgreSQL, statements that already ran keep their effect. `DROP USER`
+  removes the user's grants, so a user later created with the same name starts without them.
+
+### Capabilities
+
+`GRANT MONITOR TO u` allows `STATS` and Studio's dashboard; `GRANT MAINTAIN TO u` allows `CHECKPOINT`,
+`CHECKPOINT AT` and `COMPACT`. They resemble PostgreSQL's `pg_monitor` and `pg_checkpoint`/`pg_maintain`: an
+operator can watch and maintain the engine without being a global admin. Only global admins grant them, and only
+to users of the default tenant, since the statements report on or act on every tenant. `HISTORY`, branches and
+DDL stay with global admins.
+
+### Password expiry and connection limits
+
+- `VALID UNTIL '<timestamp>'` on `CREATE USER` or `ALTER USER` makes the password stop working at that instant;
+  `VALID UNTIL 'infinity'` removes the limit. As in PostgreSQL it expires the password, not the account: open
+  sessions continue. A sign-in with an expired password fails with the usual `authentication failed`, over SCRAM
+  only at the last step, and the server logs `user "u" tried to sign in after its password expired`.
+- `CONNECTION LIMIT n` caps the user's signed-in sessions (wire connections, Studio sessions and embedded sessions
+  that authenticated) at `n`; `-1` means no limit. The next sign-in fails with `ABORTED_RESOURCE_LIMIT: too many
+  connections for user u`. Global admins are exempt, as PostgreSQL exempts superusers. A session that signs in
+  again gives back its old count before it takes the new one, so signing in again as the same user works at
+  `CONNECTION LIMIT 1`, and a user dropped and created in another tenant is counted there. A closed session runs
+  no further statement. A Studio session gives its count back when it closes, after
+  `studio_session_minutes` without requests, or after 12 hours, whichever comes first; a background sweep notices
+  idle sessions even when nobody uses Studio.
+- A per-user limit binds that user only. A tenant admin can create users, including other admins of its tenant,
+  so to cap a whole tenant use the tenant's `connections` quota: `CREATE TENANT t QUOTA (connections 20)` or
+  `ALTER TENANT t QUOTA (connections 20)` (`-1` removes it; like every quota key, `connections` ignores case). It counts every signed-in session of the tenant's users
+  and fails the next sign-in with `too many connections for tenant #id`. Only global admins change quotas.
+- User options live in slot `USER_OPTIONS` = 76 (schema 111) and tenant limits in `TENANT_OPTIONS` = 77 (schema
+  112); a user or tenant without an entry has no expiry and no limit. `CREATE USER` clears any entry left under
+  its name, and `GRANT`, `REVOKE` and `ALTER USER` place a commit-time precondition on the user's record, so a
+  grant or option that commits after a concurrent `DROP USER` fails. One that commits just before the `DROP USER`
+  can be left without a user, since the drop only removes the grants it saw; such a row is never shown by `SHOW
+  GRANTS` and never reaches a later user of that name, because `CREATE USER` clears it.
+
+### Changing roles
+
+`ALTER USER u ROLE r` changes the role; `u`'s open sessions then fail with "authenticate again" until they sign in
+again, so the new role applies at once. Only a global admin may change the role, password expiry or connection
+limit of an ADMIN, or the password of an ADMIN other than itself, so a tenant admin cannot lift limits put on
+itself or take over another admin of its tenant.
+
+Once the default tenant has an ADMIN, it must keep one whose password never expires while any user exists. Every
+`CREATE USER`, `ALTER USER` and `DROP USER` checks this against the state it leaves behind and is refused if none
+would remain: dropping or demoting the last one, giving its password any `VALID UNTIL` other than `'infinity'`,
+creating the first global admin with an expiry, or dropping the last admin and creating other users in the same
+transaction. An embedded application may still create tenant users before any global admin exists. Any expiry date eventually passes,
+so checking only that a password still works today would let a date one second ahead lock everyone out. The
+statement also places a commit-time precondition on the role record and the options record of every remaining
+such admin, so concurrent transactions that each remove or expire a different admin, or that create a user while
+another drops the last admin, cannot all commit, whichever records they write. Dropping the last user is allowed
+for a global admin and turns authentication off again under `authentication = auto`. Should every admin still be lost (for example to a forgotten password), `hstore shell` on
+the data directory runs as the built-in `system` admin, like PostgreSQL's single-user mode.
 
 `USE MAIN` is open to everyone. Without `TENANT`, `CREATE USER` puts the new user in the session's current
 tenant. A tenant admin who names another tenant, or another tenant's user, gets the same error as for a name that
@@ -90,8 +182,8 @@ The raw engine `View` is available as `reader.engineView()` for code that works 
 tenant and quota records, the SCRAM secret, the shared schema listing, branch merges and `DIFF` (global admins
 only), materialized view maintenance (filtered by the view's tenant), and records that carry their own tenant
 stamp (evidence, qualifiers, state, signals). `TenantBoundaryTest` in the database and server modules lists the
-files allowed to call it, each with its reason, and fails when any other file does, or when a listed file no
-longer needs it. Adding a raw read therefore means stating why it is safe in that list.
+files allowed to call it, or to reach data around `Reader` through `writer.transaction()` or engine snapshots, each
+with its reason, and fails when any other file does, or when a listed file no longer needs it. Adding a raw read therefore means stating why it is safe in that list.
 
 Writes call `require`, so a principal cannot modify an atom it cannot see. A hyperedge may only gain members that
 are visible to the writer (`Writer.incidence`, also used by `Writer.qualify`), so a tenant cannot reference another
@@ -115,7 +207,7 @@ Shared, non-tenant-scoped structures:
 | dictionary | interned strings | ids only; property, state schema and model names are limited to 128 characters, and only a global admin can create an embedding model |
 | HNSW indexes | one per model | results filtered by `Reader.visible` ([semantic](semantic.md#tenant-visibility)); vectors must match the model's length, and a row the index cannot take is logged and skipped ([semantic](semantic.md#embedding-records)) |
 | payload store | append-only byte store | payloads are reachable only through tenant-checked properties and embeddings |
-| branches, history, statistics | engine-level | global admins only (`USE BRANCH`, `SHOW BRANCHES`, `MERGE`, `STATS`, `HISTORY`, `DIFF`; Studio `/api/stats` and `/api/history`) |
+| branches, history, statistics | engine-level | global admins only (`USE BRANCH`, `SHOW BRANCHES`, `MERGE`, `HISTORY`, `DIFF`; Studio `/api/history`); `STATS` and Studio `/api/stats` also for users with `MONITOR`, `CHECKPOINT` and `COMPACT` also for users with `MAINTAIN` |
 
 ```sql
 CREATE TENANT clinic_b;

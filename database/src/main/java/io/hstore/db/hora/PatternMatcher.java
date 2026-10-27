@@ -51,6 +51,8 @@ public final class PatternMatcher {
     }
 
     public Stream<Map<String, Long>> match(Pattern pattern, Budget budget) {
+        pattern.variables().forEach(variable -> variable.type().flatMap(reader::type)
+                .ifPresent(type -> reader.requireReadableType(type.name())));
         Budget.Meter meter = budget.start();
         List<Map<String, Long>> bindings = List.of(Map.of());
         for (String variable : plan(pattern)) {

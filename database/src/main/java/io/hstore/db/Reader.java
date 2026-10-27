@@ -9,6 +9,7 @@ import io.hstore.db.property.PropertyIndex;
 import io.hstore.db.property.PropertySlots;
 import io.hstore.db.schema.Schema;
 import io.hstore.db.schema.TypeDef;
+import io.hstore.db.security.Access;
 import io.hstore.db.security.Principal;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.value.Json;
@@ -27,8 +28,10 @@ import io.hstore.engine.topology.Weight;
 import io.hstore.engine.tree.Entry;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.txn.IncidentEdge;
+import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.View;
 
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +51,8 @@ public sealed class Reader permits Writer {
     private final Principal principal;
 
     private Boolean onlyDefaultTenant;
+    private final Map<Integer, Optional<Access.Privilege>> grantedTypes = new HashMap<>();
+    private long grantsGeneration = -1;
 
     Reader(HypergraphDatabase database, View view, Principal principal) {
         this.database = database;
@@ -67,7 +72,7 @@ public sealed class Reader permits Writer {
         Boolean known = onlyDefaultTenant;
         if (known == null) {
             try (View.Unrecorded _ = view.unrecorded()) {
-                known = tenant() == Principal.DEFAULT_TENANT
+                known = principal.role().readsEveryType() && tenant() == Principal.DEFAULT_TENANT
                         && view.scan(EngineSlots.TYPES).last().map(entry -> entry.key() >>> 32 == Principal.DEFAULT_TENANT).orElse(true);
             }
             onlyDefaultTenant = known;
@@ -76,7 +81,40 @@ public sealed class Reader permits Writer {
     }
 
     public boolean visible(long atom) {
-        return view.atom(atom).map(record -> record.tenant() == tenant()).orElse(false);
+        return view.atom(atom).map(this::admits).orElse(false);
+    }
+
+    boolean admits(AtomRecord record) {
+        return record.tenant() == tenant() && readable(record.type());
+    }
+
+    public boolean readable(int type) {
+        return principal.role().readsEveryType() || privilege(type).isPresent();
+    }
+
+    public boolean writable(int type) {
+        return principal.role().writesEveryType() || privilege(type).filter(found -> found == Access.Privilege.WRITE).isPresent();
+    }
+
+    private Optional<Access.Privilege> privilege(int type) {
+        long current = database.engine().transactions().current().id();
+        if (current != grantsGeneration) {
+            grantedTypes.clear();
+            grantsGeneration = current;
+        }
+        return grantedTypes.computeIfAbsent(type, found -> {
+            try (Snapshot latest = database.engine().snapshot()) {
+                return Access.onType(latest, principal.user(), found);
+            }
+        });
+    }
+
+    public TypeDef requireReadableType(String name) {
+        TypeDef type = requireType(name);
+        if (!readable(type.id())) {
+            throw HStoreException.invalid("user " + principal.user() + " has no READ privilege on type " + type.name());
+        }
+        return type;
     }
 
     public boolean owns(long atom) {
@@ -92,21 +130,21 @@ public sealed class Reader permits Writer {
     }
 
     public boolean isEdge(long atom) {
-        return view.atom(atom).map(record -> record.tenant() == tenant() && record instanceof AtomRecord.EdgeRecord).orElse(false);
+        return view.atom(atom).map(record -> admits(record) && record instanceof AtomRecord.EdgeRecord).orElse(false);
     }
 
     public Optional<Hyperedge> hyperedge(long id) {
         return view.atom(id)
-                .filter(record -> record.tenant() == tenant())
+                .filter(this::admits)
                 .flatMap(record -> record instanceof AtomRecord.EdgeRecord edge ? Optional.of(view.edge(id, edge)) : Optional.empty());
     }
 
     public Optional<Incidence> incidence(long edge, long member) {
-        return owns(member) ? view.incidence(edge, member, tenant()) : Optional.empty();
+        return owns(member) ? view.incidence(edge, member, this::admits) : Optional.empty();
     }
 
     public boolean contains(long edge, long member) {
-        return owns(member) && view.contains(edge, member, tenant());
+        return owns(member) && view.contains(edge, member, this::admits);
     }
 
     public Stream<IncidentEdge> incidentEdges(long atom) {
@@ -148,7 +186,7 @@ public sealed class Reader permits Writer {
 
     public Optional<Atom> atom(long id) {
         return view.atom(id)
-                .filter(record -> record.tenant() == tenant())
+                .filter(this::admits)
                 .map(record -> new Atom(id, schema().require(view, record.type()), record));
     }
 
@@ -165,7 +203,7 @@ public sealed class Reader permits Writer {
     }
 
     public OptionalLong find(String type, String key) {
-        return type(type).map(found -> view.resolve(tenant(), found.id(), key)).orElse(OptionalLong.empty());
+        return type(type).map(found -> view.resolve(tenant(), requireReadableType(found.name()).id(), key)).orElse(OptionalLong.empty());
     }
 
     public long resolve(String type, String key) {
@@ -173,19 +211,19 @@ public sealed class Reader permits Writer {
     }
 
     public LongStream atoms(String type) {
-        return atomsOfType(requireType(type).id());
+        return atomsOfType(requireReadableType(type).id());
     }
 
     public LongStream atomsOfType(int typeId) {
-        return view.atomsOfType(tenant(), typeId);
+        return readable(typeId) ? view.atomsOfType(tenant(), typeId) : LongStream.empty();
     }
 
     public long count(String type) {
-        return countOfType(requireType(type).id());
+        return countOfType(requireReadableType(type).id());
     }
 
     public long countOfType(int typeId) {
-        return view.countOfType(tenant(), typeId);
+        return readable(typeId) ? view.countOfType(tenant(), typeId) : 0;
     }
 
     public long population(boolean edges) {
@@ -250,7 +288,7 @@ public sealed class Reader permits Writer {
     }
 
     public Hyperedge edge(long id) {
-        AtomRecord record = view.atom(id).filter(found -> found.tenant() == tenant())
+        AtomRecord record = view.atom(id).filter(this::admits)
                 .orElseThrow(() -> HStoreException.invalid("atom " + id + " does not exist"));
         if (!(record instanceof AtomRecord.EdgeRecord edge)) {
             throw HStoreException.invalid("atom " + id + " is not a hyperedge");
@@ -337,7 +375,7 @@ public sealed class Reader permits Writer {
     }
 
     public LongStream range(String type, String property, Optional<Value> low, Optional<Value> high, boolean lowInclusive, boolean highInclusive) {
-        TypeDef definition = requireType(type);
+        TypeDef definition = requireReadableType(type);
         Predicate<Value> accept = candidate -> low.map(bound -> comparable(candidate, bound)
                         && (lowInclusive ? candidate.compareTo(bound) >= 0 : candidate.compareTo(bound) > 0)).orElse(true)
                 && high.map(bound -> comparable(candidate, bound)
@@ -355,7 +393,7 @@ public sealed class Reader permits Writer {
             return PropertyIndex.candidates(view, tenant(), key.getAsInt(), tag, PropertyIndex.lowerKey(tag, low), PropertyIndex.upperKey(tag, high))
                     .filter(entry -> accept.test(entry.value()))
                     .mapToLong(Entry::key)
-                    .filter(owner -> view.atom(owner).map(record -> record.type() == definition.id() && record.tenant() == tenant()).orElse(false))
+                    .filter(owner -> view.atom(owner).map(record -> record.type() == definition.id() && admits(record)).orElse(false))
                     .sorted()
                     .distinct();
         }
