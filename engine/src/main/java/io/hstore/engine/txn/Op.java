@@ -104,6 +104,7 @@ public sealed interface Op {
 
         @Override
         public void apply(Workspace workspace) {
+            workspace.guard(slot);
             Optional<V> current = workspace.get(slot, key);
             if (!precondition.test(current)) {
                 String message = "precondition failed for " + slot + " key " + key;
