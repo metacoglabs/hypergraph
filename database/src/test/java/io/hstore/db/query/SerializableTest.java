@@ -137,6 +137,40 @@ class SerializableTest {
     }
 
     @Test
+    void unsettingAPropertyNobodyHasSetIsRecorded() {
+        begin(true);
+        assertEquals("100", cell(b.execute("MATCH NODE n:Account WHERE n = @Account:'y' RETURN n.balance")));
+        a.execute("SET @Account:'y'.balance = 0");
+        a.execute("UNSET @Account:'x'.other");
+        b.execute("SET @Account:'x'.other = true");
+        List<Optional<HStoreException.Conflict>> outcomes = new ArrayList<>();
+        for (Session session : List.of(b, a)) {
+            try {
+                session.execute("COMMIT");
+                outcomes.add(Optional.empty());
+            } catch (HStoreException.Conflict conflict) {
+                outcomes.add(Optional.of(conflict));
+            }
+        }
+        assertTrue(outcomes.get(1).isPresent(), "the second commit should fail");
+    }
+
+    @Test
+    void anUnsetOfAnAbsentPropertyIsNotLostUnderSnapshot() {
+        for (String property : List.of("balance", "neverSet", "alsoNeverSet")) {
+            admin.execute("UNSET @Account:'x'.balance");
+            begin(false);
+            a.execute("UNSET @Account:'x'." + property);
+            if (!property.equals("alsoNeverSet")) {
+                a.execute("INSERT NODE Note 'n-" + property + "'");
+            }
+            b.execute("SET @Account:'x'." + property + " = 7");
+            b.execute("COMMIT");
+            assertThrows(HStoreException.Conflict.class, () -> a.execute("COMMIT"), property);
+        }
+    }
+
+    @Test
     void undeclaredPropertiesDoNotConflictUnderSnapshot() {
         String flagged = "MATCH NODE n:Account WHERE n.flag = true RETURN count(*)";
         begin(false);

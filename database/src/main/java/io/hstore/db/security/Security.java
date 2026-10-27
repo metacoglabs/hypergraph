@@ -184,12 +184,13 @@ public final class Security {
         return users(view).stream().filter(Security::legacy).map(User::name).sorted().toList();
     }
 
-    public static void replaceLegacy(Transaction txn, User legacy, String password) {
+    public static User replaceLegacy(Transaction txn, User legacy, String password) {
         byte[] salt = new byte[16];
         RANDOM.nextBytes(salt);
         Scram.Verifier verifier = Scram.Verifier.of(password, salt, ITERATIONS);
-        txn.merge(USERS, userKey(legacy.name()), current -> current.equals(Optional.of(legacy)),
-                _ -> Optional.of(new User(legacy.name(), HEX.formatHex(salt), verifier.encode(), ITERATIONS, legacy.tenant(), legacy.role())));
+        User converted = new User(legacy.name(), HEX.formatHex(salt), verifier.encode(), ITERATIONS, legacy.tenant(), legacy.role());
+        txn.merge(USERS, userKey(legacy.name()), current -> current.equals(Optional.of(legacy)), _ -> Optional.of(converted));
+        return converted;
     }
 
     private static boolean matches(User user, String password) {
@@ -297,11 +298,15 @@ public final class Security {
     }
 
     public static Optional<Principal> authenticate(View view, String name, String password) {
+        return signIn(view, name, password).map(Security::principal);
+    }
+
+    public static Optional<User> signIn(View view, String name, String password) {
         Optional<User> stored = user(view, name);
         if (stored.isEmpty()) {
             derive(password, UNKNOWN_USER_SALT, ITERATIONS);
         }
-        return stored.filter(user -> matches(user, password)).filter(user -> !expired(view, user.name())).map(Security::principal);
+        return stored.filter(user -> matches(user, password)).filter(user -> !expired(view, user.name()));
     }
 
     public static boolean hasUsers(View view) {

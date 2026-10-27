@@ -14,8 +14,10 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.function.UnaryOperator;
 
@@ -105,5 +107,34 @@ class FakeServerTest {
     void aWeakIterationCountIsRefused() throws Exception {
         refused(REQUIRED, request -> "sasl " + base64(new String(Base64.getDecoder().decode(challenge(request).substring(5)),
                 StandardCharsets.UTF_8).replace("i=4096", "i=1")), "iteration count 1 ");
+    }
+
+    @Test
+    void theShellNeverSendsAPasswordOutsideScram() throws Exception {
+        List<String> received = new CopyOnWriteArrayList<>();
+        Fake fake = fake("hstore connection 1 at generation 2", request -> {
+            received.add(request);
+            return "authenticated as admin";
+        });
+        try (RemoteEndpoint shell = new RemoteEndpoint(fake.address(), Optional.empty())) {
+            for (String script : List.of("AUTHENTICATE admin PASSWORD 'pw-secret'; SHOW TYPES;",
+                    "AT GENERATION 1 AUTHENTICATE admin PASSWORD 'pw-secret';",
+                    "authenticate 'admin' 'pw-secret' ;;x",
+                    "SHOW TYPES; Authenticate admin PASSWORD 'pw-secret")) {
+                assertTrue(shell.execute(script).startsWith("error: AUTHENTICATE must be sent on its own"), script);
+            }
+            assertTrue(shell.execute("INSERT NODE Note {text: 'authenticate later'};").startsWith("authenticated"));
+        }
+        assertTrue(received.stream().noneMatch(request -> request.contains("pw-secret")), received.toString());
+    }
+
+    @Test
+    void theShellStopsAfterAFailedProof() throws Exception {
+        Fake fake = fake(REQUIRED, request -> request.startsWith("SASL SCRAM") ? challenge(request)
+                : request.startsWith("SASL ") ? forgedProof() : "[]");
+        try (RemoteEndpoint shell = new RemoteEndpoint(fake.address(), Optional.empty())) {
+            assertTrue(shell.execute("AUTHENTICATE admin PASSWORD 'pw-secret';").contains("could not prove"));
+            assertEquals("error: disconnected; connect again to continue", shell.execute("SHOW TYPES;"));
+        }
     }
 }

@@ -896,6 +896,18 @@ class SecurityTest {
     }
 
     @Test
+    void aPasswordChangeEndsAnExchangeAlreadyInFlight() {
+        try (Session session = new Session(database)) {
+            Scram.Client client = new Scram.Client("alice", "s3cret-pass", Optional.empty());
+            String serverFirst = session.scramFirst(Scram.MECHANISM, client.first(), Optional.empty());
+            admin.execute("ALTER USER alice PASSWORD 'rotated-pass'");
+            assertEquals(Optional.empty(), session.scramFinal(client.last(serverFirst)));
+            assertFalse(session.authenticated());
+        }
+        assertTrue(scram("alice", "rotated-pass").isPresent());
+    }
+
+    @Test
     void scramExchangesSignSessionsInAndCountFailures() {
         try (Session session = new Session(database)) {
             session.origin("192.0.2.10");

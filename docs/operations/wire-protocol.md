@@ -136,7 +136,10 @@ Possible replies:
 
 An `AUTHENTICATE` statement is refused with the same upgrade message on an authenticated connection too; send a
 new SASL exchange to switch users. `hstore connect` turns an `AUTHENTICATE` typed in its shell into that
-exchange. `CREATE USER` and `ALTER USER … PASSWORD` still carry the password in the statement; use TLS for them,
+exchange when it is the only statement it sends; any other script that contains `AUTHENTICATE` is refused in the
+shell without sending anything, so a mistyped sign-in cannot put the password on the wire. A server's `error`
+reply to a SASL message leaves the connection as it was; when the server's proof is missing or wrong the shell
+disconnects. `CREATE USER` and `ALTER USER … PASSWORD` still carry the password in the statement; use TLS for them,
 or pass a SCRAM verifier made on the client (`hstore verifier`, the format is
 `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>` as in PostgreSQL) in place of the password.
 
@@ -177,9 +180,11 @@ without a reply, so a web page cannot use a browser to post HQL to the port.
 
 If a user is dropped or its password changes, the next statement on each of its open connections fails with
 `user NAME was dropped, or its password or role changed; authenticate again`, and so does every statement after it until the
-connection sends a successful `AUTHENTICATE`.
+connection signs in again with a SASL exchange. An exchange that started before the change fails at its last step,
+since the server only accepts it while the user's record is the one it took the verifier from.
 
-Without `tls = on` the password travels in clear text. With TLS the server completes the handshake before it
+Signing in never sends the password, with or without TLS. Without `tls = on`, everything else travels in clear
+text, including the passwords in `CREATE USER` and `ALTER USER … PASSWORD`. With TLS the server completes the handshake before it
 sends the banner, and gives the client 10 seconds to do so. A client that fails or stalls the handshake (for
 example a plaintext client on the TLS port) is logged at LOG level and disconnected. `hstore connect` and
 `hstore ping` likewise give up after 10 seconds without a banner.
@@ -310,9 +315,9 @@ def saslprep(password):
     if password.isascii():
         return password
     mapped = "".join(" " if stringprep.in_table_c12(c) else "" if stringprep.in_table_b1(c) else c for c in password)
-    if not mapped:
+    if not mapped or any(map(stringprep.in_table_a1, mapped)):
         return password
-    prepared = unicodedata.ucd_3_2_0.normalize("NFKC", mapped)
+    prepared = unicodedata.normalize("NFKC", mapped)
     prohibited = (stringprep.in_table_a1, stringprep.in_table_c12, stringprep.in_table_c21_c22, stringprep.in_table_c3,
                   stringprep.in_table_c4, stringprep.in_table_c5, stringprep.in_table_c6, stringprep.in_table_c7,
                   stringprep.in_table_c8, stringprep.in_table_c9)

@@ -257,6 +257,21 @@ class DatabaseTest {
                     .boxed().toList());
             return null;
         });
+        long[] mixed = database.write(writer -> {
+            long late = writer.node("Paper", "late", Map.of());
+            writer.document(late, Json.parse("{\"venue\":{\"name\":2027}}"));
+            long none = writer.node("Paper", "none", Map.of());
+            writer.document(none, Json.parse("{\"venue\":{\"name\":null}}"));
+            return new long[]{late, none};
+        });
+        database.read(reader -> {
+            long paper = reader.resolve("Paper", "hypergraphs");
+            assertEquals(List.of(paper), reader.range("Paper", "$.venue.name", Optional.of(new Value.Text("A")), Optional.empty(), true, true)
+                    .boxed().toList());
+            assertEquals(List.of(mixed[0]), reader.range("Paper", "$.venue.name", Optional.empty(), Optional.of(new Value.Real(3000.5)), true, true)
+                    .boxed().toList());
+            return null;
+        });
     }
 
     @Test

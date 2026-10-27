@@ -147,6 +147,10 @@ final class RemoteEndpoint implements Endpoint {
             }
             return reply;
         }
+        if (Parser.mentionsAuthenticate(script)) {
+            return "error: AUTHENTICATE must be sent on its own, so that it signs in with SCRAM and the password never crosses the "
+                    + "connection; nothing was sent";
+        }
         return send(script);
     }
 
@@ -162,6 +166,9 @@ final class RemoteEndpoint implements Endpoint {
     }
 
     private String send(String script) {
+        if (socket.isClosed()) {
+            return "error: disconnected; connect again to continue";
+        }
         try {
             WireProtocol.send(out, script);
             return WireProtocol.receive(in, Long.MAX_VALUE).orElse("error: server closed the connection");

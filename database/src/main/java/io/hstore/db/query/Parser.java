@@ -90,6 +90,14 @@ public final class Parser {
         return statements.getFirst();
     }
 
+    public static boolean mentionsAuthenticate(String source) {
+        try {
+            return Lexer.tokenize(source).stream().anyMatch(token -> token.is("AUTHENTICATE"));
+        } catch (HStoreException unlexable) {
+            return source.toUpperCase(Locale.ROOT).matches("(?s).*\\bAUTHENTICATE\\b.*");
+        }
+    }
+
     private static Statement historical(Statement inner) {
         if (inner instanceof Statement.Authenticate) {
             throw HStoreException.invalid("AUTHENTICATE cannot run at a past generation");
