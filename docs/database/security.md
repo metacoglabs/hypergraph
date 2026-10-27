@@ -96,9 +96,9 @@ longer needs it. Adding a raw read therefore means stating why it is safe in tha
 Writes call `require`, so a principal cannot modify an atom it cannot see. A hyperedge may only gain members that
 are visible to the writer (`Writer.incidence`, also used by `Writer.qualify`), so a tenant cannot reference another
 tenant's atoms. Evidence sources, assertion sources and the evidence list of `QUALIFY` must be atoms, evidence or
-assertions of the writer's tenant (`Provenance.record/assertion`). `hstore check` lists any membership on main
-whose member belongs to a different tenant than its edge, with the `REMOVE` statement that undoes it, and
-`hstore check <dir> --repair-tenants` removes them in one transaction. Databases written before these checks
+assertions of the writer's tenant (`Provenance.record/assertion`). `hstore check` lists any membership on an active branch
+whose member belongs to a different tenant than its edge, with the statement that undoes it, and
+`hstore check <dir> --repair-tenants` removes them in one transaction per branch. Databases written before these checks
 existed could have such memberships from `QUALIFY`. A new database, and one that `hstore check` found clean or
 repaired, records that in `EngineSlots.SETTINGS`; `hstore serve` logs a WARNING at startup for a database without
 that record.

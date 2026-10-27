@@ -29,7 +29,7 @@ final class Check {
         boolean clean;
         boolean checked;
         try (Snapshot pinned = engine.snapshot()) {
-            List<TenantMemberships.Crossing> crossings = TenantMemberships.find(pinned);
+            List<TenantMemberships.Crossing> crossings = TenantMemberships.find(engine);
             report = run(engine, pinned.catalog()) + "\n" + isolation(crossings);
             clean = crossings.isEmpty();
             checked = TenantMemberships.checked(pinned);
@@ -46,7 +46,7 @@ final class Check {
     static String repair(HypergraphDatabase database) {
         List<TenantMemberships.Crossing> removed = database.repairTenantMemberships();
         if (removed.isEmpty()) {
-            return "tenant isolation: no hyperedge on main had a member from another tenant; nothing to repair";
+            return "tenant isolation: no hyperedge on any branch had a member from another tenant; nothing to repair";
         }
         return "tenant isolation: removed " + removed.size() + " memberships that crossed tenants:\n"
                 + removed.stream().map(crossing -> "  " + crossing.repair() + "   -- member of tenant " + crossing.memberTenant()
@@ -83,9 +83,9 @@ final class Check {
         List<String> crossings = found.stream().map(crossing -> "  " + crossing.repair() + "   -- member of tenant "
                 + crossing.memberTenant() + " in an edge of tenant " + crossing.edgeTenant()).toList();
         if (crossings.isEmpty()) {
-            return "tenant isolation: no hyperedge on main has a member from another tenant";
+            return "tenant isolation: no hyperedge on any branch has a member from another tenant";
         }
-        return "tenant isolation: " + crossings.size() + " memberships on main cross tenants; remove them with "
+        return "tenant isolation: " + crossings.size() + " memberships cross tenants; remove them with "
                 + "hstore check --repair-tenants, or run these as the edge's tenant:\n"
                 + String.join("\n", crossings.subList(0, Math.min(MAX_LISTED, crossings.size())))
                 + (crossings.size() > MAX_LISTED ? "\n  ... " + (crossings.size() - MAX_LISTED) + " more" : "");

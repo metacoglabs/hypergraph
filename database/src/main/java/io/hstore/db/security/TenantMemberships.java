@@ -3,8 +3,11 @@
 
 package io.hstore.db.security;
 
+import io.hstore.engine.StorageEngine;
 import io.hstore.engine.catalog.AtomRecord;
+import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.EngineSlots;
+import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.Transaction;
 import io.hstore.engine.txn.View;
 
@@ -16,22 +19,30 @@ public final class TenantMemberships {
 
     private static final long CHECKED = 0x4D45_4D42_4552_5301L;
 
-    public record Crossing(long edge, long member, int edgeTenant, int memberTenant) {
+    public record Crossing(String branch, long edge, long member, int edgeTenant, int memberTenant) {
         public String repair() {
-            return "REMOVE @" + member + " FROM @" + edge;
+            return (branch.equals("main") ? "" : "USE BRANCH " + branch + "; ") + "REMOVE @" + member + " FROM @" + edge;
         }
+    }
+
+    public static List<Crossing> find(StorageEngine engine) {
+        return engine.branches().stream().filter(Branch::isActive).flatMap(branch -> {
+            try (Snapshot snapshot = engine.snapshot(branch.id())) {
+                return find(snapshot, branch.name()).stream();
+            }
+        }).toList();
     }
 
     private TenantMemberships() {
     }
 
-    public static List<Crossing> find(View view) {
+    public static List<Crossing> find(View view, String branch) {
         return view.atoms()
                 .flatMap(entry -> entry.value() instanceof AtomRecord.EdgeRecord edge
                         ? view.edge(entry.key(), edge).memberIds().boxed()
                         .flatMap(member -> view.atom(member)
                                 .filter(record -> record.tenant() != edge.tenant())
-                                .map(record -> new Crossing(entry.key(), member, edge.tenant(), record.tenant()))
+                                .map(record -> new Crossing(branch, entry.key(), member, edge.tenant(), record.tenant()))
                                 .stream())
                         : Stream.empty())
                 .toList();
@@ -45,12 +56,9 @@ public final class TenantMemberships {
         txn.merge(EngineSlots.SETTINGS, CHECKED, Optional::isEmpty, _ -> Optional.of(1L));
     }
 
-    public static List<Crossing> repair(Transaction txn) {
-        List<Crossing> crossings = find(txn);
+    public static List<Crossing> repair(Transaction txn, String branch) {
+        List<Crossing> crossings = find(txn, branch);
         crossings.forEach(crossing -> txn.remove(crossing.edge(), crossing.member()));
-        if (!checked(txn)) {
-            markChecked(txn);
-        }
         return crossings;
     }
 }

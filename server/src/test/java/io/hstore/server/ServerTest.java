@@ -12,6 +12,7 @@ import io.hstore.db.security.Role;
 import io.hstore.engine.Dictionary;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.StorageEngine;
+import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.topology.Validity;
 import io.hstore.engine.topology.Weight;
@@ -496,22 +497,23 @@ class ServerTest {
                 writer.transaction().upsert(g, p, _ -> Incidence.of(p));
                 return null;
             });
+            database.engine().createBranch("side", Branch.MAIN);
             ids = new long[]{p, g};
         }
         try (StorageEngine engine = StorageEngine.open(directory, options.engine().withExtensions(HypergraphDatabase.extensionSlots(), List.of()))) {
             String report = Check.run(engine);
-            assertTrue(report.contains("1 memberships on main cross tenants"), report);
-            assertTrue(report.contains("REMOVE @" + ids[0] + " FROM @" + ids[1]), report);
+            assertTrue(report.contains("2 memberships cross tenants"), report);
+            assertTrue(report.contains("USE BRANCH side; REMOVE @" + ids[0] + " FROM @" + ids[1]), report);
         }
         try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
             String repaired = Check.repair(database);
-            assertTrue(repaired.contains("removed 1 memberships") && repaired.contains("REMOVE @" + ids[0] + " FROM @" + ids[1]), repaired);
+            assertTrue(repaired.contains("removed 2 memberships") && repaired.contains("REMOVE @" + ids[0] + " FROM @" + ids[1]), repaired);
             assertTrue(database.tenantMembershipsChecked());
             assertTrue(Check.repair(database).contains("nothing to repair"));
             assertEquals(1L, (long) database.read(reader -> reader.engineView().cardinality(ids[1])));
         }
         try (StorageEngine engine = StorageEngine.open(directory, options.engine().withExtensions(HypergraphDatabase.extensionSlots(), List.of()))) {
-            assertTrue(Check.run(engine).contains("no hyperedge on main has a member from another tenant"));
+            assertTrue(Check.run(engine).contains("no hyperedge on any branch has a member from another tenant"));
         }
     }
 
