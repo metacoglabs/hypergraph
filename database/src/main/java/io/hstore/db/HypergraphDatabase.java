@@ -40,6 +40,10 @@ import java.util.stream.Stream;
 
 public final class HypergraphDatabase implements AutoCloseable {
 
+    private static final System.Logger LOG = System.getLogger("hstore.security");
+    public static final String LEGACY_PASSWORD = "user \"{0}\" has a password stored by HStore 0.1, which cannot be used with SCRAM-SHA-256; "
+            + "it can sign in once through Studio to convert it, or an administrator can set a new one with ALTER USER";
+
     private static final int MAX_ATTEMPTS = 8;
 
     private final DatabaseOptions options;
@@ -68,14 +72,11 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     private byte[] prepareSignIns() {
-        boolean ready = read(reader -> Security.scramSecret(reader.view()).isPresent()
-                && Security.users(reader.view()).stream().noneMatch(Security::legacy));
-        if (!ready) {
+        if (read(reader -> Security.scramSecret(reader.view())).isEmpty()) {
             write(writer -> {
                 if (Security.scramSecret(writer.transaction()).isEmpty()) {
                     Security.createScramSecret(writer.transaction());
                 }
-                Security.upgradeLegacyUsers(writer.transaction());
                 return null;
             });
         }
@@ -83,8 +84,12 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public Scram.Server scram(Optional<byte[]> channelBinding) {
-        return new Scram.Server(name -> read(reader -> Security.user(reader.view(), name)).map(Security::verifier), scramSecret,
-                Security.ITERATIONS, channelBinding);
+        return new Scram.Server(name -> read(reader -> Security.user(reader.view(), name)).flatMap(user -> {
+            if (Security.legacy(user)) {
+                LOG.log(System.Logger.Level.WARNING, LEGACY_PASSWORD, user.name());
+            }
+            return Security.verifier(user);
+        }), scramSecret, Security.ITERATIONS, channelBinding);
     }
 
     public SignIns signIns() {
@@ -197,7 +202,19 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public Optional<Principal> authenticate(String user, String password, Optional<String> origin) {
-        return signIns.attempt(user, origin, () -> read(reader -> Security.authenticate(reader.view(), user, password)));
+        Optional<Principal> found = signIns.attempt(user, origin, () -> read(reader -> Security.authenticate(reader.view(), user, password)));
+        found.ifPresent(_ -> read(reader -> Security.user(reader.view(), user)).filter(Security::legacy).ifPresent(legacy -> {
+            try {
+                write(writer -> {
+                    Security.replaceLegacy(writer.transaction(), legacy, password);
+                    return null;
+                });
+                LOG.log(System.Logger.Level.INFO, "the password of user \"{0}\" is now stored as a SCRAM-SHA-256 verifier", user);
+            } catch (HStoreException changed) {
+                LOG.log(System.Logger.Level.INFO, "the password of user \"{0}\" changed while it was being converted: {1}", user, changed.getMessage());
+            }
+        }));
+        return found;
     }
 
     void chargePayload(int tenant, long bytes) {

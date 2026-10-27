@@ -132,17 +132,34 @@ record User(String name, String salt, String hash, int iterations, int tenant, R
   `StoredKey` is `SHA-256(HMAC(SaltedPassword, "Client Key"))` and `ServerKey` is
   `HMAC(SaltedPassword, "Server Key")`. Neither the password nor `SaltedPassword` is stored, so a copy of the
   users slot does not let anyone sign in without guessing the password first.
-- Older versions stored the hex `SaltedPassword` itself. The first open by this version turns every such record
-  into a verifier in one transaction (`Security.upgradeLegacyUsers`); the password is not needed, nothing changes
-  for the user, and a version from before the change can no longer read the upgraded records. Users created
-  before the iteration count was raised from 120,000 keep their count until their password is next changed.
+- Passwords go through SASLprep ([RFC 4013](https://www.rfc-editor.org/rfc/rfc4013)) before PBKDF2, as in
+  PostgreSQL: a password made only of ASCII characters is used as it is; otherwise non-ASCII spaces become
+  spaces, characters such as the soft hyphen are dropped and the result is NFKC-normalized. When the result would
+  contain a character that SASLprep prohibits, or one unassigned in Unicode 3.2, the original password is used
+  unchanged. The client applies the same rule, so `p\u00e4ssword` typed precomposed or decomposed signs in either
+  way, and passwords set through other SCRAM clients and libraries match.
+- Older versions stored the hex `SaltedPassword` itself. That value is exactly what a SCRAM client derives from
+  the password, so a copy of it from an old backup would be as good as the password. This version therefore never
+  uses an old record for SCRAM: such a user cannot sign in over the wire protocol, the server answers it as it
+  answers an unknown name, and logs a WARNING naming the user. The user's next sign-in through Studio, or an
+  `AUTHENTICATE` statement in an embedded or Studio session, checks the password against the old record and then
+  replaces the record with a verifier under a new random salt and 600,000 iterations
+  (`Security.replaceLegacy`), so old backups give nothing beyond an offline guess. An administrator can instead
+  set a new password with `ALTER USER`. `hstore serve` logs a WARNING at startup listing the users that still
+  have an old record. A version from before this change cannot read the converted records.
 - `CREATE USER` and `ALTER USER … PASSWORD` accept a verifier in place of a password (made by `hstore verifier`
-  or any SCRAM library), with at least 4,096 iterations and an 8-byte salt; the length rule cannot apply to it.
+  or any SCRAM library), with 4,096 to 10,000,000 iterations and a salt of at least 8 bytes; the length rule cannot
+  apply to it. A password that starts with `SCRAM-SHA-256$` but is not such a verifier is refused rather than
+  stored as a password. The upper bound keeps one Studio or embedded sign-in, where the server runs PBKDF2, to a
+  few seconds of CPU; clients refuse a server that asks for more.
 - The wire protocol signs in with SCRAM ([wire protocol](../operations/wire-protocol.md#authentication)): the
   client proves knowledge of the password against `StoredKey` and the server proves knowledge of `ServerKey`.
   For a name that does not exist the server answers with a salt derived from the name and a 256-bit secret
   created when the database is first opened (stored under `EngineSlots.SETTINGS`), so the exchange looks the
-  same for every name and only fails at its last step.
+  same for every name and only fails at its last step. The iteration count offered for an unknown name is
+  600,000, so a user whose verifier was made with another count (for example one copied from PostgreSQL, which
+  defaults to 4,096) can be told apart from an unknown name; PostgreSQL behaves the same way. Give such users a
+  new password if their names must not be guessable.
 - `Security.authenticate`, used by Studio's login, `AUTHENTICATE` statements in embedded and Studio sessions and
   the Java API, derives `StoredKey` from the given password and compares with `MessageDigest.isEqual`. For a name
   that does not exist it still runs PBKDF2 against a fixed salt, so the response time does not tell which names

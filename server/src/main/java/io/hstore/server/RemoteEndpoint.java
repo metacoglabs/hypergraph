@@ -60,7 +60,13 @@ final class RemoteEndpoint implements Endpoint {
             close();
             throw new IllegalStateException(banner);
         }
-        if (banner.endsWith("authentication required") && credentials.isPresent()) {
+        if (credentials.isPresent() && !banner.endsWith("authentication required")) {
+            close();
+            throw new IllegalArgumentException("the server at " + address.getHostString() + ":" + address.getPort()
+                    + " did not ask for a password, so it cannot prove that it is the server you meant to reach; not signing in as "
+                    + credentials.get().user());
+        }
+        if (credentials.isPresent()) {
             String reply;
             try {
                 reply = signIn(credentials.get());
@@ -80,23 +86,29 @@ final class RemoteEndpoint implements Endpoint {
         Optional<byte[]> binding = socket instanceof SSLSocket secure ? peerEndPoint(secure) : Optional.empty();
         Scram.Client client = new Scram.Client(credentials.user(), credentials.password(), binding);
         String first = send(Server.SASL + client.mechanism() + " " + encode(client.first()));
-        if (!first.startsWith("sasl ")) {
+        if (first.startsWith("error")) {
             return first;
         }
-        String last = send(Server.SASL + encode(client.last(decode(first.substring("sasl ".length())))));
-        if (last.startsWith("error")) {
-            return last;
-        }
-        String[] lines = last.split("\n", 2);
-        if (lines.length != 2 || !lines[0].startsWith("authenticated as ") || !lines[1].startsWith("sasl ")) {
-            return "error: unexpected reply to the sign-in: " + last;
+        if (!first.startsWith("sasl ") || first.contains("\n")) {
+            close();
+            return "error: the server did not answer with a SCRAM challenge, so it cannot prove that it knows the password; disconnected";
         }
         try {
+            String last = send(Server.SASL + encode(client.last(decode(first.substring("sasl ".length())))));
+            if (last.startsWith("error")) {
+                return last;
+            }
+            String[] lines = last.split("\n", 2);
+            if (lines.length != 2 || !lines[0].equals("authenticated as " + credentials.user()) || !lines[1].startsWith("sasl ")) {
+                close();
+                return "error: unexpected reply to the sign-in, so the server did not prove that it knows the password; disconnected";
+            }
             client.verify(decode(lines[1].substring("sasl ".length())));
-        } catch (HStoreException failure) {
-            return "error: " + failure.getMessage();
+            return lines[0];
+        } catch (HStoreException | IllegalStateException failure) {
+            close();
+            return "error: " + failure.getMessage() + "; disconnected";
         }
-        return lines[0];
     }
 
     private static Optional<byte[]> peerEndPoint(SSLSocket socket) {

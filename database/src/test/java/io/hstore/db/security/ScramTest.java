@@ -149,8 +149,7 @@ class ScramTest {
         assertArrayEquals(pbkdf2(password.getBytes(StandardCharsets.UTF_8), RFC_SALT, 4096), salted);
         Security.User legacy = new Security.User("legacy", HexFormat.of().formatHex(RFC_SALT), HexFormat.of().formatHex(salted), 4096, 0, Role.READER);
         assertTrue(Security.legacy(legacy));
-        assertEquals(Scram.Verifier.of(password, RFC_SALT, 4096), Security.verifier(legacy));
-        assertTrue(Security.verifier(legacy).matches(password));
+        assertEquals(Optional.empty(), Security.verifier(legacy));
     }
 
     private static byte[] pbkdf2(byte[] password, byte[] salt, int iterations) throws Exception {
@@ -166,5 +165,60 @@ class ScramTest {
             }
         }
         return result;
+    }
+
+    @Test
+    void saslPrepMatchesTheStringprepProfile() {
+        List<List<String>> vectors = List.of(
+                List.of("I\u00adX", "IX"),
+                List.of("user", "user"),
+                List.of("USER", "USER"),
+                List.of("\u00aa", "a"),
+                List.of("\u2168", "IX"),
+                List.of("\u0007x", "\u0007x"),
+                List.of("\u06271", "\u06271"),
+                List.of("\u0627\u0628", "\u0627\u0628"),
+                List.of("p\u00e4ssw\u00f6rd", "p\u00e4ssw\u00f6rd"),
+                List.of("pa\u0308ssword", "p\u00e4ssword"),
+                List.of("\u00a0lead", " lead"),
+                List.of("ab\u200bcd", "ab cd"),
+                List.of("\u2000\u3000", "  "),
+                List.of("\u00ad", "\u00ad"),
+                List.of("\ufb01ne", "fine"),
+                List.of("\uff21\uff22", "AB"),
+                List.of("\u0221", "\u0221"),
+                List.of("\ud83d\ude00pass", "\ud83d\ude00pass"),
+                List.of("\ue000secret", "\ue000secret"),
+                List.of("\u05d0x\u05d1", "\u05d0x\u05d1"),
+                List.of("\u05d0\u05d1", "\u05d0\u05d1"),
+                List.of("\u212b", "\u00c5"),
+                List.of("\u1e9b\u0323", "\u1e69"),
+                List.of("caf\u00e9-\u2163", "caf\u00e9-IV"),
+                List.of("\u0340a", "\u0300a"),
+                List.of("\u200eltr\u00e9", "\u200eltr\u00e9"),
+                List.of("\ud83c\udd00x", "\ud83c\udd00x"));
+        for (List<String> vector : vectors) {
+            assertEquals(vector.get(1), SaslPrep.prepare(vector.get(0)), vector.get(0));
+        }
+    }
+
+    @Test
+    void passwordsAreComparedAfterSaslPrep() {
+        Scram.Verifier composed = Scram.Verifier.of("p\u00e4ssword-\u2163", "pepper-salt".getBytes(StandardCharsets.UTF_8), 4096);
+        assertTrue(composed.matches("pa\u0308ssword-IV"));
+        Scram.Client client = new Scram.Client("ann", "pa\u0308ssword-IV", Optional.empty());
+        Scram.Server server = new Scram.Server(_ -> Optional.of(composed), new byte[32], 4096, Optional.empty());
+        String serverFirst = server.first(Scram.MECHANISM, client.first());
+        Scram.Outcome.Accepted accepted = assertInstanceOf(Scram.Outcome.Accepted.class, server.last(client.last(serverFirst)));
+        client.verify(accepted.serverFinal());
+    }
+
+    @Test
+    void verifiersMustUseABoundedIterationCount() {
+        Scram.Verifier sound = Scram.Verifier.of("pw-secret", "pepper-salt".getBytes(StandardCharsets.UTF_8), 4096);
+        assertTrue(Scram.Verifier.parse(sound.encode()).isPresent());
+        for (String iterations : List.of("1", "4095", "10000001", "2000000000")) {
+            assertTrue(Scram.Verifier.parse(sound.encode().replace("$4096:", "$" + iterations + ":")).isEmpty(), iterations);
+        }
     }
 }

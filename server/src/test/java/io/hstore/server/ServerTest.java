@@ -441,8 +441,24 @@ class ServerTest {
                     WireProtocol.send(out, "SASL @@@");
                     assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().startsWith("error [AUTHENTICATION_FAILED]"));
                 }
+                try (Socket socket = new Socket(address.getHostString(), address.getPort())) {
+                    socket.setSoTimeout(10_000);
+                    InputStream in = new java.io.BufferedInputStream(socket.getInputStream());
+                    java.io.Writer out = new java.io.OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
+                    assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().endsWith("authentication required"));
+                    for (String wrapped : List.of("AT GENERATION 1 AUTHENTICATE admin PASSWORD 'pw-secret'",
+                            "AS OF '2020-01-01T00:00:00Z' AUTHENTICATE admin PASSWORD 'pw-secret'")) {
+                        WireProtocol.send(out, wrapped);
+                        assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().startsWith("error"));
+                        WireProtocol.send(out, "WHOAMI;");
+                        assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().contains("authenticate first"));
+                    }
+                }
                 try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")))) {
                     assertTrue(admin.execute("AUTHENTICATE admin PASSWORD 'pw-secret'; WHOAMI;").contains("upgrade your HStore client"));
+                    admin.execute("CREATE USER other PASSWORD 'other-secret' ROLE reader;");
+                    assertTrue(admin.execute("AT GENERATION 1 AUTHENTICATE other PASSWORD 'other-secret'; WHOAMI;").startsWith("error"));
+                    assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
                     assertTrue(admin.execute("AUTHENTICATE admin PASSWORD 'pw-secret';").startsWith("authenticated as admin"));
                     assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
                 }
