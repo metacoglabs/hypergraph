@@ -589,9 +589,17 @@ Session semantics (`Session`):
 
 - Without `BEGIN`, every statement runs in its own transaction (`HypergraphDatabase.write`, retried up to 8 times
   on conflict) or snapshot.
-- `BEGIN` opens a session transaction with `SNAPSHOT` isolation (`SERIALIZABLE` adds read-set validation, see
-  [transactions](../transactions/transactions.md)); subsequent reads see its writes. `COMMIT` publishes it,
-  `ROLLBACK` aborts it; closing a session aborts an open transaction.
+- `BEGIN` opens a session transaction with `SNAPSHOT` isolation; subsequent reads see its writes. `COMMIT`
+  publishes it, `ROLLBACK` aborts it; closing a session aborts an open transaction. Under `SNAPSHOT`, two
+  transactions can each read a predicate, write something the other's predicate depends on, and both commit
+  (write skew).
+- `BEGIN SERIALIZABLE` also records what each statement read: the atoms and properties it looked at, the posting
+  lists behind `HAS`, `CONTAINS`, `degree()` and type scans, the property index range of an indexed `WHERE`, and
+  canonical key lookups, including ones that found nothing. `COMMIT` fails with a retryable conflict
+  (`RETRYABLE_CONFLICT`, "serializable read of ... was invalidated") if a transaction that committed in the
+  meantime changed any of it. The session transaction is closed either way; run it again from `BEGIN`. Planner
+  estimates and `EXPLAIN` are not recorded. See [transactions](../transactions/transactions.md#6-isolation) for the
+  exact granularity.
 - `USE BRANCH b` / `USE MAIN` / `USE TENANT t` are rejected inside a transaction.
 - `AT GENERATION g s` and `AS OF t s` run the single statement `s` against a retained historical generation
   (`Database.readAt`); writes inside are rejected (`historical generations are read-only`). `AS OF` resolves the

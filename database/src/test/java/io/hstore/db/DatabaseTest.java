@@ -31,6 +31,7 @@ import io.hstore.db.view.ViewCell;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.topology.Validity;
+import io.hstore.engine.txn.Isolation;
 import io.hstore.engine.txn.TxnOptions;
 
 import org.junit.jupiter.api.AfterEach;
@@ -43,6 +44,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
@@ -76,6 +80,29 @@ class DatabaseTest {
     @AfterEach
     void close() {
         database.close();
+    }
+
+    @Test
+    void serializableRangesOverAnUndeclaredPropertyStillConflict() throws Exception {
+        List<Long> people = database.write(writer -> List.of(writer.node("Paper", "a", Map.of()), writer.node("Paper", "b", Map.of())));
+        TxnOptions serializable = TxnOptions.defaults().withIsolation(Isolation.SERIALIZABLE);
+        CountDownLatch bothRead = new CountDownLatch(2);
+        List<CompletableFuture<Void>> flaggers = people.stream().map(person -> CompletableFuture.runAsync(() -> database.write(serializable, writer -> {
+            long flagged = writer.range("Paper", "flag", Optional.of(new Value.Bool(true)), Optional.of(new Value.Bool(true)), true, true).count();
+            bothRead.countDown();
+            try {
+                assertTrue(bothRead.await(10, TimeUnit.SECONDS));
+            } catch (InterruptedException e) {
+                throw new IllegalStateException(e);
+            }
+            if (flagged == 0) {
+                writer.set(person, "flag", new Value.Bool(true));
+            }
+            return null;
+        }))).toList();
+        CompletableFuture.allOf(flaggers.toArray(CompletableFuture[]::new)).get(30, TimeUnit.SECONDS);
+        long flagged = database.read(reader -> reader.range("Paper", "flag", Optional.of(new Value.Bool(true)), Optional.of(new Value.Bool(true)), true, true).count());
+        assertEquals(1, flagged);
     }
 
     @Test
@@ -225,6 +252,23 @@ class DatabaseTest {
             long paper = reader.resolve("Paper", "hypergraphs");
             assertEquals("VLDB", reader.document(paper).orElseThrow().select("$.venue.name").findFirst().orElseThrow().render().replace("'", ""));
             assertEquals(List.of(paper), reader.range("Paper", "$.venue.year", Optional.of(new Value.Int(2026)), Optional.empty(), true, true)
+                    .boxed().toList());
+            assertEquals(List.of(paper), reader.range("Paper", "$.venue.name", Optional.of(new Value.Text("VLDB")), Optional.of(new Value.Text("VLDB")), true, true)
+                    .boxed().toList());
+            return null;
+        });
+        long[] mixed = database.write(writer -> {
+            long late = writer.node("Paper", "late", Map.of());
+            writer.document(late, Json.parse("{\"venue\":{\"name\":2027}}"));
+            long none = writer.node("Paper", "none", Map.of());
+            writer.document(none, Json.parse("{\"venue\":{\"name\":null}}"));
+            return new long[]{late, none};
+        });
+        database.read(reader -> {
+            long paper = reader.resolve("Paper", "hypergraphs");
+            assertEquals(List.of(paper), reader.range("Paper", "$.venue.name", Optional.of(new Value.Text("A")), Optional.empty(), true, true)
+                    .boxed().toList());
+            assertEquals(List.of(mixed[0]), reader.range("Paper", "$.venue.name", Optional.empty(), Optional.of(new Value.Real(3000.5)), true, true)
                     .boxed().toList());
             return null;
         });

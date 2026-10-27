@@ -11,6 +11,7 @@ import io.hstore.engine.index.Postings;
 import io.hstore.engine.tree.Entry;
 import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.Tree;
+import io.hstore.engine.txn.View;
 import io.hstore.engine.txn.Workspace;
 
 import java.util.Optional;
@@ -53,8 +54,10 @@ public final class PropertyIndex {
         return new Tree<>(PropertySlots.postingSchema(), directory.source(), root);
     }
 
-    public static Stream<Entry<Value>> candidates(Tree<IndexRoot> directory, int tenant, int propertyKey, TypeTag tag, long lowKey, long highKey) {
-        Tree<Postings<Value>> values = values(directory, tenant, propertyKey, tag);
+    public static Stream<Entry<Value>> candidates(View view, int tenant, int propertyKey, TypeTag tag, long lowKey, long highKey) {
+        Ref root = view.nested(PropertySlots.PROPERTY_INDEX, PropertySlots.directoryKey(tenant, propertyKey, tag), lowKey, highKey)
+                .map(IndexRoot::root).orElse(Ref.EMPTY);
+        Tree<Postings<Value>> values = new Tree<>(PropertySlots.postingSchema(), view.source(), root);
         return values.range(lowKey, highKey)
                 .flatMap(bucket -> PropertySlots.VALUE_POSTINGS.stream(values, bucket.key()));
     }

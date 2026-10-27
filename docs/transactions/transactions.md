@@ -134,7 +134,7 @@ commit(txn):
 
 ### 5.1 Fast path: per-slot merge
 
-`Workspace.untouchedSince(latest, includingReads)` is true when every slot the transaction **changed** still has the same root in `latest` as in its base (`Ref.same`). A slot counts as changed when its tree root differs from the base root. Slots that were only read are ignored for `SNAPSHOT` transactions. For `SERIALIZABLE` transactions they are included, because the fast path skips `validateReads`. When the check passes, the commit takes the latest root vector and overlays only the changed slots (`rebasedOnto`). A concurrent commit to a slot this transaction merely read is therefore kept, and commits that write disjoint slots never replay, however many other commits landed in between.
+`Workspace.untouchedSince(latest, includingReads)` is true when every slot the transaction **changed** still has the same root in `latest` as in its base (`Ref.same`). A slot counts as changed when its tree root differs from the base root, or when the transaction wrote to it at all: every keyed write (`put`, `delete`, `update`, `merge`) carries a precondition (for `put`, `delete` and `update`, that the key still holds what the transaction saw), and a write that leaves the value as it was does not change the root. Such a slot is recorded by `Workspace.guard`, so when it moved the commit replays and checks the precondition against the latest state. Without that, a write that changes nothing (an `UNSET` of a property the atom does not have, or a `merge` used only as a guard, `current -> current` with a precondition on another record) would never be checked whenever the transaction's other writes went to slots that had not moved, and a concurrent change of that key would be lost. Slots that were only read are ignored for `SNAPSHOT` transactions. For `SERIALIZABLE` transactions they are included, because the fast path skips `validateReads`. When the check passes, the commit takes the latest root vector and overlays only the changed slots (`rebasedOnto`). A concurrent commit to a slot this transaction merely read is therefore kept, and commits that write disjoint slots never replay, however many other commits landed in between.
 
 `requestsStable` handles idempotency keys: if the transaction carries a request id, the `REQUESTS` slot is written inside the commit lock, so the fast path additionally requires that `REQUESTS` itself has not moved since the base.
 
@@ -187,14 +187,67 @@ The same walk adds up the heap those nodes take, which the commit adds to the wr
 
 `TxnOptions(branch, isolation, requestId, maxPages)`; defaults are `Branch.MAIN`, `Isolation.SNAPSHOT`, no request id, `Long.MAX_VALUE` pages.
 
-**SNAPSHOT.** Reads come from the pinned base generation plus the transaction's own writes. Write-write conflicts are detected by replay (section 5.2). Read-write anomalies (write skew) are possible, as in any snapshot-isolation system.
+**SNAPSHOT.** Reads come from the pinned base generation plus the transaction's own writes. Write-write conflicts are detected by replay (section 5.2). Read-write anomalies (write skew, and phantoms where a commit rests on a predicate that a concurrent commit changed) are possible, as in any snapshot-isolation system.
 
-**SERIALIZABLE.** `View` calls `observeAtom` / `observeKey` on every read; under `SERIALIZABLE` the transaction records the value as of the **base** snapshot for each atom (`atomReads`) and each `(slot, key)` (`keyReads`) on first observation. On the slow path, `validateReads(latest)` re-reads each recorded key in the latest roots and raises a conflict if:
+**SERIALIZABLE.** The transaction records what it read and, on the slow path, `validateReads(latest)` checks every recorded read against the latest roots under the commit lock. A read is valid when the latest committed state still gives the value the transaction saw in its base snapshot. If every read is valid the transaction can be placed at its commit point in a serial order, so the serial order is the commit order. Recording goes through hooks on `View` (`observeAtom`, `observeKey`, `observeRange`, `observeSlot`). They are empty methods on `Snapshot`, and `Transaction` returns from them at once unless the isolation is `SERIALIZABLE` and no unrecorded scope is open, so `SNAPSHOT` transactions and snapshots don't pay for them.
 
-* a key read: `now.equals(seen)` is false;
-* an atom read: presence differs, or the record differs **unless** both are `EdgeRecord`s with the same member root (`Ref.same(was.members(), is.members())`). Records compare inline member trees by content, so they count as equal when the members are. Membership changes made by replay are still validated through `verifyEdge`.
+Each read is recorded once, on first observation, with the value from the **base** roots (`snapshotValue`), not the value the transaction saw through its own writes. Validation compares that base value with the latest committed value, so a transaction's own writes never invalidate its own reads; replay then applies its writes on top of the latest roots.
 
-The fast path never needs read validation: it is only taken when every touched slot, including every read slot, is byte-for-byte the same root as at the base. Validation is therefore at key granularity when slots moved and free when they did not.
+| Read on `View` | Recorded as | Valid at commit when |
+|---|---|---|
+| `atom`, `exists`, `edge`, `requireEdge`, `contains`, `incidence`, `cardinality` | atom read (`atomReads`) of the atom | presence is unchanged and the record is equal, or both are `EdgeRecord`s with the same member root (`Ref.same`) |
+| `get(slot, key)` | key read (`keyReads`) of `(slot, key)` | the value has the same content (below) |
+| `incident`, `forEachIncidentEdge`, `incidentTree`, `degree` | key read of `REVERSE` at the atom, which is the atom's whole incidence posting list | the posting list has the same content |
+| `atomsOfType`, `typeTree`, `countOfType` | key read of `TYPES` at `typeKey(tenant, type)`, the posting list of that type in that tenant | the posting list has the same content |
+| `resolve(tenant, type, key)` | key read of `CANONICAL` at `canonicalKey(tenant, type, key)` | the posting list of that hash is unchanged, so a lookup that found nothing fails once the key is inserted, and one that found an atom fails once it is deleted or renamed |
+| `nested(slot, key, low, high)` | range read (`rangeReads`) | the trees nested in the value at `key` have the same entries between `low` and `high`; an absent value counts as empty nested trees |
+| `scan(slot)`, `atoms()` | slot read (`slotReads`) of the whole slot | the slot has the same content |
+
+The database module reads the property index through `nested`: `Reader.range` passes the directory key `directoryKey(tenant, property, tag)` of `PROPERTY_INDEX` and the order-key range `[lowKey, highKey]` of the predicate. `MATCH NODE n:Account WHERE n.oncall = true` therefore depends on the `true` bucket of `oncall` only, and a commit that changes some other account's `oncall` from `true` to `false` invalidates it, while a commit that only adds `oncall = false` accounts does not.
+
+A property name that no transaction has used yet has no dictionary key, and no property record holds it. `Reader.property` still reads the atom's property record in that case, and `Reader.range` reads the type's posting list and the property record of each atom of the type, but only when `View.recordsReads()` is true, so `SNAPSHOT` transactions skip that work. `MATCH NODE n:Account WHERE n.flag = true` therefore conflicts with a concurrent `SET @Account:'x'.flag = true` even when `flag` is not declared.
+
+Same content means `TreeDiff.sameValue` for values and `TreeDiff.sameContent` for trees. Equal values are the same. Values that hold nested trees (`Postings.Promoted`, the property index's `IndexRoot`, edge records) are the same when their other fields are equal and each nested tree holds the same entries. Inline posting lists compare by their keys and values. Tree comparison walks `TreeDiff.diff`, which skips subtrees that are `Ref.same`, so it costs time proportional to the changed region, and a range read prunes subtrees whose summary lies outside the range. Because `Ref.same` treats a pending node as the same tree as the stored reference a published checkpoint wrote it as, a checkpoint that finishes between a read and the commit doesn't cause a conflict, for inline and promoted posting lists alike.
+
+The fast path never needs read validation: it is only taken when every touched slot, including every slot that was only read, has the same root as at the base. Validation is therefore at the granularity above when slots moved and free when they did not.
+
+**Granularity and false positives.** Validation never accepts a transaction whose recorded reads changed, but it can reject transactions that a finer check would accept. Such conflicts are retryable like any other.
+
+* Posting lists are validated whole. Any change to an atom's incidence list invalidates `incident(atom)`, including an edge that a role filter or tenant filter would have skipped; any new atom of a type invalidates a scan of that type, even if a residual predicate would have rejected it.
+* Canonical keys are validated per hash bucket of `(tenant, type, key)`.
+* `scan(slot)` and `atoms()` are validated per slot, so any change to the slot conflicts. Database code that scans whole slots (schema listings, tenant and user listings, materialized view data, signals, exact semantic search) is protected at that granularity.
+* Promotion bounds the read set, in the spirit of predicate-lock promotion in PostgreSQL's serializable snapshot isolation: when a transaction records more than `Transaction.PROMOTE_AFTER` (8192) key and range reads in one slot, or that many atom reads, they are replaced by one read of the whole slot (`CATALOG` for atoms). After that, any commit that writes the slot, in any tenant, invalidates the transaction, so a long `SERIALIZABLE` transaction under a steady write load can fail on every retry. Split such work into shorter transactions, or run it under `SNAPSHOT` when it doesn't depend on predicate reads.
+* Validation fixes the serial order to the commit order. A transaction that read something a concurrent transaction changed and committed first fails, even when the opposite order would have been serial, for example after reading that a key is absent while the other transaction inserts it.
+* A value that a concurrent commit changed and changed back counts as unchanged.
+
+A read-only transaction commits with `READ_ONLY` and validates nothing. Its reads come from one committed generation, which is a prefix of the commit order, so it is serializable as it stands.
+
+**Unrecorded reads.** `View.unrecorded()` opens a scope in which the transaction records nothing:
+
+```java
+try (View.Unrecorded _ = view.unrecorded()) {
+    estimate = reader.countOfType(type);
+}
+```
+
+`Snapshot` and `SNAPSHOT` transactions return one shared no-op handle, so the call allocates nothing. A `SERIALIZABLE` transaction counts open scopes, so scopes nest, and returns a handle it allocated when it began. Reads inside a scope still touch their slots, so they can push a commit onto the slow path, but they never cause a conflict. The scope is for reads whose value cannot change a result. It is used in these places and nowhere else:
+
+| Place | Reads | Why it doesn't affect results |
+|---|---|---|
+| `Planner.plan` and `Planner.estimate` (database) | population, type counts, degrees, cardinalities, `PropertyIndex.estimate` | they only rank access paths; the chosen path reads its rows with recording on |
+| `PatternMatcher.typeDomain` (database) | type counts | they only order the variables of a pattern |
+| `Reader.onlyDefaultTenant` (database) | the last key of `TYPES` | it only decides whether tenant filtering can be skipped; any atom of another tenant that a reader can reach shows up in a posting list or record that the reader did record. Recorded, it would make every `SERIALIZABLE` transaction a reader of the whole `TYPES` slot |
+| `Security.charge` (database) | the tenant's usage counter | it only fails early when a quota would be exceeded; the commutative `merge` on `USAGE` checks the quota again at commit. Recorded, it would make any two `SERIALIZABLE` transactions that insert in one tenant conflict |
+
+The same methods called anywhere else are recorded: an HQL `degree()` or `count(*)` over a type scan, or the access path a query runs, is validated. `Statistics` reads through its own `Snapshot`, so it records nothing.
+
+| Anomaly | `SNAPSHOT` | `SERIALIZABLE` |
+|---|---|---|
+| Dirty read | prevented: reads see committed generations and the transaction's own writes only | prevented |
+| Non-repeatable read | prevented: every read in a transaction comes from the same pinned generation | prevented |
+| Lost update | prevented for slot writes: `put`, `update` and `delete(slot, key)` replay only if the value is still the one the transaction saw, and HQL `SET` and `UNSET` use a `merge` whose precondition requires the property to be unchanged; edge actions follow section 5.2 | prevented |
+| Write skew | allowed | prevented: one of the transactions fails at commit with `RETRYABLE_CONFLICT` |
+| Phantom (a predicate result changed by a concurrent insert, update or member change) | allowed: repeated reads in the transaction see the same snapshot, but a commit based on a stale predicate result is accepted | prevented for predicates evaluated through the recorded reads above |
 
 Write skew rejected under `SERIALIZABLE` (this is `EngineTest.serializableReadsDetectWriteSkew`):
 

@@ -62,8 +62,10 @@ public sealed class Reader permits Writer {
     private boolean onlyDefaultTenant() {
         Boolean known = onlyDefaultTenant;
         if (known == null) {
-            known = tenant() == Principal.DEFAULT_TENANT
-                    && view.scan(EngineSlots.TYPES).last().map(entry -> entry.key() >>> 32 == Principal.DEFAULT_TENANT).orElse(true);
+            try (View.Unrecorded _ = view.unrecorded()) {
+                known = tenant() == Principal.DEFAULT_TENANT
+                        && view.scan(EngineSlots.TYPES).last().map(entry -> entry.key() >>> 32 == Principal.DEFAULT_TENANT).orElse(true);
+            }
             onlyDefaultTenant = known;
         }
         return known;
@@ -152,7 +154,7 @@ public sealed class Reader permits Writer {
     public Optional<Value> property(long atom, String name) {
         OptionalInt key = schema().existingPropertyKey(name);
         if (key.isEmpty()) {
-            return Optional.empty();
+            return absent(atom);
         }
         return bag(atom).get(key.getAsInt()).map(Property::value);
     }
@@ -160,9 +162,16 @@ public sealed class Reader permits Writer {
     public Optional<Value> property(long atom, String name, long validAt) {
         OptionalInt key = schema().existingPropertyKey(name);
         if (key.isEmpty()) {
-            return Optional.empty();
+            return absent(atom);
         }
         return bag(atom).get(key.getAsInt()).filter(property -> property.validAt(validAt)).map(Property::value);
+    }
+
+    private Optional<Value> absent(long atom) {
+        if (view.recordsReads()) {
+            bag(atom);
+        }
+        return Optional.empty();
     }
 
     public Map<String, Value> properties(long atom) {
@@ -278,17 +287,21 @@ public sealed class Reader permits Writer {
 
     public LongStream range(String type, String property, Optional<Value> low, Optional<Value> high, boolean lowInclusive, boolean highInclusive) {
         TypeDef definition = requireType(type);
-        Predicate<Value> accept = candidate -> low.map(bound -> lowInclusive ? candidate.compareTo(bound) >= 0 : candidate.compareTo(bound) > 0).orElse(true)
-                && high.map(bound -> highInclusive ? candidate.compareTo(bound) <= 0 : candidate.compareTo(bound) < 0).orElse(true);
+        Predicate<Value> accept = candidate -> low.map(bound -> comparable(candidate, bound)
+                        && (lowInclusive ? candidate.compareTo(bound) >= 0 : candidate.compareTo(bound) > 0)).orElse(true)
+                && high.map(bound -> comparable(candidate, bound)
+                        && (highInclusive ? candidate.compareTo(bound) <= 0 : candidate.compareTo(bound) < 0)).orElse(true);
         OptionalInt key = schema().existingPropertyKey(property);
-        if (key.isEmpty()) {
+        if (key.isEmpty() && !property.startsWith("$")) {
+            if (view.recordsReads()) {
+                atomsOfType(definition.id()).forEach(this::bag);
+            }
             return LongStream.empty();
         }
         Optional<TypeTag> indexedTag = indexedTag(definition, property);
         if (indexedTag.isPresent()) {
             TypeTag tag = indexedTag.get();
-            return PropertyIndex.candidates(view.scan(PropertySlots.PROPERTY_INDEX), tenant(), key.getAsInt(), tag,
-                            PropertyIndex.lowerKey(tag, low), PropertyIndex.upperKey(tag, high))
+            return PropertyIndex.candidates(view, tenant(), key.getAsInt(), tag, PropertyIndex.lowerKey(tag, low), PropertyIndex.upperKey(tag, high))
                     .filter(entry -> accept.test(entry.value()))
                     .mapToLong(Entry::key)
                     .filter(owner -> view.atom(owner).map(record -> record.type() == definition.id() && record.tenant() == tenant()).orElse(false))
@@ -301,6 +314,10 @@ public sealed class Reader permits Writer {
         }
         return atomsOfType(definition.id())
                 .filter(atom -> bag(atom).get(key.getAsInt()).map(Property::value).filter(accept).isPresent());
+    }
+
+    private static boolean comparable(Value candidate, Value bound) {
+        return candidate.tag() == bound.tag() ? !(candidate instanceof Value.Null) : candidate.tag().numeric() && bound.tag().numeric();
     }
 
     public static Optional<TypeTag> indexedTag(TypeDef type, String property) {
