@@ -323,8 +323,7 @@ tenant isolation: no hyperedge on any branch has a member from another tenant
 ```
 
 The last line comes from a scan of every hyperedge on every active branch that compares each member's tenant with
-the edge's. If some differ, it prints them as `REMOVE @member FROM @edge` statements for the edge's tenant to run,
-prefixed with `USE BRANCH <name>;` for branches other than main (up to 50 of them). Such memberships can only exist in databases written before `QUALIFY` checked its member
+the edge's. If some differ, it prints statements that remove them, `USE TENANT <edge's tenant>; [USE BRANCH <name>;] REMOVE @member FROM @edge;`, for an admin of the default tenant to run as printed (up to 50 of them). `hstore check --repair-tenants` removes them all, repeating until a fresh scan finds none, and only then records the database as checked. Such memberships can only exist in databases written before `QUALIFY` checked its member
 ([security](../database/security.md#tenants)). They don't make the command fail.
 
 A failure names the page, for example `HStoreException.corrupt(pageId, "checksum mismatch")` or `"separator does not route child 3 in atoms#1"`, and the command exits non-zero.

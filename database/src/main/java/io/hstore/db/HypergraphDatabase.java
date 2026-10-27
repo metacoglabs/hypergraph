@@ -99,9 +99,14 @@ public final class HypergraphDatabase implements AutoCloseable {
 
     public List<TenantMemberships.Crossing> repairTenantMemberships() {
         List<TenantMemberships.Crossing> removed = new ArrayList<>();
-        for (Branch branch : engine.branches().stream().filter(Branch::isActive).toList()) {
-            removed.addAll(write(options.transaction().onBranch(branch.id()), Principal.SYSTEM,
-                    writer -> TenantMemberships.repair(writer.transaction(), branch.name())));
+        for (int round = 0; round < 5 && (round == 0 || !TenantMemberships.find(engine).isEmpty()); round++) {
+            for (Branch branch : engine.branches().stream().filter(Branch::isActive).toList()) {
+                removed.addAll(write(options.transaction().onBranch(branch.id()), Principal.SYSTEM,
+                        writer -> TenantMemberships.repair(writer.transaction(), branch.name())));
+            }
+        }
+        if (!TenantMemberships.find(engine).isEmpty()) {
+            throw HStoreException.invalid("memberships across tenants kept appearing while they were being removed; run the repair again");
         }
         write(writer -> {
             if (!TenantMemberships.checked(writer.transaction())) {
