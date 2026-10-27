@@ -5,9 +5,13 @@ package io.hstore.db;
 
 import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
+import io.hstore.db.security.Access;
+import io.hstore.db.security.Principal;
 import io.hstore.db.security.Scram;
+import io.hstore.db.security.Security;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.txn.TxnOptions;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -195,12 +200,19 @@ class PermissionsTest {
         }
         try (Session root = login("root", "root-password")) {
             String last = assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("ALTER USER root ROLE reader")).getMessage();
-            assertTrue(last.contains("no admin of the default tenant who can sign in"), last);
+            assertTrue(last.contains("no admin of the default tenant whose password never expires"), last);
             assertTrue(assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("DROP USER root")).getMessage()
-                    .contains("no admin of the default tenant who can sign in"));
+                    .contains("no admin of the default tenant whose password never expires"));
             assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("ALTER USER root VALID UNTIL '2000-01-01'"));
-            root.execute("ALTER USER root VALID UNTIL '2999-01-01'");
+            String soon = Instant.now().plusSeconds(1).toString();
+            assertTrue(assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("ALTER USER root VALID UNTIL '" + soon + "'"))
+                    .getMessage().contains("whose password never expires"));
+            assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("ALTER USER root VALID UNTIL '2999-01-01'"));
             root.execute("ALTER USER ops ROLE admin");
+            root.execute("ALTER USER root VALID UNTIL '2999-01-01'");
+            assertThrows(HStoreException.InvalidSchema.class, () -> root.execute("ALTER USER ops VALID UNTIL '2999-01-01'"));
+            root.execute("ALTER USER root VALID UNTIL 'infinity'");
+            root.execute("CREATE USER temp PASSWORD 'temp-password' ROLE admin VALID UNTIL '2999-01-01'");
             root.execute("ALTER USER root ROLE reader");
         }
         assertTrue(admin.execute("ALTER USER ops PASSWORD 'ops-password-2' CONNECTION LIMIT 3 VALID UNTIL 'infinity'").message()
@@ -302,6 +314,138 @@ class PermissionsTest {
         }
         assertEquals(1, admin.execute("SHOW USERS").rows().stream().filter(row -> row.get(2).render().equals("ADMIN")
                 && row.get(1).render().equals("0")).count());
+    }
+
+    @Test
+    void theFirstGlobalAdminCannotExpire(@TempDir Path elsewhere) {
+        try (HypergraphDatabase fresh = HypergraphDatabase.open(elsewhere); Session system = new Session(fresh)) {
+            assertTrue(assertThrows(HStoreException.InvalidSchema.class,
+                    () -> system.execute("CREATE USER first PASSWORD 'first-password' ROLE admin VALID UNTIL '2999-01-01'"))
+                    .getMessage().contains("whose password never expires"));
+            system.execute("CREATE USER first PASSWORD 'first-password' ROLE admin");
+        }
+    }
+
+    @Test
+    void concurrentExpiriesCannotLockEveryAdminOut() {
+        admin.execute("CREATE USER second PASSWORD 'second-password' ROLE admin");
+        try (Session root = login("root", "root-password"); Session other = login("second", "second-password")) {
+            root.execute("BEGIN");
+            other.execute("BEGIN");
+            root.execute("ALTER USER second VALID UNTIL '2000-01-01'");
+            other.execute("ALTER USER root VALID UNTIL '2000-01-01'");
+            root.execute("COMMIT");
+            assertThrows(HStoreException.class, () -> other.execute("COMMIT"));
+        }
+        assertTrue(new Session(database).authenticate("root", "root-password"));
+        assertFalse(new Session(database).authenticate("second", "second-password"));
+    }
+
+    @Test
+    void futureExpiriesOnBothAdminsCannotBothCommit() {
+        admin.execute("CREATE USER second PASSWORD 'second-password' ROLE admin");
+        try (Session one = new Session(database); Session two = new Session(database)) {
+            one.execute("BEGIN");
+            two.execute("BEGIN");
+            one.execute("ALTER USER second VALID UNTIL '2999-01-01'");
+            two.execute("ALTER USER root VALID UNTIL '2999-01-01'");
+            one.execute("COMMIT");
+            assertThrows(HStoreException.class, () -> two.execute("COMMIT"));
+        }
+    }
+
+    @Test
+    void aRoleChangeRacingAnExpiryCannotLockEveryAdminOut() {
+        admin.execute("CREATE USER second PASSWORD 'second-password' ROLE admin");
+        try (Session one = new Session(database); Session two = new Session(database)) {
+            one.execute("BEGIN");
+            two.execute("BEGIN");
+            one.execute("ALTER USER second ROLE writer");
+            two.execute("ALTER USER root VALID UNTIL '2999-01-01'");
+            one.execute("COMMIT");
+            assertThrows(HStoreException.class, () -> two.execute("COMMIT"));
+        }
+    }
+
+    @Test
+    void loadingAnEmptyMemberListStillNeedsWriteAccess() {
+        admin.execute("GRANT WRITE ON TYPE Patient TO clerk; GRANT READ ON TYPE Encounter TO clerk");
+        Principal clerk = database.read(reader -> Security.user(reader.engineView(), "clerk")).map(Security::principal).orElseThrow();
+        long encounter = id("e");
+        assertThrows(HStoreException.InvalidSchema.class, () -> database.write(TxnOptions.defaults(), clerk, writer -> {
+            writer.load(encounter, new long[0], MemberSpec.PLAIN);
+            return null;
+        }));
+        assertEquals("1", cell(admin.execute("MATCH EDGE e:Encounter WHERE e HAS @Patient:'p1' RETURN count(*)")));
+    }
+
+    @Test
+    void aGrantRacingADropDoesNotOutliveTheUser() {
+        try (Session granting = new Session(database); Session dropping = new Session(database)) {
+            granting.execute("BEGIN");
+            dropping.execute("BEGIN");
+            granting.execute("GRANT READ ON TYPE Secret TO clerk");
+            dropping.execute("DROP USER clerk");
+            dropping.execute("COMMIT");
+            assertThrows(HStoreException.class, () -> granting.execute("COMMIT"));
+        }
+        assertEquals(0, admin.execute("SHOW GRANTS").rows().stream().filter(row -> row.getFirst().render().equals("clerk")).count());
+        try (Session altering = new Session(database); Session dropping = new Session(database)) {
+            altering.execute("BEGIN");
+            dropping.execute("BEGIN");
+            altering.execute("ALTER USER ops CONNECTION LIMIT 1");
+            dropping.execute("DROP USER ops");
+            dropping.execute("COMMIT");
+            assertThrows(HStoreException.class, () -> altering.execute("COMMIT"));
+        }
+        database.write(writer -> {
+            Access.grant(writer.transaction(), "clerk", writer.requireType("Secret").id(), Access.Privilege.READ);
+            Access.setOptions(writer.transaction(), new Access.Options("clerk", 1, 1));
+            return null;
+        });
+        admin.execute("CREATE USER clerk PASSWORD 'clerk-password-2' ROLE none");
+        assertEquals(0, admin.execute("SHOW GRANTS").rows().stream().filter(row -> row.getFirst().render().equals("clerk")).count());
+        assertTrue(new Session(database).authenticate("clerk", "clerk-password-2"));
+    }
+
+    @Test
+    void signingInAgainAsTheSameUserKeepsOneConnection() {
+        admin.execute("ALTER USER ops CONNECTION LIMIT 1");
+        try (Session ops = login("ops", "ops-password")) {
+            assertTrue(ops.authenticate("ops", "ops-password"));
+            assertEquals(1, database.connections("ops"));
+            assertTrue(ops.authenticate("clerk", "clerk-password"));
+            assertEquals(0, database.connections("ops"));
+            assertTrue(ops.authenticate("ops", "ops-password"));
+        }
+        assertEquals(0, database.connections("ops"));
+    }
+
+    @Test
+    void tenantsCanBeLimitedInConnections() {
+        admin.executeAll("""
+                CREATE TENANT acme QUOTA (connections 2);
+                CREATE USER boss PASSWORD 'boss-password' TENANT acme ROLE admin CONNECTION LIMIT 1;
+                """);
+        try (Session boss = login("boss", "boss-password")) {
+            boss.execute("CREATE USER helper PASSWORD 'helper-password' ROLE admin");
+            try (Session helper = login("helper", "helper-password")) {
+                assertTrue(helper.authenticated());
+                String limited = assertThrows(HStoreException.ResourceLimit.class,
+                        () -> new Session(database).authenticate("helper", "helper-password")).getMessage();
+                assertTrue(limited.contains("too many connections for tenant"), limited);
+                assertThrows(HStoreException.InvalidSchema.class, () -> boss.execute("ALTER TENANT acme QUOTA (connections 10)"));
+                assertTrue(admin.execute("SHOW TENANTS").render().contains("acme"));
+            }
+            assertTrue(new Session(database).authenticate("helper", "helper-password"));
+        }
+        admin.execute("ALTER TENANT acme QUOTA (connections -1)");
+        try (Session one = login("boss", "boss-password")) {
+            assertTrue(one.authenticated());
+            assertTrue(login("helper", "helper-password").authenticated());
+            assertTrue(login("helper", "helper-password").authenticated());
+        }
+        assertThrows(HStoreException.InvalidSchema.class, () -> admin.execute("ALTER TENANT acme QUOTA (connections -5)"));
     }
 
     @Test

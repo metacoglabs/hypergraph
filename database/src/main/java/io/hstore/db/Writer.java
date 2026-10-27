@@ -186,6 +186,7 @@ public final class Writer extends Reader {
     }
 
     public void load(long edge, long[] members, MemberSpec spec) {
+        requireMembership(edge, spec);
         Incidence[] incidences = new Incidence[members.length];
         if (members.length > 0) {
             Incidence first = incidences[0] = incidence(edge, members[0], spec);

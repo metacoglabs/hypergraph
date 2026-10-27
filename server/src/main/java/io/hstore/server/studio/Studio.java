@@ -310,6 +310,7 @@ public final class Studio implements AutoCloseable {
 
     private Response login(Request request) {
         request.cookie(COOKIE).ifPresent(sessions::close);
+        sessions.expire();
         Json body = request.json();
         Optional<String> user = field(body, "user");
         Session session = new Session(database);

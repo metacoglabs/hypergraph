@@ -11,6 +11,9 @@ import java.util.Base64;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
@@ -53,9 +56,13 @@ final class Sessions implements AutoCloseable {
 
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
     private final long idleNanos;
+    private final ScheduledExecutorService sweeper = Executors.newSingleThreadScheduledExecutor(
+            Thread.ofVirtual().name("studio-session-sweeper").factory());
 
     Sessions(Duration idle) {
         this.idleNanos = idle.toNanos();
+        long period = Math.clamp(idle.toMillis() / 4, 10, Duration.ofMinutes(1).toMillis());
+        sweeper.scheduleWithFixedDelay(this::expire, period, period, TimeUnit.MILLISECONDS);
     }
 
     Entry open(Session session) {
@@ -90,7 +97,7 @@ final class Sessions implements AutoCloseable {
         return entries.size();
     }
 
-    private void expire() {
+    void expire() {
         long now = System.nanoTime();
         entries.values().stream()
                 .filter(entry -> (now - entry.lastUsed > idleNanos || now - entry.opened > LIFETIME_NANOS) && !entry.lock.isLocked())
@@ -101,6 +108,7 @@ final class Sessions implements AutoCloseable {
 
     @Override
     public void close() {
+        sweeper.shutdownNow();
         entries.keySet().stream().toList().forEach(this::close);
     }
 }

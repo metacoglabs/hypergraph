@@ -71,7 +71,7 @@ public final class Security {
     public static final Slot<Usage> USAGE = Slot.primary(46, "tenant-usage", new TreeSchema<>(83, "tenant-usage", FingerprintMode.SET,
             USAGE_CODEC, EntryMeasure.keyed(usage -> Hashing.of(usage.atoms(), usage.edges(), usage.payloadBytes()))));
 
-    public static final List<Slot<?>> SLOTS = List.of(TENANTS, USERS, USAGE, Access.GRANTS, Access.USER_OPTIONS);
+    public static final List<Slot<?>> SLOTS = List.of(TENANTS, USERS, USAGE, Access.GRANTS, Access.USER_OPTIONS, Access.TENANT_OPTIONS);
 
     public static final Tenant DEFAULT = new Tenant(Principal.DEFAULT_TENANT, "default", Quota.UNLIMITED);
 
@@ -242,6 +242,10 @@ public final class Security {
         txn.put(USERS, userKey(name), new User(current.name(), current.salt(), current.hash(), current.iterations(), current.tenant(), role));
     }
 
+    public static void keepUnchanged(Transaction txn, User user) {
+        txn.merge(USERS, userKey(user.name()), current -> current.equals(Optional.of(user)), current -> current);
+    }
+
     public static long globalAdmins(View view) {
         return users(view).stream().filter(Security::globalAdmin).count();
     }
@@ -251,16 +255,23 @@ public final class Security {
     }
 
     public static void keepAnotherGlobalAdmin(Transaction txn, String leaving) {
-        long now = System.currentTimeMillis();
         List<User> others = users(txn).stream()
-                .filter(user -> globalAdmin(user) && !user.name().equals(leaving) && !Access.options(txn, user.name()).expired(now))
+                .filter(user -> globalAdmin(user) && !user.name().equals(leaving) && neverExpires(Access.options(txn, user.name())))
                 .toList();
         if (others.isEmpty()) {
-            throw HStoreException.invalid("this would leave no admin of the default tenant who can sign in; "
+            throw HStoreException.invalid("this would leave no admin of the default tenant whose password never expires; "
                     + "create or restore another one first");
         }
-        others.forEach(user -> txn.merge(USERS, userKey(user.name()),
-                current -> current.filter(Security::globalAdmin).isPresent(), current -> current));
+        for (User other : others) {
+            txn.merge(USERS, userKey(other.name()), current -> current.filter(user -> user.name().equals(other.name()) && globalAdmin(user)).isPresent(),
+                    current -> current);
+            txn.merge(Access.USER_OPTIONS, Hashing.of(other.name()), current -> neverExpires(current.filter(options -> options.user().equals(other.name()))
+                    .orElseGet(() -> Access.Options.defaults(other.name()))), current -> current);
+        }
+    }
+
+    private static boolean neverExpires(Access.Options options) {
+        return options.validUntil() == Long.MAX_VALUE;
     }
 
     public static boolean expired(View view, String name) {

@@ -40,14 +40,18 @@ READER, WRITER and ADMIN cover every type of their tenant, like PostgreSQL's `pg
   change their properties, members, documents, embeddings, state and signals. `WRITE` includes `READ`.
   `REVOKE WRITE` leaves `READ`; `REVOKE READ` removes both. Grants on types are refused for users whose role
   already covers every type.
-- An atom of a type the user cannot read is invisible exactly like an atom of another tenant: `Reader.visible`,
-  `atom`, `require` and every lookup built on them (see the isolation model below) check the type as well as the
-  tenant, so `DESCRIBE`, properties, incidences, degrees, matches and semantic hits leave it out. Naming the type
+- An atom of a type the user cannot read is hidden wherever an atom of another tenant is hidden, with the one
+  exception in the next point: `Reader.visible`, `atom`, `require` and every lookup built on them (see the
+  isolation model below) check the type as well as the tenant, so `DESCRIBE`, properties, its own incidences,
+  degrees, matches and semantic hits leave it out. Naming the type
   in `MATCH`, `RANK`, `PATTERN` or a HORA statement fails with `no READ privilege on type T`, as `SELECT` on a table
   without the privilege fails in PostgreSQL.
-- A hyperedge the user can read shows the ids of all its members, including members of types it cannot read,
-  the way a foreign-key column shows the key of a row in a table you cannot select from. Those members have no
-  label, properties or incidences for the user, and adding one to an edge fails as if it did not exist.
+- A hyperedge the user can read shows all its members, including members of types it cannot read: their ids and
+  what the edge itself records about each membership (role, weight, validity, qualifier), the way a foreign-key
+  column shows the key of a row in a table you cannot select from. An atom of another tenant never appears there.
+  Those members have no label, properties or incidences of their own for the user, and adding one to an edge
+  fails as if it did not exist. Keep such data in edge types the user cannot read when even the ids must stay
+  hidden.
 - Writing to a hyperedge needs `WRITE` on the edge's type; the members added must be readable, also for set
   algebra `INTO`. Deleting an atom also removes it from every hyperedge that contains it, so a user with
   `ROLE none` may only delete an atom when it can write every hyperedge of its tenant that holds it.
@@ -80,8 +84,18 @@ DDL stay with global admins.
   only at the last step, and the server logs `user "u" tried to sign in after its password expired`.
 - `CONNECTION LIMIT n` caps the user's signed-in sessions (wire connections, Studio sessions and embedded sessions
   that authenticated) at `n`; `-1` means no limit. The next sign-in fails with `ABORTED_RESOURCE_LIMIT: too many
-  connections for user u`. Global admins are exempt, as PostgreSQL exempts superusers.
-- Both live in slot `USER_OPTIONS` = 76 (schema 111); a user without an entry has no expiry and no limit.
+  connections for user u`. Global admins are exempt, as PostgreSQL exempts superusers. A session that signs in
+  again as the same user keeps its one count. A Studio session gives its count back when it closes, after
+  `studio_session_minutes` without requests, or after 12 hours, whichever comes first; a background sweep notices
+  idle sessions even when nobody uses Studio.
+- A per-user limit binds that user only. A tenant admin can create users, including other admins of its tenant,
+  so to cap a whole tenant use the tenant's `connections` quota: `CREATE TENANT t QUOTA (connections 20)` or
+  `ALTER TENANT t QUOTA (connections 20)` (`-1` removes it). It counts every signed-in session of the tenant's users
+  and fails the next sign-in with `too many connections for tenant #id`. Only global admins change quotas.
+- User options live in slot `USER_OPTIONS` = 76 (schema 111) and tenant limits in `TENANT_OPTIONS` = 77 (schema
+  112); a user or tenant without an entry has no expiry and no limit. `CREATE USER` clears any entry left under
+  its name, and `GRANT`, `REVOKE` and `ALTER USER` place a commit-time precondition on the user's record, so a
+  grant or option that races `DROP USER` fails instead of passing to the next user created with that name.
 
 ### Changing roles
 
@@ -89,10 +103,13 @@ DDL stay with global admins.
 again, so the new role applies at once. Only a global admin may change the role, password expiry or connection
 limit of an ADMIN, so a tenant admin cannot lift limits put on itself or on another admin of its tenant.
 
-A change that would leave the default tenant without an ADMIN whose password still works (dropping one while other
-users exist, giving it another role, or expiring its password now) is refused. The statement also places a
-commit-time precondition on every other such admin, so two concurrent transactions that each remove a different
-admin cannot both commit. Should every admin still be lost (for example to a forgotten password), `hstore shell` on
+The default tenant must keep an ADMIN whose password never expires. A change that would leave none (dropping one
+while other users exist, giving it another role, giving its password any `VALID UNTIL` other than `'infinity'`,
+or creating the first global admin with one) is refused: any expiry date eventually passes, so checking only
+that the password still works today would let a date one second ahead lock everyone out. The statement also
+places a commit-time precondition on the role record and the options record of every other such admin, so two
+concurrent transactions that each remove or expire a different admin cannot both commit, whichever records they
+write. Should every admin still be lost (for example to a forgotten password), `hstore shell` on
 the data directory runs as the built-in `system` admin, like PostgreSQL's single-user mode.
 
 `USE MAIN` is open to everyone. Without `TENANT`, `CREATE USER` puts the new user in the session's current

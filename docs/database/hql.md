@@ -732,7 +732,7 @@ DROP VIEW activity;                                  -- dropped view activity
 create_tenant = "CREATE" "TENANT" identifier [ "QUOTA" quota ] ;       (* ADMIN *)
 alter_tenant  = "ALTER" "TENANT" identifier "QUOTA" quota ;            (* ADMIN *)
 quota         = "(" quota_key number { "," quota_key number } ")" ;
-quota_key     = "atoms" | "edges" | "payload_bytes" | "transaction_pages" | "query_pages" ;
+quota_key     = "atoms" | "edges" | "payload_bytes" | "transaction_pages" | "query_pages" | "connections" ;
 create_user   = "CREATE" "USER" ( identifier | string ) "PASSWORD" string
                 [ "TENANT" identifier ] [ "ROLE" role ] [ valid_until ] [ connections ] ;  (* ADMIN; ROLE default writer *)
 alter_user    = "ALTER" "USER" ( identifier | string )
@@ -751,7 +751,7 @@ show          = "SHOW" ( "TENANTS" | "USERS" ) ;                                
 show_grants   = "SHOW" "GRANTS" [ "FOR" ( identifier | string ) ] ;                   (* FOR another user: ADMIN *)
 ```
 
-`SHOW TENANTS` columns: `id, name, atoms, edges, payload bytes, max atoms, max edges`; `SHOW USERS`: `user,
+`SHOW TENANTS` columns: `id, name, atoms, edges, payload bytes, max atoms, max edges, connections, max connections`; `SHOW USERS`: `user,
 tenant, role, valid until, connection limit` (tenant id); `SHOW GRANTS`: `user, privilege, type`. The model
 behind roles, grants, `VALID UNTIL` and `CONNECTION LIMIT` is specified in
 [security](security.md#principals-and-roles).

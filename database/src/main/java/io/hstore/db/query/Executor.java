@@ -135,17 +135,32 @@ final class Executor {
                         + (outcome.conflicts().isEmpty() ? "" : ", " + outcome.conflicts().size() + " conflicts resolved for " + policy));
             }
             case Statement.CreateTenant(String name, Map<String, Long> quota) -> write(writer -> {
-                Security.Tenant tenant = Security.createTenant(writer.transaction(), name, Quota.UNLIMITED.with(quota));
+                Map<String, Long> limits = new LinkedHashMap<>(quota);
+                Long connections = limits.remove("connections");
+                Security.Tenant tenant = Security.createTenant(writer.transaction(), name, Quota.UNLIMITED.with(limits));
+                if (connections != null) {
+                    Access.setTenantConnectionLimit(writer.transaction(), tenant.id(), connections);
+                }
                 return QueryResult.message("created tenant " + tenant.name() + " #" + tenant.id());
             });
             case Statement.AlterTenant(String name, Map<String, Long> quota) -> write(writer -> {
                 Security.Tenant tenant = Security.requireTenant(writer.engineView(), name);
-                Security.setQuota(writer.transaction(), tenant, tenant.quota().with(quota));
+                Map<String, Long> limits = new LinkedHashMap<>(quota);
+                Long connections = limits.remove("connections");
+                Security.setQuota(writer.transaction(), tenant, tenant.quota().with(limits));
+                if (connections != null) {
+                    Access.setTenantConnectionLimit(writer.transaction(), tenant.id(), connections);
+                }
                 return QueryResult.message("updated quota of tenant " + name);
             });
             case Statement.CreateUser(String name, String password, Optional<String> tenant, var role, var validUntil, var connectionLimit) ->
                     write(writer -> {
-                        Security.createUser(writer.transaction(), name, password, governedTenant(writer, tenant), role);
+                        int home = governedTenant(writer, tenant);
+                        if (home == Principal.DEFAULT_TENANT && role == Role.ADMIN && validUntil.isPresent() && validUntil.getAsLong() != Long.MAX_VALUE) {
+                            Security.keepAnotherGlobalAdmin(writer.transaction(), name);
+                        }
+                        Security.createUser(writer.transaction(), name, password, home, role);
+                        Access.forget(writer.transaction(), name);
                         if (validUntil.isPresent() || connectionLimit.isPresent()) {
                             Access.setOptions(writer.transaction(), new Access.Options(name, validUntil.orElse(Long.MAX_VALUE),
                                     (int) connectionLimit.orElse(-1)));
@@ -177,12 +192,16 @@ final class Executor {
                         + (changed ? " from " + name : ""));
             });
             case Statement.ShowGrants(Optional<String> name) -> read(reader -> showGrants(reader, name));
-            case Statement.ShowTenants _ -> read(reader -> table(List.of("id", "name", "atoms", "edges", "payload bytes", "max atoms", "max edges"),
+            case Statement.ShowTenants _ -> read(reader -> table(List.of("id", "name", "atoms", "edges", "payload bytes", "max atoms", "max edges",
+                            "connections", "max connections"),
                     Security.tenants(reader.engineView()).stream().filter(tenant -> session.principal().governs(tenant.id())).map(tenant -> {
                         Quota.Usage usage = Security.usage(reader.engineView(), tenant.id());
+                        int connectionLimit = Access.tenantConnectionLimit(reader.engineView(), tenant.id());
                         return List.of(QueryResult.number(tenant.id()), QueryResult.text(tenant.name()), QueryResult.number(usage.atoms()),
                                 QueryResult.number(usage.edges()), QueryResult.number(usage.payloadBytes()),
-                                limit(tenant.quota().maxAtoms()), limit(tenant.quota().maxEdges()));
+                                limit(tenant.quota().maxAtoms()), limit(tenant.quota().maxEdges()),
+                                QueryResult.number(database().tenantConnections(tenant.id())),
+                                limit(connectionLimit < 0 ? Long.MAX_VALUE : connectionLimit));
                     })));
             case Statement.ShowUsers _ -> read(reader -> table(List.of("user", "tenant", "role", "valid until", "connection limit"),
                     Security.users(reader.engineView()).stream()
@@ -416,7 +435,7 @@ final class Executor {
                     + "of an admin");
         }
         boolean demoted = alter.role().filter(role -> role != Role.ADMIN).isPresent();
-        boolean expires = alter.validUntil().isPresent() && alter.validUntil().getAsLong() <= System.currentTimeMillis();
+        boolean expires = alter.validUntil().isPresent() && alter.validUntil().getAsLong() != Long.MAX_VALUE;
         if (Security.globalAdmin(user) && (demoted || expires)) {
             Security.keepAnotherGlobalAdmin(writer.transaction(), user.name());
         }
@@ -430,6 +449,9 @@ final class Executor {
             changes.add("password");
         });
         if (alter.validUntil().isPresent() || alter.connectionLimit().isPresent()) {
+            if (alter.role().isEmpty() && alter.password().isEmpty()) {
+                Security.keepUnchanged(writer.transaction(), user);
+            }
             Access.Options current = Access.options(writer.engineView(), user.name());
             Access.setOptions(writer.transaction(), new Access.Options(user.name(), alter.validUntil().orElse(current.validUntil()),
                     (int) alter.connectionLimit().orElse(current.connectionLimit())));
@@ -451,6 +473,7 @@ final class Executor {
                 throw HStoreException.invalid(privilege + " can only be granted to users of the default tenant");
             }
         }
+        Security.keepUnchanged(writer.transaction(), user);
         return user;
     }
 

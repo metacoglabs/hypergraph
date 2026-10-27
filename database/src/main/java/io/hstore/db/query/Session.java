@@ -43,7 +43,7 @@ public final class Session implements AutoCloseable {
     private int failedAuthentications;
     private Optional<ScramAttempt> scram = Optional.empty();
     private Optional<String> scramUser = Optional.empty();
-    private Optional<String> counted = Optional.empty();
+    private Optional<Principal> counted = Optional.empty();
     private Optional<String> clearTextRefusal = Optional.empty();
 
     private record ScramAttempt(Scram.Server server, SignIns.Reservation reservation) {
@@ -145,10 +145,12 @@ public final class Session implements AutoCloseable {
     }
 
     private void signIn(Principal found) {
-        database.enter(found);
+        if (counted.filter(principal -> principal.user().equals(found.user())).isEmpty()) {
+            database.enter(found);
+            counted.ifPresent(database::leave);
+            counted = Optional.of(found);
+        }
         stale = false;
-        counted.ifPresent(database::leave);
-        counted = Optional.of(found.user());
         principal = found;
         authenticated = true;
         credentials = database.read(reader -> Security.user(reader.engineView(), found.user()));

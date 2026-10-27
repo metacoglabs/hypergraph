@@ -60,6 +60,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final MaterializedViews views;
     private final SignIns signIns = new SignIns();
     private final Map<String, Integer> connections = new ConcurrentHashMap<>();
+    private final Map<Integer, Integer> tenantConnections = new ConcurrentHashMap<>();
     private final byte[] scramSecret;
 
     private HypergraphDatabase(Path directory, DatabaseOptions options) {
@@ -130,13 +131,21 @@ public final class HypergraphDatabase implements AutoCloseable {
 
     public void enter(Principal principal) {
         Access.Options limits = read(reader -> Access.options(reader.engineView(), principal.user()));
-        connections.compute(principal.user(), (user, count) -> {
-            int current = count == null ? 0 : count;
-            if (limits.connectionLimit() >= 0 && !principal.global() && current >= limits.connectionLimit()) {
-                throw HStoreException.limit("too many connections for user " + user + " (connection limit " + limits.connectionLimit() + ")");
+        int tenantLimit = read(reader -> Access.tenantConnectionLimit(reader.engineView(), principal.home()));
+        synchronized (connections) {
+            if (!principal.global()) {
+                if (limits.connectionLimit() >= 0 && connections(principal.user()) >= limits.connectionLimit()) {
+                    throw HStoreException.limit("too many connections for user " + principal.user() + " (connection limit "
+                            + limits.connectionLimit() + ")");
+                }
+                if (tenantLimit >= 0 && tenantConnections(principal.home()) >= tenantLimit) {
+                    throw HStoreException.limit("too many connections for tenant #" + principal.home() + " (connection limit "
+                            + tenantLimit + ")");
+                }
             }
-            return current + 1;
-        });
+            connections.merge(principal.user(), 1, Integer::sum);
+            tenantConnections.merge(principal.home(), 1, Integer::sum);
+        }
     }
 
     public boolean holds(Principal principal, Access.Privilege capability) {
@@ -144,8 +153,15 @@ public final class HypergraphDatabase implements AutoCloseable {
                 && read(reader -> Access.holds(reader.engineView(), principal.user(), capability));
     }
 
-    public void leave(String user) {
-        connections.computeIfPresent(user, (_, count) -> count <= 1 ? null : count - 1);
+    public void leave(Principal principal) {
+        synchronized (connections) {
+            connections.computeIfPresent(principal.user(), (_, count) -> count <= 1 ? null : count - 1);
+            tenantConnections.computeIfPresent(principal.home(), (_, count) -> count <= 1 ? null : count - 1);
+        }
+    }
+
+    public int tenantConnections(int tenant) {
+        return tenantConnections.getOrDefault(tenant, 0);
     }
 
     public int connections(String user) {

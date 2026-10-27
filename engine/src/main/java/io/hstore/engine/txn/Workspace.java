@@ -19,9 +19,11 @@ import io.hstore.engine.tree.WriteScope;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.UnaryOperator;
 
 public final class Workspace {
@@ -41,6 +43,7 @@ public final class Workspace {
     private final EdgeGuard guard;
     private final boolean replaying;
     private final Map<Integer, Tree<?>> trees = new HashMap<>();
+    private final Set<Integer> guarded = new HashSet<>();
     private final List<MemberChange> memberChanges = new ArrayList<>();
     private final List<SlotChange<?>> slotChanges = new ArrayList<>();
 
@@ -142,9 +145,13 @@ public final class Workspace {
         return roots;
     }
 
+    void guard(Slot<?> slot) {
+        guarded.add(slot.id());
+    }
+
     boolean untouchedSince(RootVector latest, boolean includingReads) {
         return trees.entrySet().stream()
-                .filter(entry -> includingReads || changed(entry))
+                .filter(entry -> includingReads || guarded.contains(entry.getKey()) || changed(entry))
                 .allMatch(entry -> Ref.same(base.get(entry.getKey()), latest.get(entry.getKey())));
     }
 

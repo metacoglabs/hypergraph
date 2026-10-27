@@ -34,6 +34,9 @@ public final class Access {
     public record Grant(String user, int type, Privilege privilege) {
     }
 
+    public record TenantOptions(int tenant, int connectionLimit) {
+    }
+
     public record Options(String user, long validUntil, int connectionLimit) {
         public static Options defaults(String user) {
             return new Options(user, Long.MAX_VALUE, -1);
@@ -61,7 +64,14 @@ public final class Access {
             GRANT_CODEC, EntryMeasure.keyed(grant -> Hashing.of(Hashing.of(grant.user()), grant.type(), grant.privilege().ordinal()))));
     public static final Slot<Options> USER_OPTIONS = Slot.primary(76, "user-options", new TreeSchema<>(111, "user-options", FingerprintMode.SET,
             OPTIONS_CODEC, EntryMeasure.keyed(options -> Hashing.of(Hashing.of(options.user()), options.validUntil(), options.connectionLimit()))));
-    public static final List<Slot<?>> SLOTS = List.of(GRANTS, USER_OPTIONS);
+    private static final ValueCodec<TenantOptions> TENANT_OPTIONS_CODEC = ValueCodec.rows(
+            _ -> 20,
+            (out, options) -> out.putSignedVarLong(options.tenant()).putSignedVarLong(options.connectionLimit()),
+            in -> new TenantOptions((int) in.getSignedVarLong(), (int) in.getSignedVarLong()));
+
+    public static final Slot<TenantOptions> TENANT_OPTIONS = Slot.primary(77, "tenant-options", new TreeSchema<>(112, "tenant-options",
+            FingerprintMode.SET, TENANT_OPTIONS_CODEC, EntryMeasure.keyed(options -> Hashing.of(options.tenant(), options.connectionLimit()))));
+    public static final List<Slot<?>> SLOTS = List.of(GRANTS, USER_OPTIONS, TENANT_OPTIONS);
 
     private Access() {
     }
@@ -138,7 +148,7 @@ public final class Access {
     public static void forget(Transaction txn, String user) {
         grants(txn).stream().filter(grant -> grant.user().equals(user))
                 .forEach(grant -> txn.delete(GRANTS, key(user, grant.type())));
-        txn.delete(USER_OPTIONS, Hashing.of(user));
+        txn.merge(USER_OPTIONS, Hashing.of(user), _ -> true, current -> current.filter(options -> !options.user().equals(user)));
     }
 
     public static Options options(View view, String user) {
@@ -150,6 +160,21 @@ public final class Access {
             txn.delete(USER_OPTIONS, Hashing.of(options.user()));
         } else {
             txn.put(USER_OPTIONS, Hashing.of(options.user()), options);
+        }
+    }
+
+    public static int tenantConnectionLimit(View view, int tenant) {
+        return view.get(TENANT_OPTIONS, tenant).filter(options -> options.tenant() == tenant).map(TenantOptions::connectionLimit).orElse(-1);
+    }
+
+    public static void setTenantConnectionLimit(Transaction txn, int tenant, long limit) {
+        if (limit < -1 || limit > Integer.MAX_VALUE) {
+            throw HStoreException.invalid("a connection limit must be -1 (no limit) or between 0 and " + Integer.MAX_VALUE);
+        }
+        if (limit == -1) {
+            txn.delete(TENANT_OPTIONS, tenant);
+        } else {
+            txn.put(TENANT_OPTIONS, tenant, new TenantOptions(tenant, (int) limit));
         }
     }
 
