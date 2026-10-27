@@ -9,7 +9,6 @@ import io.hstore.db.query.Parser;
 import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
 import io.hstore.db.security.Scram;
-import io.hstore.db.security.Security;
 import io.hstore.engine.HStoreException;
 
 import java.io.BufferedInputStream;
@@ -150,7 +149,7 @@ final class Server implements AutoCloseable {
                         + "CREATE USER creates one");
             }
         }
-        List<String> legacy = database.read(reader -> Security.legacyUsers(reader.view()));
+        List<String> legacy = database.usersWithOldPasswords();
         if (!legacy.isEmpty()) {
             LOG.log(System.Logger.Level.WARNING, "{0} users have passwords stored by HStore 0.1 and cannot sign in over this port until each "
                     + "signs in once through Studio or gets a new password with ALTER USER: {1}", legacy.size(), String.join(", ", legacy));

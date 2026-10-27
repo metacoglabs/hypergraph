@@ -92,6 +92,10 @@ public final class HypergraphDatabase implements AutoCloseable {
         }), scramSecret, Security.ITERATIONS, channelBinding);
     }
 
+    public List<String> usersWithOldPasswords() {
+        return read(reader -> Security.legacyUsers(reader.view()));
+    }
+
     public SignIns signIns() {
         return signIns;
     }
