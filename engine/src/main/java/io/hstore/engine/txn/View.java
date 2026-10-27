@@ -61,6 +61,10 @@ public abstract sealed class View permits Snapshot, Transaction {
         return NOT_RECORDING;
     }
 
+    public boolean recordsReads() {
+        return false;
+    }
+
     public abstract long generation();
 
     public abstract int branch();

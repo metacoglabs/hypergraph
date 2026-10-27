@@ -243,7 +243,7 @@ public sealed class Reader permits Writer {
     public Optional<Value> property(long atom, String name) {
         OptionalInt key = schema().existingPropertyKey(name);
         if (key.isEmpty()) {
-            return Optional.empty();
+            return absent(atom);
         }
         return bag(atom).get(key.getAsInt()).map(Property::value);
     }
@@ -251,9 +251,16 @@ public sealed class Reader permits Writer {
     public Optional<Value> property(long atom, String name, long validAt) {
         OptionalInt key = schema().existingPropertyKey(name);
         if (key.isEmpty()) {
-            return Optional.empty();
+            return absent(atom);
         }
         return bag(atom).get(key.getAsInt()).filter(property -> property.validAt(validAt)).map(Property::value);
+    }
+
+    private Optional<Value> absent(long atom) {
+        if (view.recordsReads()) {
+            bag(atom);
+        }
+        return Optional.empty();
     }
 
     public Map<String, Value> properties(long atom) {
@@ -372,7 +379,10 @@ public sealed class Reader permits Writer {
         Predicate<Value> accept = candidate -> low.map(bound -> lowInclusive ? candidate.compareTo(bound) >= 0 : candidate.compareTo(bound) > 0).orElse(true)
                 && high.map(bound -> highInclusive ? candidate.compareTo(bound) <= 0 : candidate.compareTo(bound) < 0).orElse(true);
         OptionalInt key = schema().existingPropertyKey(property);
-        if (key.isEmpty()) {
+        if (key.isEmpty() && !property.startsWith("$")) {
+            if (view.recordsReads()) {
+                atomsOfType(definition.id()).forEach(this::bag);
+            }
             return LongStream.empty();
         }
         Optional<TypeTag> indexedTag = indexedTag(definition, property);

@@ -215,7 +215,7 @@ A violated invariant aborts the check with the offending page and a reason such 
 
 The report ends with a tenant isolation line. Older versions could leave a hyperedge with a member from another
 tenant; the check lists each such membership, on every active branch, with the statement that undoes it. With `--repair-tenants`
-(after the directory), `check` first removes all of them in one transaction and lists what it removed:
+(after the directory), `check` first removes all of them, in one transaction per branch, and lists what it removed:
 
 ```
 $ hstore check /srv/hstore --repair-tenants

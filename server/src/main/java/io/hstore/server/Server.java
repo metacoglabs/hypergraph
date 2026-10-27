@@ -149,6 +149,11 @@ final class Server implements AutoCloseable {
                         + "CREATE USER creates one");
             }
         }
+        List<String> legacy = database.usersWithOldPasswords();
+        if (!legacy.isEmpty()) {
+            LOG.log(System.Logger.Level.WARNING, "{0} users have passwords stored by HStore 0.1 and cannot sign in over this port until each "
+                    + "signs in once through Studio or gets a new password with ALTER USER: {1}", legacy.size(), String.join(", ", legacy));
+        }
         while (running) {
             try {
                 Socket socket = listener.accept();
@@ -191,6 +196,7 @@ final class Server implements AutoCloseable {
         boolean active = false;
         boolean unsettled = true;
         Session session = new Session(database);
+        session.refuseClearTextPasswords(UPGRADE);
         try (socket; session) {
             if (socket instanceof SSLSocket secure) {
                 secure.setSoTimeout(HANDSHAKE_TIMEOUT_MILLIS);
@@ -320,7 +326,7 @@ final class Server implements AutoCloseable {
             WireProtocol.respond(out, "error [" + failure.code() + "]: " + failure.getMessage());
             return false;
         }
-        if (statements.stream().anyMatch(statement -> statement instanceof Statement.Authenticate)) {
+        if (statements.stream().anyMatch(Server::signsIn)) {
             refuseCleartext(out, connection, peer);
             return false;
         }
@@ -332,6 +338,15 @@ final class Server implements AutoCloseable {
     static final String SASL = "SASL ";
     static final String UPGRADE = "this server no longer accepts passwords in clear text; upgrade your HStore client to version "
             + Main.VERSION + " or later, which signs in with " + Scram.MECHANISM;
+
+    private static boolean signsIn(Statement statement) {
+        return switch (statement) {
+            case Statement.Authenticate _ -> true;
+            case Statement.At(long _, Statement inner) -> signsIn(inner);
+            case Statement.AsOf(long _, Statement inner) -> signsIn(inner);
+            default -> false;
+        };
+    }
 
     private void refuseCleartext(Writer out, long connection, String peer) throws IOException {
         LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} sent a clear-text password, which is refused; the client needs an upgrade",
@@ -396,7 +411,7 @@ final class Server implements AutoCloseable {
             LOG.log(System.Logger.Level.INFO, "connection {0}: {1}", connection, failure.getMessage());
             return "error [" + failure.code() + "]: " + failure.getMessage();
         }
-        if (statements.stream().anyMatch(sourced -> sourced.statement() instanceof Statement.Authenticate)) {
+        if (statements.stream().map(Parser.Sourced::statement).anyMatch(Server::signsIn)) {
             LOG.log(System.Logger.Level.WARNING, "connection {0} sent a clear-text password, which is refused; the client needs an upgrade",
                     connection);
             return "error [AUTHENTICATION_FAILED]: " + UPGRADE;

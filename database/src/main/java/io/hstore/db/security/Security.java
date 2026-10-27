@@ -16,6 +16,7 @@ import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.txn.Transaction;
 import io.hstore.engine.txn.View;
 
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.HexFormat;
 import java.util.List;
@@ -32,7 +33,6 @@ public final class Security {
 
     public static final int ITERATIONS = 600_000;
     private static final System.Logger LOG = System.getLogger("hstore.security");
-    private static final int MIN_VERIFIER_ITERATIONS = 4096;
     private static final long SCRAM_SECRET = 0x5343_5241_4D00_0000L;
     private static final int SCRAM_SECRET_WORDS = 4;
     public static final int MIN_PASSWORD_LENGTH = 8;
@@ -157,13 +157,10 @@ public final class Security {
     }
 
     static Scram.Verifier secret(String password) {
-        Optional<Scram.Verifier> given = Scram.Verifier.parse(password);
-        if (given.isPresent()) {
-            if (given.get().iterations() < MIN_VERIFIER_ITERATIONS || given.get().salt().length < 8) {
-                throw HStoreException.invalid("a SCRAM-SHA-256 verifier needs at least " + MIN_VERIFIER_ITERATIONS
-                        + " iterations and an 8-byte salt");
-            }
-            return given.get();
+        if (password.startsWith(Scram.PREFIX)) {
+            return Scram.Verifier.parse(password).filter(given -> given.salt().length >= 8)
+                    .orElseThrow(() -> HStoreException.invalid("not a valid SCRAM-SHA-256 verifier: it needs " + Scram.MIN_ITERATIONS
+                            + " to " + Scram.MAX_ITERATIONS + " iterations, a salt of at least 8 bytes and 32-byte keys"));
         }
         return newVerifier(password);
     }
@@ -175,22 +172,31 @@ public final class Security {
         return Scram.Verifier.of(password, salt, ITERATIONS);
     }
 
-    public static Scram.Verifier verifier(User user) {
-        return Scram.Verifier.parse(user.hash()).orElseGet(() -> Scram.Verifier.fromSaltedPassword(HEX.parseHex(user.hash()),
-                HEX.parseHex(user.salt()), user.iterations()));
+    public static Optional<Scram.Verifier> verifier(User user) {
+        return Scram.Verifier.parse(user.hash());
     }
 
     public static boolean legacy(User user) {
-        return Scram.Verifier.parse(user.hash()).isEmpty();
+        return !user.hash().startsWith(Scram.PREFIX);
     }
 
-    public static int upgradeLegacyUsers(Transaction txn) {
-        List<User> legacy = users(txn).stream().filter(Security::legacy).toList();
-        for (User user : legacy) {
-            txn.put(USERS, userKey(user.name()), new User(user.name(), user.salt(), verifier(user).encode(), user.iterations(),
-                    user.tenant(), user.role()));
+    public static List<String> legacyUsers(View view) {
+        return users(view).stream().filter(Security::legacy).map(User::name).sorted().toList();
+    }
+
+    public static void replaceLegacy(Transaction txn, User legacy, String password) {
+        byte[] salt = new byte[16];
+        RANDOM.nextBytes(salt);
+        Scram.Verifier verifier = Scram.Verifier.of(password, salt, ITERATIONS);
+        txn.merge(USERS, userKey(legacy.name()), current -> current.equals(Optional.of(legacy)),
+                _ -> Optional.of(new User(legacy.name(), HEX.formatHex(salt), verifier.encode(), ITERATIONS, legacy.tenant(), legacy.role())));
+    }
+
+    private static boolean matches(User user, String password) {
+        if (legacy(user)) {
+            return MessageDigest.isEqual(derive(password, HEX.parseHex(user.salt()), user.iterations()), HEX.parseHex(user.hash()));
         }
-        return legacy.size();
+        return verifier(user).filter(verifier -> verifier.matches(password)).isPresent();
     }
 
     public static Optional<byte[]> scramSecret(View view) {
@@ -278,7 +284,7 @@ public final class Security {
         if (stored.isEmpty()) {
             derive(password, UNKNOWN_USER_SALT, ITERATIONS);
         }
-        return stored.filter(user -> verifier(user).matches(password)).filter(user -> !expired(view, user.name())).map(Security::principal);
+        return stored.filter(user -> matches(user, password)).filter(user -> !expired(view, user.name())).map(Security::principal);
     }
 
     public static boolean hasUsers(View view) {

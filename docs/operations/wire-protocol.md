@@ -85,8 +85,8 @@ or when it is `auto` and at least one user exists.
 Clients sign in with SCRAM-SHA-256 ([RFC 5802](https://www.rfc-editor.org/rfc/rfc5802),
 [RFC 7677](https://www.rfc-editor.org/rfc/rfc7677)), the same mechanism PostgreSQL uses. The password never
 crosses the connection: the client proves that it knows it, and the server proves in turn that it holds the
-user's verifier, so a client also detects a server that only pretends to be the database. The exchange takes two
-requests. Each SCRAM message travels base64-encoded on one line:
+user's verifier. A client that follows the rules below therefore detects a server that only pretends to be the
+database, unless that server has a copy of the user's verifier. The exchange takes two requests. Each SCRAM message travels base64-encoded on one line:
 
 | Step | Client sends | Server answers |
 |---|---|---|
@@ -100,14 +100,27 @@ into its proof. A proof relayed through a man in the middle, which presents a di
 The server rejects `-PLUS` without TLS, and on a TLS connection it rejects a client that announces channel binding
 support (gs2 flag `y`) without using it, since that means someone stripped it.
 
-The client must check the server's final message, `v=<server signature>`, before it trusts the connection.
-Passwords are hashed as UTF-8 without SASLprep normalisation, authorization identities and SCRAM extensions are
-not supported, and the iteration count is 600,000 for passwords set by this version (at least 4,096 for verifiers
-created elsewhere), so a client spends about half a second deriving the key.
+A client that has a password to send must not trust the connection until the exchange has finished, and
+`hstore connect` disconnects when any of these fails:
+
+- the banner ends with `; authentication required`. A server that does not ask for a password cannot prove that
+  it knows it, so a client with credentials refuses to go on rather than send statements to it;
+- the answer to step 1 is `sasl …` (or an `error`), and its nonce extends the client's nonce;
+- the iteration count is between 4,096 and 10,000,000;
+- the answer to step 2 is exactly `authenticated as <the user it signed in as>` followed by `sasl v=<server
+  signature>`, and the signature is the one the client computes from the password.
+
+When the last check fails the server already considers the session signed in, so the client must close the
+connection. Passwords go through SASLprep ([RFC 4013](https://www.rfc-editor.org/rfc/rfc4013)) and are then hashed
+as UTF-8, as in PostgreSQL: an all-ASCII password is used as it is, and a password that SASLprep rejects is used
+unchanged. Authorization identities and SCRAM extensions are not supported, and the iteration count is 600,000
+for passwords set by this version, so a client spends about half a second deriving the key.
 
 A user that does not exist gets a well-formed `server-first-message` with a salt derived from the user name and a
 secret kept in the database, the same every time, and fails only at the second step, exactly like a wrong
-password.
+password. A user whose password was stored by HStore 0.1 is answered the same way until it signs in once through
+Studio or gets a new password ([security](../database/security.md#users)); the server log
+says which case it was.
 
 Possible replies:
 
@@ -281,6 +294,8 @@ import hmac
 import os
 import socket
 import ssl
+import stringprep
+import unicodedata
 
 
 def b64(text):
@@ -289,6 +304,25 @@ def b64(text):
 
 def unb64(text):
     return base64.b64decode(text).decode()
+
+
+def saslprep(password):
+    if password.isascii():
+        return password
+    mapped = "".join(" " if stringprep.in_table_c12(c) else "" if stringprep.in_table_b1(c) else c for c in password)
+    if not mapped:
+        return password
+    prepared = unicodedata.ucd_3_2_0.normalize("NFKC", mapped)
+    prohibited = (stringprep.in_table_a1, stringprep.in_table_c12, stringprep.in_table_c21_c22, stringprep.in_table_c3,
+                  stringprep.in_table_c4, stringprep.in_table_c5, stringprep.in_table_c6, stringprep.in_table_c7,
+                  stringprep.in_table_c8, stringprep.in_table_c9)
+    if any(test(c) for c in prepared for test in prohibited):
+        return password
+    if any(map(stringprep.in_table_d1, prepared)) and (any(map(stringprep.in_table_d2, prepared))
+                                                       or not stringprep.in_table_d1(prepared[0])
+                                                       or not stringprep.in_table_d1(prepared[-1])):
+        return password
+    return prepared
 
 
 class HStore:
@@ -301,8 +335,15 @@ class HStore:
         self.banner = self._receive()
         if self.banner.startswith("error"):
             raise ConnectionError(self.banner)
-        if self.banner.endswith("authentication required"):
-            self._sign_in(user, password)
+        if user is not None:
+            if not self.banner.endswith("authentication required"):
+                self.sock.close()
+                raise PermissionError("the server did not ask for a password, so it cannot prove who it is")
+            try:
+                self._sign_in(user, password)
+            except Exception:
+                self.sock.close()
+                raise
         self.execute("FORMAT JSON;")
 
     def _sign_in(self, user, password):
@@ -318,9 +359,9 @@ class HStore:
             raise PermissionError(reply)
         server_first = unb64(reply[5:])
         fields = dict(part.split("=", 1) for part in server_first.split(","))
-        if not fields["r"].startswith(nonce) or int(fields["i"]) < 4096:
+        if not fields["r"].startswith(nonce) or not 4096 <= int(fields["i"]) <= 10_000_000:
             raise PermissionError("unexpected server-first-message")
-        salted = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(fields["s"]), int(fields["i"]))
+        salted = hashlib.pbkdf2_hmac("sha256", saslprep(password).encode(), base64.b64decode(fields["s"]), int(fields["i"]))
         client_key = hmac.digest(salted, b"Client Key", "sha256")
         without_proof = "c=" + base64.b64encode(header.encode() + (binding or b"")).decode() + ",r=" + fields["r"]
         auth_message = f"{first_bare},{server_first},{without_proof}".encode()
@@ -329,10 +370,11 @@ class HStore:
         reply = self.execute(f"SASL {b64(without_proof + ',p=' + proof)}")
         if reply.startswith("error"):
             raise PermissionError(reply)
-        status, final = reply.split("\n", 1)
+        status, _, final = reply.partition("\n")
         server_key = hmac.digest(salted, b"Server Key", "sha256")
         expected = "v=" + base64.b64encode(hmac.digest(server_key, auth_message, "sha256")).decode()
-        if not hmac.compare_digest(unb64(final[5:]), expected):
+        if (status != "authenticated as " + user or not final.startswith("sasl ")
+                or not hmac.compare_digest(unb64(final[5:]).encode(), expected.encode())):
             raise PermissionError("the server could not prove that it knows the password")
 
     def execute(self, script):
