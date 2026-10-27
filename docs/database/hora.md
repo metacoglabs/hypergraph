@@ -170,10 +170,14 @@ descends into members that are themselves hyperedges and emits leaves.
 | Status | Meaning |
 |---|---|
 | `EMIT` | a non-edge member reached through `path` |
-| `CYCLE` | a hyperedge already visited on this traversal (cycles through membership are possible because hyperedges can contain hyperedges) |
-| `BUDGET_EXHAUSTED` | depth `0` reached or the row budget denied the next step |
+| `CYCLE` | a hyperedge that is already on `path` (cycles through membership are possible because hyperedges can contain hyperedges). A hyperedge reached again through a different parent is expanded again |
+| `DEPTH_LIMIT` | a hyperedge at the depth the query asked for; its members were not expanded, and everything above it is complete |
+| `BUDGET_EXHAUSTED` | the budget cut the traversal short: the row budget denied the next step and the traversal stopped, or the budget's depth cap (`budget.maxDepth`, lower than the requested depth) was reached on this path |
 
-The effective depth is `min(d, budget.maxDepth)` (default 8); `LIMIT` sets the row budget.
+Through the Java API the effective depth is `min(d, budget.maxDepth)` (default 8). HQL `EXPAND … DEPTH d` sets both to `d` (1 to 64), so its bottom rows are always `DEPTH_LIMIT`; `LIMIT` sets the row budget. A hyperedge already on the path is reported as `CYCLE` even at the bottom, so a client that continues from `DEPTH_LIMIT` rows never walks into a cycle. Every row the traversal
+emits and every descent into a nested hyperedge takes one unit of the budget. When the budget refuses, one
+`BUDGET_EXHAUSTED` row marks where the traversal stopped and nothing more is emitted, so the output never exceeds the
+budget by more than that row, whatever the shape of the nesting.
 
 ```sql
 EXPAND @120 DEPTH 2 LIMIT 20;
@@ -273,5 +277,5 @@ compared with `main` to test whether observed overlaps exceed chance; the branch
 | `OVERLAP JOIN T THRESHOLD t` | `O(Σ_{a∈T} Σ_{v∈M(a)} |I(v)| + #pairs · t log n)` | `O(#partners of one edge + #results)` |
 | set algebra | `O(min(|A|,|B|) · log max(|A|,|B|))` for intersections via leapfrog | result size |
 | `CLOSURE e DIM d` | `O(Σ_{k≤d+1} C(|M(e)|, k))` | `O(d)` per subset (lazy) |
-| `EXPAND e DEPTH d` | `O(rows emitted)` | `O(depth + visited)` |
+| `EXPAND e DEPTH d` | `O(rows emitted)`, bounded by the row budget | `O(depth + rows emitted)` |
 | `PATTERN` | bounded by the product of candidate domains after pruning | `O(partial bindings)` |

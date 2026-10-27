@@ -474,4 +474,69 @@ class DatabaseTest {
         assertTrue(database.read(reader -> reader.find("Person", "ghost")).isEmpty());
         assertTrue(database.read(branch.id(), reader -> reader.find("Person", "ghost")).isPresent());
     }
+
+    @Test
+    void expandFollowsEveryPathAndStaysWithinItsBudget() {
+        long[] ids = database.write(writer -> {
+            long leaf = writer.node("Person", "expand-leaf", Map.of("name", "Leaf"));
+            long bottom = writer.edge("Coauthorship");
+            writer.add(bottom, leaf, MemberSpec.PLAIN);
+            long left = writer.edge("Coauthorship");
+            long right = writer.edge("Coauthorship");
+            writer.add(left, bottom, MemberSpec.PLAIN);
+            writer.add(right, bottom, MemberSpec.PLAIN);
+            long top = writer.edge("Coauthorship");
+            writer.add(top, left, MemberSpec.PLAIN);
+            writer.add(top, right, MemberSpec.PLAIN);
+            long loop = writer.edge("Coauthorship");
+            long back = writer.edge("Coauthorship");
+            writer.add(loop, back, MemberSpec.PLAIN);
+            writer.add(back, loop, MemberSpec.PLAIN);
+            long wide = writer.edge("Coauthorship");
+            for (int i = 0; i < 20; i++) {
+                writer.add(wide, writer.node("Person", "expand-wide-" + i, Map.of("name", "W" + i)), MemberSpec.PLAIN);
+            }
+            long previous = bottom;
+            for (int level = 0; level < 12; level++) {
+                long a = writer.edge("Coauthorship");
+                long b = writer.edge("Coauthorship");
+                writer.add(a, previous, MemberSpec.PLAIN);
+                writer.add(b, previous, MemberSpec.PLAIN);
+                previous = writer.edge("Coauthorship");
+                writer.add(previous, a, MemberSpec.PLAIN);
+                writer.add(previous, b, MemberSpec.PLAIN);
+            }
+            return new long[]{top, left, right, bottom, leaf, loop, back, wide, previous};
+        });
+        long top = ids[0], left = ids[1], right = ids[2], bottom = ids[3], leaf = ids[4], loop = ids[5], back = ids[6];
+        database.read(reader -> {
+            Hora hora = Hora.on(reader);
+            assertEquals(List.of(
+                            new Hora.Expansion(List.of(top, left, bottom, leaf), leaf, Hora.Expansion.Status.EMIT),
+                            new Hora.Expansion(List.of(top, right, bottom, leaf), leaf, Hora.Expansion.Status.EMIT)),
+                    hora.expand(top, 8, Budget.DEFAULT).toList());
+            assertEquals(List.of(new Hora.Expansion(List.of(loop, back, loop), loop, Hora.Expansion.Status.CYCLE)),
+                    hora.expand(loop, 8, Budget.DEFAULT).toList());
+            assertEquals(List.of(new Hora.Expansion(List.of(loop, back, loop), loop, Hora.Expansion.Status.CYCLE)),
+                    hora.expand(loop, 2, Budget.DEFAULT).toList());
+            assertEquals(List.of(new Hora.Expansion(List.of(loop, back), back, Hora.Expansion.Status.DEPTH_LIMIT)),
+                    hora.expand(loop, 1, Budget.DEFAULT).toList());
+            assertEquals(List.of(
+                            new Hora.Expansion(List.of(top, left, bottom), bottom, Hora.Expansion.Status.DEPTH_LIMIT),
+                            new Hora.Expansion(List.of(top, right, bottom), bottom, Hora.Expansion.Status.DEPTH_LIMIT)),
+                    hora.expand(top, 2, Budget.DEFAULT).toList());
+            assertEquals(List.of(
+                            new Hora.Expansion(List.of(top, left, bottom), bottom, Hora.Expansion.Status.BUDGET_EXHAUSTED),
+                            new Hora.Expansion(List.of(top, right, bottom), bottom, Hora.Expansion.Status.BUDGET_EXHAUSTED)),
+                    hora.expand(top, 8, Budget.DEFAULT.withDepth(2)).toList());
+            List<Hora.Expansion> wide = hora.expand(ids[7], 8, Budget.DEFAULT.withRows(5)).toList();
+            assertEquals(5, wide.size());
+            assertEquals(Hora.Expansion.Status.BUDGET_EXHAUSTED, wide.getLast().status());
+            assertEquals(4, wide.stream().filter(row -> row.status() == Hora.Expansion.Status.EMIT).count());
+            List<Hora.Expansion> layered = hora.expand(ids[8], 64, Budget.DEFAULT.withRows(1_000).withDepth(64)).toList();
+            assertTrue(layered.size() <= 1_001, "rows " + layered.size());
+            assertEquals(1, layered.stream().filter(row -> row.status() == Hora.Expansion.Status.BUDGET_EXHAUSTED).count());
+            return null;
+        });
+    }
 }
