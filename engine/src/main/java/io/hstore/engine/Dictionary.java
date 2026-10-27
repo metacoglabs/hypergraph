@@ -35,6 +35,7 @@ public final class Dictionary {
     private final ConcurrentHashMap<Integer, Symbol> symbols = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, List<String>> roleLists = new ConcurrentHashMap<>();
     private final Object roleSetsLock = new Object();
+    private final Map<Integer, Symbol> rememberedRoleSets = new HashMap<>();
     private volatile Map<Integer, BitSet> roleSetsByRole;
 
     Dictionary(TransactionManager transactions) {
@@ -153,6 +154,8 @@ public final class Dictionary {
                         addRoleSet(byRole, (int) cursor.key(), cursor.value());
                     }
                 }
+                rememberedRoleSets.forEach((id, symbol) -> addRoleSet(byRole, id, symbol));
+                rememberedRoleSets.clear();
                 roleSetsByRole = Map.copyOf(byRole);
             }
             return roleSetsByRole;
@@ -194,7 +197,9 @@ public final class Dictionary {
         symbols.put(id, symbol);
         if (symbol instanceof Symbol.Group group && group.namespace() == ROLE_SET) {
             synchronized (roleSetsLock) {
-                if (roleSetsByRole != null) {
+                if (roleSetsByRole == null) {
+                    rememberedRoleSets.put(id, symbol);
+                } else {
                     Map<Integer, BitSet> byRole = new HashMap<>(roleSetsByRole);
                     addRoleSet(byRole, id, symbol);
                     roleSetsByRole = Map.copyOf(byRole);
