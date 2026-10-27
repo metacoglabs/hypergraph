@@ -473,6 +473,10 @@ class DatabaseTest {
                     hora.expand(top, 8, Budget.DEFAULT).toList());
             assertEquals(List.of(new Hora.Expansion(List.of(loop, back, loop), loop, Hora.Expansion.Status.CYCLE)),
                     hora.expand(loop, 8, Budget.DEFAULT).toList());
+            assertEquals(List.of(new Hora.Expansion(List.of(loop, back, loop), loop, Hora.Expansion.Status.CYCLE)),
+                    hora.expand(loop, 2, Budget.DEFAULT).toList());
+            assertEquals(List.of(new Hora.Expansion(List.of(loop, back), back, Hora.Expansion.Status.DEPTH_LIMIT)),
+                    hora.expand(loop, 1, Budget.DEFAULT).toList());
             assertEquals(List.of(
                             new Hora.Expansion(List.of(top, left, bottom), bottom, Hora.Expansion.Status.DEPTH_LIMIT),
                             new Hora.Expansion(List.of(top, right, bottom), bottom, Hora.Expansion.Status.DEPTH_LIMIT)),

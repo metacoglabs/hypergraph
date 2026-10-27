@@ -315,14 +315,15 @@ public final class Hora {
             out.add(new Expansion(List.copyOf(path), atom, Expansion.Status.BUDGET_EXHAUSTED));
             return false;
         }
+        if (ancestors.contains(atom)) {
+            out.add(new Expansion(List.copyOf(path), atom, Expansion.Status.CYCLE));
+            return true;
+        }
         if (depth == 0) {
             out.add(new Expansion(List.copyOf(path), atom, bottom));
             return true;
         }
-        if (!ancestors.add(atom)) {
-            out.add(new Expansion(List.copyOf(path), atom, Expansion.Status.CYCLE));
-            return true;
-        }
+        ancestors.add(atom);
         boolean proceed = true;
         for (Iterator<Incidence> members = reader.edge(atom).stream().iterator(); proceed && members.hasNext(); ) {
             long member = members.next().member();
