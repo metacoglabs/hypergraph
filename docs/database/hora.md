@@ -171,7 +171,8 @@ descends into members that are themselves hyperedges and emits leaves.
 |---|---|
 | `EMIT` | a non-edge member reached through `path` |
 | `CYCLE` | a hyperedge that is already on `path` (cycles through membership are possible because hyperedges can contain hyperedges). A hyperedge reached again through a different parent is expanded again |
-| `BUDGET_EXHAUSTED` | depth `0` reached on this path, or the row budget denied the next step and the traversal stopped |
+| `DEPTH_LIMIT` | a hyperedge at the depth the query asked for; its members were not expanded, and everything above it is complete |
+| `BUDGET_EXHAUSTED` | the budget cut the traversal short: the row budget denied the next step and the traversal stopped, or the budget's depth cap (`budget.maxDepth`, lower than the requested depth) was reached on this path |
 
 The effective depth is `min(d, budget.maxDepth)` (default 8); `LIMIT` sets the row budget. Every row the traversal
 emits and every descent into a nested hyperedge takes one unit of the budget. When the budget refuses, one
