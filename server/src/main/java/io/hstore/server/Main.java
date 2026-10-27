@@ -30,7 +30,7 @@ import javax.net.ssl.SSLContext;
 
 public final class Main {
 
-    static final String VERSION = "0.1.0";
+    static final String VERSION = "0.2.0";
     static final String NOTICE = "Licensed under PolyForm Noncommercial 1.0.0. Commercial use needs a license from MetaCognition India Pvt Limited: krish@getmetacognition.com";
 
     private static final String USAGE = """
@@ -41,6 +41,7 @@ public final class Main {
               exec    <dir> (-c STATEMENTS | FILE)           run HQL against an embedded database
               connect HOST:PORT [--user NAME --password PW]  interactive shell against a server
               ping    HOST:PORT                              exit 0 when a server accepts connections
+              verifier [--password PW]                       print a SCRAM-SHA-256 verifier to use as a CREATE USER password
               bench   <dir> [--scenario NAME] [--scale N]    adversarial storage benchmarks
               check   <dir>                                  verify checksums and tree invariants
               config  [<dir>]                                print effective settings
@@ -65,6 +66,9 @@ public final class Main {
         }
 
         record Ping(InetSocketAddress address) implements Command {
+        }
+
+        record Verifier(Optional<String> password) implements Command {
         }
 
         record Bench(Path directory, String scenario, int scale) implements Command {
@@ -152,6 +156,7 @@ public final class Main {
                     arguments.option("c").orElseGet(() -> read(Path.of(arguments.require(2, "script file")))));
             case "connect" -> new Command.Connect(address(arguments.require(1, "host:port")), credentials(arguments, environment));
             case "ping" -> new Command.Ping(address(arguments.require(1, "host:port")));
+            case "verifier" -> new Command.Verifier(arguments.option("password").or(() -> Optional.ofNullable(environment.get("HSTORE_PASSWORD"))));
             case "bench" -> new Command.Bench(directory(arguments), arguments.option("scenario").orElse("all"),
                     Integer.parseInt(arguments.option("scale").orElse("1")));
             case "check" -> new Command.Check(directory(arguments));
@@ -234,6 +239,10 @@ public final class Main {
                     IO.println(address.getHostString() + ":" + address.getPort() + " - no response");
                     yield 2;
                 }
+            }
+            case Command.Verifier(Optional<String> password) -> {
+                IO.println(Security.newVerifier(password.orElseGet(() -> prompt("the new user"))).encode());
+                yield 0;
             }
             case Command.Bench(Path directory, String scenario, int scale) -> {
                 Logging.configure(Level.WARNING, "", 1, 1);

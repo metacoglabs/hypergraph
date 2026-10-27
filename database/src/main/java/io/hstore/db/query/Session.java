@@ -8,7 +8,9 @@ import io.hstore.db.Reader;
 import io.hstore.db.Writer;
 import io.hstore.db.query.Ast.Statement;
 import io.hstore.db.security.Principal;
+import io.hstore.db.security.Scram;
 import io.hstore.db.security.Security;
+import io.hstore.db.security.SignIns;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.txn.Isolation;
@@ -22,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 public final class Session implements AutoCloseable {
@@ -38,6 +41,12 @@ public final class Session implements AutoCloseable {
     private boolean renewing;
     private Optional<String> origin = Optional.empty();
     private int failedAuthentications;
+    private Optional<ScramAttempt> scram = Optional.empty();
+    private Optional<String> scramUser = Optional.empty();
+    private Optional<String> clearTextRefusal = Optional.empty();
+
+    private record ScramAttempt(Scram.Server server, SignIns.Reservation reservation, Optional<Security.User> user) {
+    }
     private Format format = Format.TABLE;
 
     public enum Format { TABLE, JSON }
@@ -70,24 +79,77 @@ public final class Session implements AutoCloseable {
     }
 
     public boolean authenticate(String user, String password) {
+        requireCanAuthenticate();
+        Optional<Security.User> found = database.signIn(user, password, origin);
+        if (found.isEmpty()) {
+            failedAuthentications++;
+            return false;
+        }
+        signIn(found.get());
+        return true;
+    }
+
+    public String scramFirst(String mechanism, String clientFirst, Optional<byte[]> channelBinding) {
+        requireCanAuthenticate();
+        scram.ifPresent(pending -> pending.reservation().failed());
+        scram = Optional.empty();
+        AtomicReference<Security.User> used = new AtomicReference<>();
+        Scram.Server server = database.scram(channelBinding, used::set);
+        String serverFirst = server.first(mechanism, clientFirst);
+        scramUser = Optional.of(server.user());
+        SignIns.Reservation reservation = database.signIns().reserve(server.user(), origin);
+        scram = Optional.of(new ScramAttempt(server, reservation, Optional.ofNullable(used.get())));
+        return serverFirst;
+    }
+
+    public Optional<String> scramFinal(String clientFinal) {
+        ScramAttempt attempt = scram.orElseThrow(() -> HStoreException.invalid("malformed SCRAM message: no exchange in progress"));
+        scram = Optional.empty();
+        Scram.Outcome outcome;
+        try {
+            outcome = attempt.server().last(clientFinal);
+        } catch (RuntimeException malformed) {
+            attempt.reservation().failed();
+            failedAuthentications++;
+            throw malformed;
+        }
+        Optional<Security.User> found = outcome instanceof Scram.Outcome.Accepted(String user, String _)
+                ? database.read(reader -> Security.user(reader.view(), user)).filter(current -> attempt.user().equals(Optional.of(current)))
+                : Optional.empty();
+        if (found.isEmpty()) {
+            attempt.reservation().failed();
+            failedAuthentications++;
+            return Optional.empty();
+        }
+        attempt.reservation().succeeded();
+        signIn(found.get());
+        return Optional.of(((Scram.Outcome.Accepted) outcome).serverFinal());
+    }
+
+    public Optional<String> scramUser() {
+        return scramUser;
+    }
+
+    public void refuseClearTextPasswords(String reason) {
+        clearTextRefusal = Optional.of(reason);
+    }
+
+    private void requireCanAuthenticate() {
         if (transaction.isPresent()) {
             throw HStoreException.invalid("cannot authenticate inside a transaction");
         }
         if (failedAuthentications >= MAX_FAILED_AUTHENTICATIONS) {
             throw HStoreException.invalid("too many failed authentication attempts in this session");
         }
-        Optional<Principal> found = database.authenticate(user, password, origin);
-        if (found.isEmpty()) {
-            failedAuthentications++;
-            return false;
-        }
-        principal = found.get();
+    }
+
+    private void signIn(Security.User found) {
+        principal = Security.principal(found);
         authenticated = true;
-        credentials = database.read(reader -> Security.user(reader.view(), user));
+        credentials = Optional.of(found);
         renewing = false;
         variables.clear();
         branch = Branch.MAIN;
-        return true;
     }
 
     public boolean authenticated() {
@@ -164,6 +226,9 @@ public final class Session implements AutoCloseable {
                 yield QueryResult.message("using tenant " + tenant.name());
             }
             case Statement.Authenticate(String user, String password) -> {
+                if (clearTextRefusal.isPresent()) {
+                    throw HStoreException.invalid(clearTextRefusal.get());
+                }
                 if (!authenticate(user, password)) {
                     throw HStoreException.invalid("authentication failed for user " + user);
                 }
@@ -289,5 +354,7 @@ public final class Session implements AutoCloseable {
     public void close() {
         transaction.ifPresent(Transaction::abort);
         transaction = Optional.empty();
+        scram.ifPresent(pending -> pending.reservation().failed());
+        scram = Optional.empty();
     }
 }

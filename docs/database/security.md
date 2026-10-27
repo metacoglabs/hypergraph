@@ -126,12 +126,47 @@ record User(String name, String salt, String hash, int iterations, int tenant, R
 - Passwords set by `CREATE USER`, `ALTER USER … PASSWORD` and `hstore init --superuser` must be 8 to 1,024
   characters long (`Security.requirePassword`). Passwords stored before this rule keep working until they are
   changed.
-- Password hashing: **PBKDF2WithHmacSHA256**, 600,000 iterations, 16-byte salt from `SecureRandom`, 256-bit
-  derived key, stored hex-encoded together with the iteration count. Users created before the count was raised
-  from 120,000 keep their old hash until their password is next changed.
-- `Security.authenticate` re-derives with the stored salt and iterations and compares with
-  `MessageDigest.isEqual` (constant time with respect to content). For a name that does not exist it still runs
-  PBKDF2 against a fixed salt, so the response time does not tell which names exist.
+- Passwords are stored as SCRAM-SHA-256 verifiers (`Scram.Verifier`, [RFC 5802](https://www.rfc-editor.org/rfc/rfc5802)),
+  written in the PostgreSQL format `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`. `SaltedPassword`
+  is PBKDF2-HMAC-SHA256 of the UTF-8 password with a 16-byte `SecureRandom` salt and 600,000 iterations;
+  `StoredKey` is `SHA-256(HMAC(SaltedPassword, "Client Key"))` and `ServerKey` is
+  `HMAC(SaltedPassword, "Server Key")`. Neither the password nor `SaltedPassword` is stored, so a copy of the
+  users slot does not let anyone sign in without guessing the password first.
+- Passwords go through SASLprep ([RFC 4013](https://www.rfc-editor.org/rfc/rfc4013)) before PBKDF2, as in
+  PostgreSQL: a password made only of ASCII characters is used as it is; otherwise non-ASCII spaces become
+  spaces, characters such as the soft hyphen are dropped and the result is NFKC-normalized with the current
+  Unicode tables, as PostgreSQL does. When the password holds a character unassigned in Unicode 3.2 (checked before
+  and after normalizing), or the result holds one that SASLprep prohibits, the original password is used
+  unchanged. Five CJK compatibility ideographs whose decomposition Unicode corrected after 3.2 (U+2F868, U+2F874,
+  U+2F91F, U+2F95F, U+2F9BF) therefore normalize as in PostgreSQL rather than as in Unicode 3.2. The client and the
+  Python client in the [wire protocol](../operations/wire-protocol.md#writing-a-client) apply the same rule (they
+  agree on every code point), so `p\u00e4ssword` typed precomposed or decomposed signs in either way.
+- Older versions stored the hex `SaltedPassword` itself. That value is exactly what a SCRAM client derives from
+  the password, so a copy of it from an old backup would be as good as the password. This version therefore never
+  uses an old record for SCRAM: such a user cannot sign in over the wire protocol, the server answers it as it
+  answers an unknown name, and logs a WARNING naming the user. The user's next sign-in through Studio, or an
+  `AUTHENTICATE` statement in an embedded or Studio session, checks the password against the old record and then
+  replaces the record with a verifier under a new random salt and 600,000 iterations
+  (`Security.replaceLegacy`), so old backups give nothing beyond an offline guess. An administrator can instead
+  set a new password with `ALTER USER`. `hstore serve` logs a WARNING at startup listing the users that still
+  have an old record. A version from before this change cannot read the converted records.
+- `CREATE USER` and `ALTER USER … PASSWORD` accept a verifier in place of a password (made by `hstore verifier`
+  or any SCRAM library), with 4,096 to 10,000,000 iterations and a salt of at least 8 bytes; the length rule cannot
+  apply to it. A password that starts with `SCRAM-SHA-256$` but is not such a verifier is refused rather than
+  stored as a password. The upper bound keeps one Studio or embedded sign-in, where the server runs PBKDF2, to a
+  few seconds of CPU; clients refuse a server that asks for more.
+- The wire protocol signs in with SCRAM ([wire protocol](../operations/wire-protocol.md#authentication)): the
+  client proves knowledge of the password against `StoredKey` and the server proves knowledge of `ServerKey`.
+  For a name that does not exist the server answers with a salt derived from the name and a 256-bit secret
+  created when the database is first opened (stored under `EngineSlots.SETTINGS`), so the exchange looks the
+  same for every name and only fails at its last step. The iteration count offered for an unknown name is
+  600,000, so a user whose verifier was made with another count (for example one copied from PostgreSQL, which
+  defaults to 4,096) can be told apart from an unknown name; PostgreSQL behaves the same way. Give such users a
+  new password if their names must not be guessable.
+- `Security.authenticate`, used by Studio's login, `AUTHENTICATE` statements in embedded and Studio sessions and
+  the Java API, derives `StoredKey` from the given password and compares with `MessageDigest.isEqual`. For a name
+  that does not exist it still runs PBKDF2 against a fixed salt, so the response time does not tell which names
+  exist.
 - Every sign-in, from the wire protocol, Studio or an `AUTHENTICATE` statement, goes through one throttle per
   database (`SignIns`): at most 10 failed attempts for one user name from one client address, and 20 from one
   address over all user names, in 15 minutes. Sign-ins without an address (the embedded API, `hstore exec` and
@@ -156,7 +191,8 @@ record User(String name, String salt, String hash, int iterations, int tenant, R
 `Principal(user, user.tenant, user.role)`.
 
 The derivation cost is deliberate (≈0.2–0.5 s per attempt on current CPUs) to slow offline guessing if the data
-directory leaks; failed attempts are logged by the server with the peer address.
+directory leaks; over the wire protocol the client pays it, not the server. Failed attempts are logged by the
+server with the peer address.
 
 ## Quotas
 
@@ -235,9 +271,9 @@ allocator but are not charged as atoms.
 | cross-tenant read through ids or keys | tenant in index keys plus `visible` checks on every path, incident edges of other tenants skipped (also for memberships an older version let through), untyped matches scan only the tenant's own types, per-tenant planner estimates and view staleness | type names, user names, generation numbers and the global atom id sequence are visible to every tenant; cache hits and latency depend on what other tenants do, and semantic search walks one shared HNSW graph |
 | cross-tenant write or reference | `require` before mutations; members must be visible | none known |
 | resource exhaustion by a tenant | atom/edge/payload quotas (payload bytes are charged in their own transaction, so a rollback still counts them, as the payload store never shrinks), the tenant's page budget on every read statement, per-transaction page budget, HORA budgets that `LIMIT` cannot raise past 1,000,000 rows, `DEPTH` 1-64, `SIMILAR TO … TOP` 1-1000, expression and JSON nesting up to 256 levels, number literals up to 400 characters with exponents up to 1000, 32 views per tenant, 128-character names, new embedding models only by a global admin | CPU in planning and projection is not budgeted; the HNSW index is shared; a WRITER can still add new property names, role names (on edge types that declare no roles) and state schemas, which stay in the shared dictionary |
-| password database theft | PBKDF2-SHA256, 600k iterations, per-user salt | offline guessing of weak passwords remains possible |
+| password database theft | SCRAM verifiers: PBKDF2-SHA256, 600k iterations, per-user salt, no stored password or salted password | offline guessing of weak passwords remains possible |
 | online password guessing | one throttle for every sign-in path: 10 failures per user and address, 20 per address in 15 minutes; a delay before every failed answer; a warning when one user collects 50 failures; passwords of at least 8 characters | guessing spread over many addresses is slowed and logged, not stopped |
-| credential sniffing | `tls = on` for the wire protocol and Studio | plaintext when TLS is off |
+| credential sniffing | SCRAM-SHA-256 on the wire protocol, with channel binding over TLS; clear-text `AUTHENTICATE` refused there; `tls = on` for Studio | Studio's login form and `CREATE USER`/`ALTER USER` passwords are clear text without TLS (pass a verifier instead) |
 | privilege escalation | role checks in both HQL and the Java API; tenant admins cannot leave their tenant; sessions that never authenticated must authenticate once the first user exists; sessions end when their user is dropped or its password changes; tenant admins cannot drop the last user | an embedded application holding `Principal.SYSTEM` is fully trusted |
 | tampering with data files | CRC32C on pages, WAL records and payloads detects corruption | no cryptographic integrity or encryption at rest; protect the data directory with file-system permissions (the container runs as a non-root user with mode 0700) |
 

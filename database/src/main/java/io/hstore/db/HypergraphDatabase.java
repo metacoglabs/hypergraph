@@ -12,6 +12,7 @@ import io.hstore.db.schema.SchemaSlots;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
+import io.hstore.db.security.Scram;
 import io.hstore.db.security.SignIns;
 import io.hstore.db.semantic.Embedding;
 import io.hstore.db.semantic.SemanticPlane;
@@ -31,13 +32,21 @@ import io.hstore.engine.txn.TxnOptions;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
 public final class HypergraphDatabase implements AutoCloseable {
+
+    private static final System.Logger LOG = System.getLogger("hstore.security");
+    private static final long LEGACY_WARNING_INTERVAL_NANOS = Duration.ofMinutes(10).toNanos();
+    public static final String LEGACY_PASSWORD = "user \"{0}\" has a password stored by HStore 0.1, which cannot be used with SCRAM-SHA-256; "
+            + "it can sign in once through Studio to convert it, or an administrator can set a new one with ALTER USER";
 
     private static final int MAX_ATTEMPTS = 8;
 
@@ -49,6 +58,8 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final Statistics statistics;
     private final MaterializedViews views;
     private final SignIns signIns = new SignIns();
+    private final byte[] scramSecret;
+    private final Map<String, Long> legacyWarnings = new ConcurrentHashMap<>();
 
     private HypergraphDatabase(Path directory, DatabaseOptions options) {
         this.options = options;
@@ -62,6 +73,52 @@ public final class HypergraphDatabase implements AutoCloseable {
         engine.onCheckpoint(semantic::persist);
         this.statistics = new Statistics(engine);
         this.views = new MaterializedViews(this);
+        this.scramSecret = prepareSignIns();
+    }
+
+    private byte[] prepareSignIns() {
+        if (read(reader -> Security.scramSecret(reader.view())).isEmpty()) {
+            write(writer -> {
+                if (Security.scramSecret(writer.transaction()).isEmpty()) {
+                    Security.createScramSecret(writer.transaction());
+                }
+                return null;
+            });
+        }
+        return read(reader -> Security.scramSecret(reader.view())).orElseThrow();
+    }
+
+    public Scram.Server scram(Optional<byte[]> channelBinding) {
+        return scram(channelBinding, _ -> { });
+    }
+
+    public Scram.Server scram(Optional<byte[]> channelBinding, Consumer<Security.User> used) {
+        return new Scram.Server(name -> read(reader -> Security.user(reader.view(), name)).flatMap(user -> {
+            if (Security.legacy(user)) {
+                warnLegacy(user.name());
+                return Optional.empty();
+            }
+            Optional<Scram.Verifier> verifier = Security.verifier(user);
+            verifier.ifPresent(_ -> used.accept(user));
+            return verifier;
+        }), scramSecret, Security.ITERATIONS, channelBinding);
+    }
+
+    private void warnLegacy(String user) {
+        long now = System.nanoTime();
+        Long last = legacyWarnings.get(user);
+        if (last == null || now - last > LEGACY_WARNING_INTERVAL_NANOS) {
+            legacyWarnings.put(user, now);
+            LOG.log(System.Logger.Level.WARNING, LEGACY_PASSWORD, user);
+        }
+    }
+
+    public List<String> usersWithOldPasswords() {
+        return read(reader -> Security.legacyUsers(reader.view()));
+    }
+
+    public SignIns signIns() {
+        return signIns;
     }
 
     public static List<Slot<?>> extensionSlots() {
@@ -170,7 +227,24 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public Optional<Principal> authenticate(String user, String password, Optional<String> origin) {
-        return signIns.attempt(user, origin, () -> read(reader -> Security.authenticate(reader.view(), user, password)));
+        return signIn(user, password, origin).map(Security::principal);
+    }
+
+    public Optional<Security.User> signIn(String user, String password, Optional<String> origin) {
+        return signIns.attempt(user, origin, () -> read(reader -> Security.signIn(reader.view(), user, password)))
+                .map(found -> Security.legacy(found) ? convert(found, password) : found);
+    }
+
+    private Security.User convert(Security.User legacy, String password) {
+        try {
+            Security.User converted = write(writer -> Security.replaceLegacy(writer.transaction(), legacy, password));
+            LOG.log(System.Logger.Level.INFO, "the password of user \"{0}\" is now stored as a SCRAM-SHA-256 verifier", legacy.name());
+            return converted;
+        } catch (HStoreException changed) {
+            LOG.log(System.Logger.Level.INFO, "the password of user \"{0}\" changed while it was being converted: {1}", legacy.name(),
+                    changed.getMessage());
+            return legacy;
+        }
     }
 
     void chargePayload(int tenant, long bytes) {

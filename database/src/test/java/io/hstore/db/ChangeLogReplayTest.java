@@ -39,6 +39,7 @@ class ChangeLogReplayTest {
         try (HypergraphDatabase database = HypergraphDatabase.open(directory, DatabaseOptions.defaults()
                 .withEngine(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(100_000).withCheckpointWalBytes(Long.MAX_VALUE)))) {
             long first = database.engine().stats().generation();
+            long logged = database.engine().verifyChangeLog().commits();
             database.write(writer -> {
                 writer.defineNode("Person", List.of(new PropertyDef("name", TypeTag.STRING, true, false),
                         new PropertyDef("age", TypeTag.INT, false, false)));
@@ -160,7 +161,7 @@ class ChangeLogReplayTest {
                 }
             }
             long commits = database.engine().stats().generation() - first - branchChanges;
-            assertEquals(commits, database.engine().verifyChangeLog().commits());
+            assertEquals(logged + commits, database.engine().verifyChangeLog().commits());
             assertTrue(commits > 150);
         }
     }

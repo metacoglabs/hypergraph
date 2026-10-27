@@ -5,6 +5,7 @@ package io.hstore.db.security;
 
 import io.hstore.db.security.Quota.Usage;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.catalog.EngineSlots;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.tree.EntryMeasure;
@@ -15,15 +16,12 @@ import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.txn.Transaction;
 import io.hstore.engine.txn.View;
 
-import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
 
 public final class Security {
 
@@ -33,7 +31,9 @@ public final class Security {
     public record User(String name, String salt, String hash, int iterations, int tenant, Role role) {
     }
 
-    private static final int ITERATIONS = 600_000;
+    public static final int ITERATIONS = 600_000;
+    private static final long SCRAM_SECRET = 0x5343_5241_4D00_0000L;
+    private static final int SCRAM_SECRET_WORDS = 4;
     public static final int MIN_PASSWORD_LENGTH = 8;
     public static final int MAX_PASSWORD_LENGTH = 1024;
     private static final byte[] UNKNOWN_USER_SALT = new byte[16];
@@ -143,20 +143,85 @@ public final class Security {
         if (!name.matches("[A-Za-z_][A-Za-z0-9_.@-]*")) {
             throw HStoreException.invalid("invalid user name '" + name + "'");
         }
-        requirePassword(password);
-        byte[] salt = new byte[16];
-        RANDOM.nextBytes(salt);
-        User user = new User(name, HEX.formatHex(salt), HEX.formatHex(derive(password, salt, ITERATIONS)), ITERATIONS, tenant, role);
+        Scram.Verifier verifier = secret(password);
+        User user = new User(name, HEX.formatHex(verifier.salt()), verifier.encode(), verifier.iterations(), tenant, role);
         txn.merge(USERS, userKey(name), Optional::isEmpty, _ -> Optional.of(user));
     }
 
     public static void setPassword(Transaction txn, String name, String password) {
         User current = user(txn, name).orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
+        Scram.Verifier verifier = secret(password);
+        txn.put(USERS, userKey(name), new User(name, HEX.formatHex(verifier.salt()), verifier.encode(), verifier.iterations(),
+                current.tenant(), current.role()));
+    }
+
+    static Scram.Verifier secret(String password) {
+        if (password.startsWith(Scram.PREFIX)) {
+            return Scram.Verifier.parse(password).filter(given -> given.salt().length >= 8)
+                    .orElseThrow(() -> HStoreException.invalid("not a valid SCRAM-SHA-256 verifier: it needs " + Scram.MIN_ITERATIONS
+                            + " to " + Scram.MAX_ITERATIONS + " iterations, a salt of at least 8 bytes and 32-byte keys"));
+        }
+        return newVerifier(password);
+    }
+
+    public static Scram.Verifier newVerifier(String password) {
         requirePassword(password);
         byte[] salt = new byte[16];
         RANDOM.nextBytes(salt);
-        txn.put(USERS, userKey(name), new User(name, HEX.formatHex(salt), HEX.formatHex(derive(password, salt, ITERATIONS)),
-                ITERATIONS, current.tenant(), current.role()));
+        return Scram.Verifier.of(password, salt, ITERATIONS);
+    }
+
+    public static Optional<Scram.Verifier> verifier(User user) {
+        return Scram.Verifier.parse(user.hash());
+    }
+
+    public static boolean legacy(User user) {
+        return !user.hash().startsWith(Scram.PREFIX);
+    }
+
+    public static List<String> legacyUsers(View view) {
+        return users(view).stream().filter(Security::legacy).map(User::name).sorted().toList();
+    }
+
+    public static User replaceLegacy(Transaction txn, User legacy, String password) {
+        byte[] salt = new byte[16];
+        RANDOM.nextBytes(salt);
+        Scram.Verifier verifier = Scram.Verifier.of(password, salt, ITERATIONS);
+        User converted = new User(legacy.name(), HEX.formatHex(salt), verifier.encode(), ITERATIONS, legacy.tenant(), legacy.role());
+        txn.merge(USERS, userKey(legacy.name()), current -> current.equals(Optional.of(legacy)), _ -> Optional.of(converted));
+        return converted;
+    }
+
+    private static boolean matches(User user, String password) {
+        if (legacy(user)) {
+            return MessageDigest.isEqual(derive(password, HEX.parseHex(user.salt()), user.iterations()), HEX.parseHex(user.hash()));
+        }
+        return verifier(user).filter(verifier -> verifier.matches(password)).isPresent();
+    }
+
+    public static Optional<byte[]> scramSecret(View view) {
+        byte[] secret = new byte[SCRAM_SECRET_WORDS * Long.BYTES];
+        for (int word = 0; word < SCRAM_SECRET_WORDS; word++) {
+            Optional<Long> value = view.get(EngineSlots.SETTINGS, SCRAM_SECRET + word);
+            if (value.isEmpty()) {
+                return Optional.empty();
+            }
+            for (int i = 0; i < Long.BYTES; i++) {
+                secret[word * Long.BYTES + i] = (byte) (value.get() >>> (8 * i));
+            }
+        }
+        return Optional.of(secret);
+    }
+
+    public static void createScramSecret(Transaction txn) {
+        for (int word = 0; word < SCRAM_SECRET_WORDS; word++) {
+            long value = RANDOM.nextLong();
+            txn.merge(EngineSlots.SETTINGS, SCRAM_SECRET + word, Optional::isEmpty, _ -> Optional.of(value));
+        }
+    }
+
+    public static Principal principal(User user) {
+        return new Principal(user.name(), user.tenant(), user.role());
     }
 
     public static void requirePassword(String password) {
@@ -180,13 +245,15 @@ public final class Security {
     }
 
     public static Optional<Principal> authenticate(View view, String name, String password) {
+        return signIn(view, name, password).map(Security::principal);
+    }
+
+    public static Optional<User> signIn(View view, String name, String password) {
         Optional<User> stored = user(view, name);
         if (stored.isEmpty()) {
             derive(password, UNKNOWN_USER_SALT, ITERATIONS);
         }
-        return stored.filter(user -> MessageDigest.isEqual(
-                        derive(password, HEX.parseHex(user.salt()), user.iterations()), HEX.parseHex(user.hash())))
-                .map(user -> new Principal(user.name(), user.tenant(), user.role()));
+        return stored.filter(user -> matches(user, password));
     }
 
     public static boolean hasUsers(View view) {
@@ -198,11 +265,6 @@ public final class Security {
     }
 
     private static byte[] derive(String password, byte[] salt, int iterations) {
-        try {
-            PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, 256);
-            return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("PBKDF2WithHmacSHA256 is unavailable", e);
-        }
+        return Scram.saltedPassword(password, salt, iterations);
     }
 }

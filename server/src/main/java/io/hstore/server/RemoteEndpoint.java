@@ -3,6 +3,11 @@
 
 package io.hstore.server;
 
+import io.hstore.db.query.Ast.Statement;
+import io.hstore.db.query.Parser;
+import io.hstore.db.security.Scram;
+import io.hstore.engine.HStoreException;
+
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,13 +17,18 @@ import java.io.Writer;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
+import javax.net.ssl.SSLPeerUnverifiedException;
+import javax.net.ssl.SSLSocket;
 
 final class RemoteEndpoint implements Endpoint {
 
     record Credentials(String user, String password) {
-        String statement() {
-            return "AUTHENTICATE '" + user.replace("'", "''") + "' PASSWORD '" + password.replace("'", "''") + "'";
+        @Override
+        public String toString() {
+            return "Credentials[user=" + user + "]";
         }
     }
 
@@ -50,13 +60,74 @@ final class RemoteEndpoint implements Endpoint {
             close();
             throw new IllegalStateException(banner);
         }
-        if (banner.endsWith("authentication required") && credentials.isPresent()) {
-            String reply = execute(credentials.get().statement());
+        if (credentials.isPresent() && !banner.endsWith("authentication required")) {
+            close();
+            throw new IllegalArgumentException("the server at " + address.getHostString() + ":" + address.getPort()
+                    + " did not ask for a password, so it cannot prove that it is the server you meant to reach; not signing in as "
+                    + credentials.get().user());
+        }
+        if (credentials.isPresent()) {
+            String reply;
+            try {
+                reply = signIn(credentials.get());
+            } catch (RuntimeException failure) {
+                close();
+                throw failure;
+            }
             if (reply.startsWith("error")) {
                 close();
                 throw new IllegalArgumentException(reply);
             }
             banner = banner.replace("authentication required", reply);
+        }
+    }
+
+    String signIn(Credentials credentials) {
+        Optional<byte[]> binding = socket instanceof SSLSocket secure ? peerEndPoint(secure) : Optional.empty();
+        Scram.Client client = new Scram.Client(credentials.user(), credentials.password(), binding);
+        String first = send(Server.SASL + client.mechanism() + " " + encode(client.first()));
+        if (first.startsWith("error")) {
+            return first;
+        }
+        if (!first.startsWith("sasl ") || first.contains("\n")) {
+            close();
+            return "error: the server did not answer with a SCRAM challenge, so it cannot prove that it knows the password; disconnected";
+        }
+        try {
+            String last = send(Server.SASL + encode(client.last(decode(first.substring("sasl ".length())))));
+            if (last.startsWith("error")) {
+                return last;
+            }
+            String[] lines = last.split("\n", 2);
+            if (lines.length != 2 || !lines[0].equals("authenticated as " + credentials.user()) || !lines[1].startsWith("sasl ")) {
+                close();
+                return "error: unexpected reply to the sign-in, so the server did not prove that it knows the password; disconnected";
+            }
+            client.verify(decode(lines[1].substring("sasl ".length())));
+            return lines[0];
+        } catch (HStoreException | IllegalStateException failure) {
+            close();
+            return "error: " + failure.getMessage() + "; disconnected";
+        }
+    }
+
+    private static Optional<byte[]> peerEndPoint(SSLSocket socket) {
+        try {
+            return Scram.endPointOf(socket.getSession().getPeerCertificates());
+        } catch (SSLPeerUnverifiedException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static String encode(String message) {
+        return Base64.getEncoder().encodeToString(message.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String decode(String message) {
+        try {
+            return new String(Base64.getDecoder().decode(message.strip()), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("the server sent a malformed SASL message");
         }
     }
 
@@ -68,6 +139,36 @@ final class RemoteEndpoint implements Endpoint {
 
     @Override
     public String execute(String script) {
+        Optional<Credentials> signIn = authentication(script);
+        if (signIn.isPresent()) {
+            String reply = signIn(signIn.get());
+            if (!reply.startsWith("error")) {
+                banner = banner.replaceFirst("authentication required$", reply);
+            }
+            return reply;
+        }
+        if (Parser.mentionsAuthenticate(script)) {
+            return "error: AUTHENTICATE must be sent on its own, so that it signs in with SCRAM and the password never crosses the "
+                    + "connection; nothing was sent";
+        }
+        return send(script);
+    }
+
+    private static Optional<Credentials> authentication(String script) {
+        try {
+            List<Statement> statements = Parser.script(script);
+            return statements.size() == 1 && statements.getFirst() instanceof Statement.Authenticate(String user, String password)
+                    ? Optional.of(new Credentials(user, password))
+                    : Optional.empty();
+        } catch (HStoreException unparsable) {
+            return Optional.empty();
+        }
+    }
+
+    private String send(String script) {
+        if (socket.isClosed()) {
+            return "error: disconnected; connect again to continue";
+        }
         try {
             WireProtocol.send(out, script);
             return WireProtocol.receive(in, Long.MAX_VALUE).orElse("error: server closed the connection");

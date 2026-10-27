@@ -89,6 +89,21 @@ public final class Parser {
         return statements.getFirst();
     }
 
+    public static boolean mentionsAuthenticate(String source) {
+        try {
+            return Lexer.tokenize(source).stream().anyMatch(token -> token.is("AUTHENTICATE"));
+        } catch (HStoreException unlexable) {
+            return source.toUpperCase(Locale.ROOT).matches("(?s).*\\bAUTHENTICATE\\b.*");
+        }
+    }
+
+    private static Statement historical(Statement inner) {
+        if (inner instanceof Statement.Authenticate) {
+            throw HStoreException.invalid("AUTHENTICATE cannot run at a past generation");
+        }
+        return inner;
+    }
+
     private Statement statement() {
         if (accept("BEGIN")) {
             return new Statement.Begin(accept("SERIALIZABLE"));
@@ -111,11 +126,11 @@ public final class Parser {
         }
         if (accept("AT")) {
             expect("GENERATION");
-            return new Statement.At(longValue(), statement());
+            return new Statement.At(longValue(), historical(statement()));
         }
         if (peek().is("AS") && peek(1).is("OF")) {
             index += 2;
-            return new Statement.AsOf(instant(), statement());
+            return new Statement.AsOf(instant(), historical(statement()));
         }
         if (accept("CREATE")) {
             return create();

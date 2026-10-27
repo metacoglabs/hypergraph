@@ -165,7 +165,14 @@ class ServerTest {
                 try (Endpoint endpoint = new RemoteEndpoint(address, Optional.empty(), Optional.of(trusting))) {
                     assertTrue(endpoint.describe().startsWith("hstore connection"));
                     assertTrue(endpoint.execute("CREATE NODE TYPE Person (name STRING); SHOW TYPES;").contains("Person"));
+                    endpoint.execute("CREATE USER admin PASSWORD 'pw-secret' ROLE admin;");
                 }
+                try (Endpoint bound = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")), Optional.of(trusting))) {
+                    assertTrue(bound.describe().endsWith("authenticated as admin"), bound.describe());
+                    assertTrue(bound.execute("WHOAMI;").contains("ADMIN"));
+                }
+                assertThrows(IllegalArgumentException.class, () -> new RemoteEndpoint(address,
+                        Optional.of(new RemoteEndpoint.Credentials("admin", "wrong-password")), Optional.of(trusting)));
                 assertThrows(UncheckedIOException.class,
                         () -> new RemoteEndpoint(address, Optional.empty(), Optional.of(new Tls.Client(Tls.system(), true))));
                 assertTimeoutPreemptively(Duration.ofSeconds(20),
@@ -323,7 +330,8 @@ class ServerTest {
                     assertTrue(admin.execute("MATCH NODE d:Doc RETURN d.text;").contains("CREATE USER injected"));
                     admin.execute("ALTER USER alice PASSWORD 'rotated-pass';");
                     assertTrue(alice.execute("WHOAMI;").contains("authenticate again"));
-                    assertTrue(alice.execute("AUTHENTICATE alice PASSWORD 'rotated-pass'; WHOAMI;").contains("acme"));
+                    assertTrue(alice.execute("AUTHENTICATE alice PASSWORD 'rotated-pass';").contains("authenticated as alice"));
+                    assertTrue(alice.execute("WHOAMI;").contains("acme"));
                     String crashed = admin.execute("MATCH NODE p WHERE " + "(".repeat(50_000) + "p = @1" + ")".repeat(50_000) + " RETURN p;");
                     assertTrue(crashed.startsWith("error [INVALID_SCHEMA]") && !crashed.contains("Exception"), crashed);
                     assertFalse(admin.execute("WHOAMI;").startsWith("error"));
@@ -402,6 +410,60 @@ class ServerTest {
                 assertTrue(System.nanoTime() - started >= Duration.ofMillis(400).toNanos());
                 try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")))) {
                     assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
+                }
+            }
+            acceptor.join();
+        }
+    }
+
+    @Test
+    void clearTextPasswordsAreRefusedWithAnUpgradeMessage() throws Exception {
+        DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
+            new Session(database).execute("CREATE USER admin PASSWORD 'pw-secret' ROLE admin");
+            Thread acceptor;
+            try (Server server = new Server(database, new InetSocketAddress("127.0.0.1", 0))) {
+                acceptor = Thread.ofVirtual().start(server::serve);
+                InetSocketAddress address = new InetSocketAddress("127.0.0.1", server.port());
+                try (Socket socket = new Socket(address.getHostString(), address.getPort())) {
+                    socket.setSoTimeout(10_000);
+                    InputStream in = new java.io.BufferedInputStream(socket.getInputStream());
+                    java.io.Writer out = new java.io.OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
+                    assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().endsWith("authentication required"));
+                    WireProtocol.send(out, "AUTHENTICATE admin PASSWORD 'pw-secret'");
+                    String old = WireProtocol.receive(in, 1 << 20).orElseThrow();
+                    assertTrue(old.startsWith("error [AUTHENTICATION_FAILED]: this server no longer accepts passwords in clear text; upgrade your "
+                            + "HStore client to version " + Main.VERSION), old);
+                    WireProtocol.send(out, "SHOW USERS;");
+                    assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().contains("SASL SCRAM-SHA-256"));
+                    WireProtocol.send(out, "SASL SCRAM-SHA-1 bixuPXgscj1hYmM=");
+                    assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().contains("unsupported SASL mechanism"));
+                    WireProtocol.send(out, "SASL @@@");
+                    assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().startsWith("error [AUTHENTICATION_FAILED]"));
+                }
+                try (Socket socket = new Socket(address.getHostString(), address.getPort())) {
+                    socket.setSoTimeout(10_000);
+                    InputStream in = new java.io.BufferedInputStream(socket.getInputStream());
+                    java.io.Writer out = new java.io.OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
+                    assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().endsWith("authentication required"));
+                    for (String wrapped : List.of("AT GENERATION 1 AUTHENTICATE admin PASSWORD 'pw-secret'",
+                            "AS OF '2020-01-01T00:00:00Z' AUTHENTICATE admin PASSWORD 'pw-secret'")) {
+                        WireProtocol.send(out, wrapped);
+                        assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().startsWith("error"));
+                        WireProtocol.send(out, "WHOAMI;");
+                        assertTrue(WireProtocol.receive(in, 1 << 20).orElseThrow().contains("authenticate first"));
+                    }
+                }
+                try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw-secret")))) {
+                    assertTrue(admin.execute("AUTHENTICATE admin PASSWORD 'pw-secret'; WHOAMI;").contains("must be sent on its own"));
+                    admin.execute("CREATE USER other PASSWORD 'other-secret' ROLE reader;");
+                    assertTrue(admin.execute("AT GENERATION 1 AUTHENTICATE other PASSWORD 'other-secret'; WHOAMI;").startsWith("error"));
+                    assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
+                    assertTrue(admin.execute("AUTHENTICATE admin PASSWORD 'pw-secret';").startsWith("authenticated as admin"));
+                    assertTrue(admin.execute("WHOAMI;").contains("ADMIN"));
+                }
+                try (Endpoint nobody = new RemoteEndpoint(address, Optional.empty())) {
+                    assertTrue(nobody.execute("AUTHENTICATE nobody PASSWORD 'whatever-it-is';").startsWith("error [AUTHENTICATION_FAILED]: authentication failed"));
                 }
             }
             acceptor.join();

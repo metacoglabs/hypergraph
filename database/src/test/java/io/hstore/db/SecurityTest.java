@@ -6,6 +6,9 @@ package io.hstore.db;
 import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
 import io.hstore.db.security.Principal;
+import io.hstore.db.security.Role;
+import io.hstore.db.security.Scram;
+import io.hstore.db.security.Security;
 import io.hstore.db.semantic.Embedding;
 import io.hstore.db.value.Value;
 import io.hstore.db.view.MaterializedViews;
@@ -18,6 +21,7 @@ import io.hstore.db.value.Json;
 import io.hstore.db.security.SignIns;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.tree.Hashing;
 import io.hstore.engine.txn.TxnOptions;
 import io.hstore.engine.catalog.Branch;
 
@@ -26,11 +30,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.HexFormat;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.Comparator;
@@ -754,6 +765,137 @@ class SecurityTest {
             assertTrue(accounts.attempt("local", Optional.empty(), Optional::empty).isEmpty());
         }
         assertThrows(HStoreException.ResourceLimit.class, () -> accounts.attempt("local", Optional.empty(), () -> Optional.of("never")));
+    }
+
+    private static byte[] hmac(byte[] key, byte[] message) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return mac.doFinal(message);
+    }
+
+    private static Optional<String> signInWithSaltedPassword(Session session, String user, byte[] salted) throws Exception {
+        String firstBare = "n=" + user + ",r=stolen-hash-nonce";
+        String serverFirst = session.scramFirst(Scram.MECHANISM, "n,," + firstBare, Optional.empty());
+        String withoutProof = "c=biws,r=" + serverFirst.substring(2, serverFirst.indexOf(','));
+        byte[] authMessage = (firstBare + "," + serverFirst + "," + withoutProof).getBytes(StandardCharsets.UTF_8);
+        byte[] clientKey = hmac(salted, "Client Key".getBytes(StandardCharsets.UTF_8));
+        byte[] signature = hmac(MessageDigest.getInstance("SHA-256").digest(clientKey), authMessage);
+        byte[] proof = new byte[clientKey.length];
+        for (int i = 0; i < proof.length; i++) {
+            proof[i] = (byte) (clientKey[i] ^ signature[i]);
+        }
+        return session.scramFinal(withoutProof + ",p=" + Base64.getEncoder().encodeToString(proof));
+    }
+
+    private Optional<String> scram(String user, String password) {
+        try (Session session = new Session(database)) {
+            Scram.Client client = new Scram.Client(user, password, Optional.empty());
+            return session.scramFinal(client.last(session.scramFirst(Scram.MECHANISM, client.first(), Optional.empty())));
+        }
+    }
+
+    @Test
+    void anOldPasswordHashIsNeverEnoughToSignIn() throws Exception {
+        Security.User alice = database.read(reader -> Security.user(reader.view(), "alice")).orElseThrow();
+        assertTrue(alice.hash().startsWith("SCRAM-SHA-256$600000:"), alice.hash());
+        Scram.Verifier aliceVerifier = Security.verifier(alice).orElseThrow();
+        try (Session session = new Session(database)) {
+            assertTrue(signInWithSaltedPassword(session, "alice", Scram.saltedPassword("s3cret-pass", aliceVerifier.salt(),
+                    aliceVerifier.iterations())).isPresent(), "the forged exchange works when the key is right");
+        }
+
+        byte[] salt = new byte[16];
+        byte[] stolen = Scram.saltedPassword("legacy-pass", salt, 4096);
+        Security.User legacy = new Security.User("old", HexFormat.of().formatHex(salt), HexFormat.of().formatHex(stolen), 4096,
+                Principal.DEFAULT_TENANT, Role.READER);
+        database.write(writer -> {
+            writer.transaction().put(Security.USERS, Hashing.of("old"), legacy);
+            return null;
+        });
+        admin.close();
+        database.close();
+        database = HypergraphDatabase.open(directory, options());
+        admin = new Session(database);
+        assertEquals(legacy, database.read(reader -> Security.user(reader.view(), "old")).orElseThrow(), "opening converts nothing");
+        assertEquals(List.of("old"), database.read(reader -> Security.legacyUsers(reader.view())));
+
+        try (Session session = new Session(database)) {
+            assertEquals(Optional.empty(), signInWithSaltedPassword(session, "old", stolen));
+        }
+        assertEquals(Optional.empty(), scram("old", "legacy-pass"), "an old hash cannot be used with SCRAM, even with the password");
+        assertFalse(new Session(database).authenticate("old", "wrong-pass"));
+        assertEquals(legacy, database.read(reader -> Security.user(reader.view(), "old")).orElseThrow());
+
+        assertTrue(new Session(database).authenticate("old", "legacy-pass"));
+        Security.User converted = database.read(reader -> Security.user(reader.view(), "old")).orElseThrow();
+        assertFalse(Security.legacy(converted));
+        Scram.Verifier fresh = Security.verifier(converted).orElseThrow();
+        assertFalse(Arrays.equals(salt, fresh.salt()), "the conversion picks a new salt");
+        assertEquals(Security.ITERATIONS, fresh.iterations());
+        assertEquals(List.of(), database.read(reader -> Security.legacyUsers(reader.view())));
+        try (Session session = new Session(database)) {
+            assertEquals(Optional.empty(), signInWithSaltedPassword(session, "old", stolen));
+        }
+        assertTrue(scram("old", "legacy-pass").isPresent());
+        assertTrue(new Session(database).authenticate("old", "legacy-pass"));
+        assertFalse(new Session(database).authenticate("old", "wrong-pass"));
+
+        String verifier = Scram.Verifier.of("chosen-elsewhere", new byte[]{1, 2, 3, 4, 5, 6, 7, 8}, 4096).encode();
+        admin.execute("CREATE USER remote PASSWORD '" + verifier + "' ROLE reader");
+        assertTrue(new Session(database).authenticate("remote", "chosen-elsewhere"));
+        String weak = Scram.Verifier.of("chosen-elsewhere", new byte[]{1, 2, 3, 4, 5, 6, 7, 8}, 1000).encode();
+        assertThrows(HStoreException.InvalidSchema.class, () -> admin.execute("ALTER USER remote PASSWORD '" + weak + "'"));
+        String shortSalt = Scram.Verifier.of("chosen-elsewhere", new byte[]{1, 2}, 4096).encode();
+        assertThrows(HStoreException.InvalidSchema.class, () -> admin.execute("ALTER USER remote PASSWORD '" + shortSalt + "'"));
+    }
+
+    @Test
+    void aPasswordChangeEndsAnExchangeAlreadyInFlight() {
+        try (Session session = new Session(database)) {
+            Scram.Client client = new Scram.Client("alice", "s3cret-pass", Optional.empty());
+            String serverFirst = session.scramFirst(Scram.MECHANISM, client.first(), Optional.empty());
+            admin.execute("ALTER USER alice PASSWORD 'rotated-pass'");
+            assertEquals(Optional.empty(), session.scramFinal(client.last(serverFirst)));
+            assertFalse(session.authenticated());
+        }
+        assertTrue(scram("alice", "rotated-pass").isPresent());
+    }
+
+    @Test
+    void scramExchangesSignSessionsInAndCountFailures() {
+        try (Session session = new Session(database)) {
+            session.origin("192.0.2.10");
+            Scram.Client client = new Scram.Client("alice", "s3cret-pass", Optional.empty());
+            String serverFirst = session.scramFirst(Scram.MECHANISM, client.first(), Optional.empty());
+            String serverFinal = session.scramFinal(client.last(serverFirst)).orElseThrow();
+            client.verify(serverFinal);
+            assertTrue(session.authenticated());
+            assertEquals("alice", session.principal().user());
+            assertTrue(session.principal().tenant() != Principal.DEFAULT_TENANT);
+        }
+        for (int i = 0; i < SignIns.ACCOUNT_LIMIT; i++) {
+            try (Session session = new Session(database)) {
+                session.origin("192.0.2.11");
+                Scram.Client client = new Scram.Client("bob", "wrong-" + i, Optional.empty());
+                assertTrue(session.scramFinal(client.last(session.scramFirst(Scram.MECHANISM, client.first(), Optional.empty()))).isEmpty());
+                assertFalse(session.authenticated());
+            }
+        }
+        try (Session session = new Session(database)) {
+            session.origin("192.0.2.11");
+            Scram.Client client = new Scram.Client("bob", "hunter2-pass", Optional.empty());
+            assertThrows(HStoreException.ResourceLimit.class, () -> session.scramFirst(Scram.MECHANISM, client.first(), Optional.empty()));
+        }
+        try (Session session = new Session(database)) {
+            session.origin("192.0.2.12");
+            Scram.Client client = new Scram.Client("nobody", "anything-at-all", Optional.empty());
+            assertTrue(session.scramFinal(client.last(session.scramFirst(Scram.MECHANISM, client.first(), Optional.empty()))).isEmpty());
+            assertThrows(HStoreException.InvalidSchema.class, () -> session.scramFinal("c=biws,r=x,p=AAAA"));
+        }
+        try (Session abandoned = new Session(database)) {
+            abandoned.origin("192.0.2.13");
+            abandoned.scramFirst(Scram.MECHANISM, new Scram.Client("bob", "x", Optional.empty()).first(), Optional.empty());
+        }
     }
 
     @Test

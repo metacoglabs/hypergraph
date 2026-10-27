@@ -14,7 +14,7 @@ last step of shutdown, which also removes the `hstore-0.log.lck` lock file.
 ## Line format
 
 ```
-2026-10-04 06:33:30.334 IST [28997] LOG:  [server] connection 2 authorized: user=admin tenant=0 role=ADMIN
+2026-10-04 06:33:30.334 IST [28997] LOG:  [server] connection 2 authorized: user=admin tenant=0 role=ADMIN method=SCRAM-SHA-256
 └──────────── timestamp ───────────┘ └pid┘ └sev┘  └component┘ └──────────────── message ────────────────┘
 ```
 
@@ -129,7 +129,9 @@ and in Docker it is the last line of `docker logs`. The storage-integrity failur
 | Severity | Message |
 |---|---|
 | LOG | `connection {n} received from /{ip}:{port}` |
-| LOG | `connection {n} authorized: user={user} tenant={tenantId} role={ROLE}` |
+| LOG | `connection {n} authorized: user={user} tenant={tenantId} role={ROLE} method={SCRAM-SHA-256 or SCRAM-SHA-256-PLUS}` |
+| WARNING | `connection {n} from /{ip}:{port} sent a clear-text password, which is refused; the client needs an upgrade`: a client older than 0.2.0 tried `AUTHENTICATE`. |
+| WARNING | `connection {n} from /{ip}:{port}: SASL sign-in failed: {reason}`: a malformed or throttled SCRAM exchange. |
 | WARNING | `password authentication failed for user "{user}" from /{ip}:{port}` (logged whatever `log_connections` says). Control characters in the user name, as in every log message, are written as `\n`, `\r` or `\uXXXX`. |
 | WARNING | `connection {n} from /{ip}:{port} closed after 5 failed authentication attempts`: any five rejected requests (wrong password or not `AUTHENTICATE`) before login close the connection. |
 | LOG | `disconnection: connection {n} from /{ip}:{port} session time {ms} ms` |
@@ -140,7 +142,10 @@ and in Docker it is the last line of `docker logs`. The storage-integrity failur
 | WARNING | `connection from /{ip}:{port} refused: {reason} (max_connections={n})`: the server is full, or 16 connections from this address are still waiting to authenticate. |
 | WARNING | `connection {n} from /{ip}:{port} refused: no users exist and the client is not on this host` (Studio: `studio request from … refused: …`). |
 | WARNING | `user "{user}" failed to sign in 50 times within 15 minutes; someone may be guessing its password from several addresses` (logger `hstore.security`). |
+| WARNING | `user "{user}" has a password stored by HStore 0.1, which cannot be used with SCRAM-SHA-256; it can sign in once through Studio to convert it, or an administrator can set a new one with ALTER USER` (logger `hstore.security`, at most once every 10 minutes per user): the client only sees `authentication failed`. |
+| INFO | `the password of user "{user}" is now stored as a SCRAM-SHA-256 verifier` (logger `hstore.security`): a user with a password from HStore 0.1 signed in through Studio or an `AUTHENTICATE` statement. |
 | WARNING | at startup, `authentication = off and the server listens on {address}: …` or `the database has no users, so connections from other hosts are refused until CREATE USER creates one`, when the listen address is not loopback. |
+| WARNING | at startup, `{n} users have passwords stored by HStore 0.1 and cannot sign in over this port until each signs in once through Studio or gets a new password with ALTER USER: {names}`. |
 | LOG | `studio session opened for user={user} role={ROLE} from /{ip}:{port}` |
 | WARNING | `studio password authentication failed for user "{user}" from /{ip}:{port}` |
 

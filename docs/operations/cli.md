@@ -12,6 +12,7 @@ usage: hstore <command> [options]
   exec    <dir> (-c STATEMENTS | FILE)           run HQL against an embedded database
   connect HOST:PORT [--user NAME --password PW]  interactive shell against a server
   ping    HOST:PORT                              exit 0 when a server accepts connections
+  verifier [--password PW]                       print a SCRAM-SHA-256 verifier to use as a CREATE USER password
   bench   <dir> [--scenario NAME] [--scale N]    adversarial storage benchmarks
   check   <dir>                                  verify checksums and tree invariants
   config  [<dir>]                                print effective settings
@@ -136,9 +137,12 @@ error [INVALID_SCHEMA]: syntax error at offset 5: expected VIEWS but found 'NOPE
 ### `connect`
 
 An interactive shell over the [wire protocol](wire-protocol.md). When the server banner says
-`authentication required` and credentials are available, `connect` sends `AUTHENTICATE` before showing the
-prompt, and the banner it prints ends in `authenticated as <user>` instead. A rejected login exits with code `2`
-and prints the server's `error [AUTHENTICATION_FAILED]: authentication failed`.
+`authentication required` and credentials are available, `connect` signs in with SCRAM-SHA-256 (with channel
+binding over TLS) before showing the prompt, so the password never leaves the client, and the banner it prints
+ends in `authenticated as <user>` instead. It also checks that the server knows the password, and refuses a
+server that cannot prove it. A rejected login exits with code `2` and prints the server's
+`error [AUTHENTICATION_FAILED]: authentication failed`. A single `AUTHENTICATE user PASSWORD '…'` statement typed
+at the prompt is turned into the same exchange.
 
 | Source of credentials | Order |
 |---|---|
@@ -175,6 +179,19 @@ $ hstore ping 127.0.0.1:7432; echo $?
 $ hstore ping 127.0.0.1:7499; echo $?
 127.0.0.1:7499 - no response
 2
+```
+
+### `verifier`
+
+Prints a SCRAM-SHA-256 verifier for a password, read from `--password`, then `$HSTORE_PASSWORD`, then a no-echo
+prompt. The password must be 8 to 1,024 characters long. Use the output in place of the password in
+`CREATE USER … PASSWORD '…'` or `ALTER USER … PASSWORD '…'`, so that the password itself never reaches the server
+or its logs, even without TLS:
+
+```
+$ hstore verifier
+password for the new user:
+SCRAM-SHA-256$600000:5Ezq2HNhB0F2o/5xgXlS7Q==$Q0pM…:dLh0…
 ```
 
 ### `check`
