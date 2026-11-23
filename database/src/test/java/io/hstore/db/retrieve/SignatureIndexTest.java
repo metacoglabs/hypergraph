@@ -10,6 +10,7 @@ import io.hstore.db.Reader;
 import io.hstore.db.query.Session;
 import io.hstore.db.security.Principal;
 import io.hstore.engine.EngineOptions;
+import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.txn.TxnOptions;
 
@@ -34,6 +35,7 @@ import java.util.random.RandomGeneratorFactory;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SignatureIndexTest {
@@ -262,6 +264,46 @@ class SignatureIndexTest {
                 assertEquals(List.of(review), Signatures.edges(reader.engineView(), reader.tenant(), mixed).boxed().toList());
                 return null;
             });
+        }
+    }
+
+    @Test
+    void mergeSkipsMembersTheTargetDeleted() {
+        for (String policy : List.of("FAIL", "TARGET", "SOURCE")) {
+            try (Session admin = new Session(database)) {
+                admin.executeAll("""
+                        INSERT NODE Person 'n-%1$s' AS $n;
+                        INSERT EDGE Review AS $e;
+                        CREATE BRANCH b%1$s;
+                        USE BRANCH b%1$s;
+                        ADD $n TO $e;
+                        USE MAIN;
+                        DELETE $n;
+                        """.formatted(policy));
+                long edge = admin.variables().get("e");
+                if (policy.equals("FAIL")) {
+                    HStoreException refused = assertThrows(HStoreException.class, () -> admin.execute("MERGE BRANCH b" + policy));
+                    assertTrue(refused.getMessage().contains("conflict"), refused.getMessage());
+                    continue;
+                }
+                admin.execute("MERGE BRANCH b" + policy + " ON CONFLICT " + policy);
+                database.read(reader -> {
+                    assertEquals(0, reader.members(edge).count(), policy);
+                    assertEquals(Optional.empty(), Signatures.of(reader.engineView(), edge), policy);
+                    return null;
+                });
+            }
+        }
+    }
+
+    @Test
+    void aMemberDeletedUnderAnOpenTransactionIsAConflict() {
+        try (Session first = new Session(database); Session second = new Session(database)) {
+            first.executeAll("INSERT NODE Person 'gone' AS $n; INSERT EDGE Review AS $e;");
+            long node = first.variables().get("n");
+            first.executeAll("BEGIN; ADD $n TO $e;");
+            second.execute("DELETE @" + node);
+            assertThrows(HStoreException.Conflict.class, () -> first.execute("COMMIT"));
         }
     }
 

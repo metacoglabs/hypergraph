@@ -34,8 +34,9 @@ public final class SignatureIndexing implements Derivation {
     }
 
     private static AtomRecord record(Workspace workspace, long atom) {
-        return workspace.get(EngineSlots.CATALOG, atom)
-                .orElseThrow(() -> HStoreException.invalid("atom " + atom + " has no catalog record"));
+        return workspace.get(EngineSlots.CATALOG, atom).orElseThrow(() -> workspace.replaying()
+                ? HStoreException.conflict("atom " + atom + " was deleted by a concurrent commit")
+                : HStoreException.invalid("atom " + atom + " has no catalog record"));
     }
 
     private static void move(Workspace workspace, long edge, long member, boolean added) {

@@ -43,8 +43,9 @@ public final class ValidityIndexing implements Derivation {
         if (!from && !to) {
             return;
         }
-        AtomRecord record = workspace.get(EngineSlots.CATALOG, edge)
-                .orElseThrow(() -> HStoreException.invalid("hyperedge " + edge + " has no catalog record"));
+        AtomRecord record = workspace.get(EngineSlots.CATALOG, edge).orElseThrow(() -> workspace.replaying()
+                ? HStoreException.conflict("hyperedge " + edge + " was deleted by a concurrent commit")
+                : HStoreException.invalid("hyperedge " + edge + " has no catalog record"));
         if (from) {
             count(workspace, ValiditySlots.endpointKey(record.tenant(), record.type(), ValiditySlots.VALID_FROM), incidence.validFrom(), edge, delta);
         }
