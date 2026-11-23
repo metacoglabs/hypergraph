@@ -20,6 +20,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.random.RandomGenerator;
+import java.util.random.RandomGeneratorFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -60,7 +61,7 @@ class ActiveEdgesTest {
 
     @Test
     void activeEdgesAgreeWithMemberReadsOnRandomIntervals() {
-        RandomGenerator random = RandomGenerator.of("L64X128MixRandom");
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(20261123L);
         long hub = database.write(writer -> {
             long person = writer.node("Person", "hub");
             for (int i = 0; i < 400; i++) {

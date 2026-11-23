@@ -120,7 +120,7 @@ and in Docker it is the last line of `docker logs`. The storage-integrity failur
 
 | Message | Meaning |
 |---|---|
-| `database <dir> uses storage format N; this build reads format 8 (leaf records framed by length); export and reload it` | `FORMAT` was written by an incompatible build. |
+| `database <dir> uses storage format N; this build reads format 9 (retrieval indexes); export and reload it` | `FORMAT` was written by an incompatible build. |
 | `database uses N byte pages, options request M` | `page_size` differs from the value fixed at `init`. |
 | `write-ahead log segment <file> is damaged (<reason>) but later segments exist; replay would silently drop committed transactions` | `CORRUPT_LOG`: damage in a non-tail WAL segment. A torn record at the end of the *last* segment is normal after a crash. Replay simply ends there. Damage before later segments means storage corruption, so recovery refuses to guess. Restore from backup. |
 

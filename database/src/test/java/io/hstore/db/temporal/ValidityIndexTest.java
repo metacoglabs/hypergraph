@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.random.RandomGenerator;
+import java.util.random.RandomGeneratorFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -177,7 +178,7 @@ class ValidityIndexTest {
 
     @Test
     void endpointsMatchABruteForceListAfterRandomChurn() {
-        RandomGenerator random = RandomGenerator.of("L64X128MixRandom");
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(20261123L);
         churn(random, 1000);
         compareWithBruteForce(random);
     }
@@ -236,7 +237,7 @@ class ValidityIndexTest {
 
     @Test
     void indexSurvivesRestart() {
-        RandomGenerator random = RandomGenerator.of("L64X128MixRandom");
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(20261123L);
         churn(random, 300);
         database.close();
         database = HypergraphDatabase.open(directory, options());

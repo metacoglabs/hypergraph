@@ -351,8 +351,13 @@ transaction, so symbols survive the caller's rollback; this is harmless because 
 | 44 | `tenants` | primary | 81 | `security/Security.java` |
 | 45 | `users` | primary | 82 | `security/Security.java` |
 | 46 | `tenant-usage` | primary | 83 | `security/Security.java` |
+| 47 | `edge-signature` | derived | 84 | `retrieve/SignatureSlots.java` |
+| 48 | `signature-edges` | derived | 85/86 | `retrieve/SignatureSlots.java` |
+| 49 | `signature-names` | derived | 87 | `retrieve/SignatureSlots.java` |
+| 53 | `validity-endpoints` | derived | 96/97/98 | `temporal/ValiditySlots.java` |
+| 56 | `child-edges` | derived | 104/105 | `hora/NestingSlots.java` |
 
-Derived slots are rebuilt by derivations (`PropertyIndexing`, `Signals.INDEXING`) inside the writing
+Derived slots are rebuilt by derivations (`PropertyIndexing`, `Signals.INDEXING`, `ValidityIndexing`, `SignatureIndexing`, `NestingIndexing`) inside the writing
 transaction; they are never written directly by API calls.
 
 ## Java API
