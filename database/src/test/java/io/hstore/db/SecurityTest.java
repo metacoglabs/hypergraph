@@ -510,6 +510,42 @@ class SecurityTest {
     }
 
     @Test
+    void similaritySearchStaysInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e1;
+                    INSERT EDGE Encounter MEMBERS ($e1 AS patient) AS $outer;
+                    """);
+            bob.executeAll("""
+                    INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $f1;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $f2;
+                    INSERT EDGE Encounter MEMBERS ($f1 AS patient, $f2 AS patient) AS $outer;
+                    """);
+            long acmeEdge = alice.variables().get("e1");
+            long acmeOuter = alice.variables().get("outer");
+            long globexEdge = bob.variables().get("f1");
+            long globexOuter = bob.variables().get("outer");
+            long globexPatient = bob.variables().get("p");
+            database.write(writer -> {
+                writer.transaction().upsert(acmeOuter, globexEdge, _ -> Incidence.of(globexEdge));
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> Incidence.of(globexPatient));
+                return null;
+            });
+            var result = alice.execute("SIMILAR TO (q:Encounter(x:Patient)) IN CHILDREN OF Encounter TOP 10");
+            String rendered = result.rows().toString();
+            assertFalse(rendered.contains("@" + globexOuter + " ") || rendered.contains("@" + globexEdge), rendered);
+            var exact = alice.execute("SIMILAR TO (q:Encounter(x:Patient)) IN SETS ((@" + acmeEdge + ")) TOP 1");
+            assertEquals("0", exact.rows().getFirst().get(2).render());
+            assertThrows(HStoreException.class, () -> alice.execute("SIMILAR TO EDGES (@" + globexEdge + ") IN CHILDREN OF Encounter TOP 1"));
+            assertThrows(HStoreException.class, () -> alice.execute("SIMILAR TO CHILDREN OF @" + globexOuter + " IN CHILDREN OF Encounter TOP 1"));
+            assertThrows(HStoreException.class, () -> alice.execute("SIMILAR TO (q:Encounter(x:Patient)) IN AROUND @" + globexEdge + " TOP 1"));
+            assertThrows(HStoreException.class, () -> alice.execute("SIMILAR TO (q:Encounter(x:Patient)) IN SETS ((@" + globexEdge + ")) TOP 1"));
+        }
+    }
+
+    @Test
     void roleFilteredMatchesStayInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
