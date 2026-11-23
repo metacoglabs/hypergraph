@@ -125,6 +125,15 @@ public final class Ast {
         }
     }
 
+    public record StructuralVertex(String name, Optional<String> type) {
+    }
+
+    public record StructuralEdge(String name, String type, List<StructuralVertex> vertices) {
+    }
+
+    public record StructuralAnchor(String vertex, Ref atom) {
+    }
+
     public sealed interface Instant {
         record Generation(long id) implements Instant {
         }
@@ -305,6 +314,13 @@ public final class Ast {
         }
 
         record Query(Match match) implements Statement {
+        }
+
+        record StructuralMatch(List<StructuralEdge> edges, List<StructuralAnchor> anchors, Optional<String> mode, boolean count,
+                               boolean bindings, OptionalLong limit) implements Statement {
+        }
+
+        record ExplainStructural(StructuralMatch match) implements Statement {
         }
 
         record Explain(Match match) implements Statement {

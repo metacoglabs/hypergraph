@@ -7,6 +7,8 @@ import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertyIndex;
 import io.hstore.db.property.PropertySlots;
+import io.hstore.db.retrieve.Signature;
+import io.hstore.db.retrieve.Signatures;
 import io.hstore.db.schema.Schema;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.security.Access;
@@ -40,6 +42,8 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 import java.util.stream.LongStream;
@@ -52,8 +56,10 @@ public sealed class Reader permits Writer {
     private final Principal principal;
 
     private Boolean onlyDefaultTenant;
-    private final Map<Integer, Optional<Access.Privilege>> grantedTypes = new HashMap<>();
-    private long grantsGeneration = -1;
+    private record Grants(long generation, Map<Integer, Optional<Access.Privilege>> types) {
+    }
+
+    private final AtomicReference<Grants> grants = new AtomicReference<>(new Grants(-1, new ConcurrentHashMap<>()));
 
     Reader(HypergraphDatabase database, View view, Principal principal) {
         this.database = database;
@@ -99,11 +105,12 @@ public sealed class Reader permits Writer {
 
     private Optional<Access.Privilege> privilege(int type) {
         long current = database.engine().transactions().current().id();
-        if (current != grantsGeneration) {
-            grantedTypes.clear();
-            grantsGeneration = current;
+        Grants known = grants.get();
+        if (known.generation() != current) {
+            Grants fresh = new Grants(current, new ConcurrentHashMap<>());
+            known = grants.compareAndSet(known, fresh) ? fresh : grants.get();
         }
-        return grantedTypes.computeIfAbsent(type, found -> {
+        return known.types().computeIfAbsent(type, found -> {
             try (Snapshot latest = database.engine().snapshot()) {
                 return Access.onType(latest, principal.user(), found);
             }
@@ -171,6 +178,26 @@ public sealed class Reader permits Writer {
 
     public boolean edgeAtom(long atom) {
         return view.atom(atom).filter(this::admits).map(record -> record instanceof AtomRecord.EdgeRecord).orElse(false);
+    }
+
+    public long[] signatureEdges(Signature signature) {
+        return Signatures.edges(view, tenant(), signature).toArray();
+    }
+
+    public long signatureCount(Signature signature) {
+        return Signatures.count(view, tenant(), signature);
+    }
+
+    public boolean signatureCollides(Signature signature) {
+        return Signatures.collides(view, tenant(), signature);
+    }
+
+    public Optional<Signature> signatureOf(long edge) {
+        return visible(edge) ? Signatures.of(view, edge) : Optional.empty();
+    }
+
+    public boolean concurrentReads() {
+        return view instanceof Snapshot;
     }
 
     public LongStream validityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {

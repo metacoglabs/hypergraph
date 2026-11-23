@@ -25,8 +25,12 @@ public final class Signatures {
 
     public static LongStream edges(View view, int tenant, Signature signature) {
         long key = SignatureSlots.signatureKey(tenant, signature);
+        List<SignatureName> names = names(view, tenant, signature);
+        if (names.stream().noneMatch(name -> name.tenant() == tenant && name.signature().equals(signature))) {
+            return LongStream.empty();
+        }
         LongStream postings = view.get(SignatureSlots.EDGES, key).map(found -> postings(view, found)).orElse(LongStream.empty());
-        if (!collides(view, tenant, signature)) {
+        if (names.size() == 1) {
             return postings;
         }
         return postings.filter(edge -> of(view, edge).filter(signature::equals).isPresent()

@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `HYPERMATCH`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -423,6 +423,32 @@ RANK EDGE e:Review
 -- | @14 Review    | 0.9734 | 1       | 1      | 1          | 0.8668 | 1        |
 -- | @16 Review    | 0.8083 | 0.6667  | 0.6667 | 1          | 1      | 0.75     |
 -- | @15 Review    | 0.7333 | 1       | 0.6667 | 0          | 1      | 1        |
+```
+
+### HYPERMATCH
+
+```ebnf
+hypermatch = "HYPERMATCH" hyperedge { "," hyperedge } [ "WHERE" anchor { "AND" anchor } ]
+             [ "MODE" ( "AUTO" | "HGMATCH" | "MACH" ) ] ( "COUNT" | [ "BINDINGS" ] [ "LIMIT" integer ] ) ;
+hyperedge  = identifier ":" identifier "(" vertex { "," vertex } ")" ;
+vertex     = identifier [ ":" identifier ] ;
+anchor     = identifier "=" ref ;
+```
+
+Finds every occurrence of a pattern of hyperedges. Each query hyperedge names its type and its members; a vertex
+names its type the first time it appears. A match is exact: a query hyperedge with three members only matches a
+stored hyperedge with exactly those three members, and distinct query vertices map to distinct atoms. `WHERE u = @…`
+pins a vertex to an atom. The pattern must be connected and has at most 64 hyperedges and anchors.
+
+Columns: one per query hyperedge, holding the matched hyperedge; with `BINDINGS` also one per vertex, one row per
+vertex assignment. `COUNT` returns the number of hyperedge tuples. `EXPLAIN HYPERMATCH …` shows the mode and matching
+order. How the search works is in [structural matching](structural-matching.md).
+
+```
+HYPERMATCH q0:R(u2:A, u4:B), q1:R(u0:A, u1:C, u2), q2:R(u0, u1, u3:A, u4);
+-- | q0  | q1  | q2  |
+-- | @8  | @10 | @12 |
+-- | @9  | @11 | @13 |
 ```
 
 ### TRANSITIONS
