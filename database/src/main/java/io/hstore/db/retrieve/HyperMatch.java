@@ -14,6 +14,7 @@ import java.util.BitSet;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -32,6 +33,7 @@ public final class HyperMatch {
 
     static final long CHS_CANDIDATE_LIMIT = 1L << 20;
     static final int BATCH = 64;
+    private static final ForkJoinPool POOL = new ForkJoinPool(Math.max(1, Runtime.getRuntime().availableProcessors()));
     private static final Comparator<long[]> TUPLE_ORDER = Arrays::compare;
 
     private final Reader reader;
@@ -62,13 +64,13 @@ public final class HyperMatch {
         return new HyperMatch(reader, mode, next);
     }
 
-    record Step(int queryEdge, long anchor, Signature signature, int[] vertices, int[] classLabels, long[] classMasks, int[] classCounts) {
+    public record Step(int queryEdge, long anchor, Signature signature, int[] vertices, int[] classLabels, long[] classMasks, int[] classCounts) {
         boolean isAnchor() {
             return queryEdge < 0;
         }
     }
 
-    record Plan(HyperQuery query, Step[] steps, Mode mode, long[][] candidateSpace) {
+    public record Plan(HyperQuery query, Step[] steps, Mode mode, long[][] candidateSpace) {
     }
 
     private record Embedding(long[] stepEdges, long[] vertices, int[] vertexLabels, long[] masks) {
@@ -89,20 +91,35 @@ public final class HyperMatch {
     }
 
     public long count(HyperQuery query, Budget.Meter meter) {
-        Plan plan = plan(query);
+        return count(prepare(query, meter), meter);
+    }
+
+    public long count(Plan plan, Budget.Meter meter) {
         return run(plan, meter, false).count;
     }
 
     public List<long[]> tuples(HyperQuery query, Budget.Meter meter, long limit) {
-        Plan plan = plan(query);
+        return tuples(prepare(query, meter), meter, limit);
+    }
+
+    public List<long[]> tuples(Plan plan, Budget.Meter meter, long limit) {
         List<long[]> found = run(plan, meter, true).tuples;
         found.sort(TUPLE_ORDER);
         return found.size() > limit ? List.copyOf(found.subList(0, (int) Math.min(Integer.MAX_VALUE, limit))) : List.copyOf(found);
     }
 
-    public String describe(HyperQuery query) {
-        Plan plan = plan(query);
-        return "HyperMatch(" + plan.mode().name().toLowerCase(Locale.ROOT) + ")" + Arrays.stream(plan.steps())
+    public Plan prepare(HyperQuery query, Budget.Meter meter) {
+        return plan(query, meter, true);
+    }
+
+    public String explain(HyperQuery query) {
+        return describe(plan(query, Budget.UNBOUNDED.start(), false));
+    }
+
+    public String describe(Plan plan) {
+        HyperQuery query = plan.query();
+        String filter = plan.mode() == Mode.MACH && plan.candidateSpace() == null ? ", candidate filter runs at execution" : "";
+        return "HyperMatch(" + plan.mode().name().toLowerCase(Locale.ROOT) + filter + ")" + Arrays.stream(plan.steps())
                 .map(step -> step.isAnchor()
                         ? "\n  -> Anchor(" + query.vertices().get(step.vertices()[0]).name() + " = @" + step.anchor() + ")"
                         : "\n  -> " + (step.classLabels().length == 0 ? "Scan(" : "Expand(") + query.edges().get(step.queryEdge()).name()
@@ -110,7 +127,7 @@ public final class HyperMatch {
                 .collect(Collectors.joining());
     }
 
-    Plan plan(HyperQuery query) {
+    Plan plan(HyperQuery query, Budget.Meter meter, boolean filter) {
         int edgeCount = query.edges().size();
         Signature[] signatures = new Signature[edgeCount];
         long[] cards = new long[edgeCount];
@@ -181,11 +198,14 @@ public final class HyperMatch {
                     Arrays.copyOf(classCounts, i));
         }
         Mode chosen = mode;
+        long total = Arrays.stream(cards).sum();
         if (chosen == Mode.AUTO) {
-            long total = Arrays.stream(cards).sum();
             chosen = !query.anchors().isEmpty() || edgeCount <= 2 || total > CHS_CANDIDATE_LIMIT ? Mode.HGMATCH : Mode.MACH;
+        } else if (chosen == Mode.MACH && total > CHS_CANDIDATE_LIMIT) {
+            throw HStoreException.limit("MODE MACH reads every candidate up front and this pattern has " + total
+                    + " of them, more than " + CHS_CANDIDATE_LIMIT + "; use MODE HGMATCH");
         }
-        long[][] space = chosen == Mode.MACH ? candidateSpace(query, signatures) : null;
+        long[][] space = chosen == Mode.MACH && filter ? candidateSpace(query, signatures, meter) : null;
         return new Plan(query, steps, chosen, space);
     }
 
@@ -209,13 +229,18 @@ public final class HyperMatch {
         return signature;
     }
 
-    private long[][] candidateSpace(HyperQuery query, Signature[] signatures) {
+    private long[][] candidateSpace(HyperQuery query, Signature[] signatures, Budget.Meter meter) {
         int edgeCount = query.edges().size();
         long[][] space = new long[edgeCount][];
+        long[][][] witnesses = new long[edgeCount][edgeCount][];
         for (int e = 0; e < edgeCount; e++) {
             space[e] = reader.signatureEdges(signatures[e]);
+            meter.consume(space[e].length);
+            for (int other = 0; other < edgeCount; other++) {
+                witnesses[e][other] = new long[space[e].length];
+                Arrays.fill(witnesses[e][other], -1);
+            }
         }
-        Map<Long, Map<Long, Long>> witnesses = new HashMap<>();
         boolean changed = true;
         while (changed) {
             changed = false;
@@ -230,27 +255,41 @@ public final class HyperMatch {
                     }
                     int[] sharedLabels = Arrays.stream(shared).map(v -> query.vertices().get(v).label()).sorted().toArray();
                     long[] partners = space[other];
-                    Map<Long, Long> witness = witnesses.computeIfAbsent(((long) e << 32) | other, _ -> new HashMap<>());
-                    long[] kept = Arrays.stream(space[e]).filter(f -> {
-                        Long known = witness.get(f);
-                        if (known != null && Arrays.binarySearch(partners, known) >= 0) {
-                            return true;
+                    long[] witness = witnesses[e][other];
+                    boolean[] keep = new boolean[space[e].length];
+                    int kept = 0;
+                    for (int i = 0; i < space[e].length; i++) {
+                        if (witness[i] >= 0 && Arrays.binarySearch(partners, witness[i]) >= 0) {
+                            keep[i] = true;
+                        } else {
+                            meter.consume(1);
+                            witness[i] = supporter(space[e][i], sharedLabels, partners);
+                            keep[i] = witness[i] >= 0;
                         }
-                        long found = supporter(f, sharedLabels, partners);
-                        if (found < 0) {
-                            return false;
+                        kept += keep[i] ? 1 : 0;
+                    }
+                    if (kept != space[e].length) {
+                        space[e] = select(space[e], keep, kept);
+                        for (int partner = 0; partner < edgeCount; partner++) {
+                            witnesses[e][partner] = select(witnesses[e][partner], keep, kept);
                         }
-                        witness.put(f, found);
-                        return true;
-                    }).toArray();
-                    if (kept.length != space[e].length) {
-                        space[e] = kept;
                         changed = true;
                     }
                 }
             }
         }
         return space;
+    }
+
+    private static long[] select(long[] values, boolean[] keep, int kept) {
+        long[] out = new long[kept];
+        int o = 0;
+        for (int i = 0; i < values.length; i++) {
+            if (keep[i]) {
+                out[o++] = values[i];
+            }
+        }
+        return out;
     }
 
     private static int[] shared(int[] left, int[] right) {
@@ -307,9 +346,7 @@ public final class HyperMatch {
             return result;
         }
         Optional<IoTrace> trace = IoTrace.current();
-        try (ForkJoinPool pool = new ForkJoinPool(threads)) {
-            return pool.invoke(new SearchTask(plan, roots, 0, roots.size(), meter, collect, trace));
-        }
+        return POOL.invoke(new SearchTask(plan, roots, 0, roots.size(), meter, collect, trace));
     }
 
     private final class SearchTask extends RecursiveTask<Result> {
@@ -486,7 +523,7 @@ public final class HyperMatch {
         return Optional.of(new Embedding(stepEdges, vertices, vertexLabels, masks));
     }
 
-    public List<long[]> bindings(HyperQuery query, long[] tuple) {
+    public Iterator<long[]> bindings(HyperQuery query, long[] tuple) {
         int edgeCount = query.edges().size();
         List<Integer> anchorVertices = query.anchors().keySet().stream().sorted().toList();
         Map<Long, Long> dataMasks = new TreeMap<>();
@@ -508,65 +545,99 @@ public final class HyperMatch {
         for (int a = 0; a < anchorVertices.size(); a++) {
             queryMasks[anchorVertices.get(a)] |= 1L << (edgeCount + a);
         }
-        List<List<Integer>> classes = new ArrayList<>();
-        List<List<Long>> images = new ArrayList<>();
+        List<int[]> classes = new ArrayList<>();
+        List<long[]> images = new ArrayList<>();
+        List<Integer> representatives = new ArrayList<>();
         for (int u = 0; u < n; u++) {
             int label = query.vertices().get(u).label();
             long mask = queryMasks[u];
             int found = -1;
-            for (int c = 0; c < classes.size(); c++) {
-                int representative = classes.get(c).getFirst();
+            for (int c = 0; c < representatives.size(); c++) {
+                int representative = representatives.get(c);
                 if (query.vertices().get(representative).label() == label && queryMasks[representative] == mask) {
                     found = c;
                 }
             }
             if (found < 0) {
-                classes.add(new ArrayList<>());
+                representatives.add(u);
+                classes.add(new int[0]);
                 images.add(dataMasks.entrySet().stream()
                         .filter(entry -> entry.getValue() == mask && label(entry.getKey()) == label)
-                        .map(Map.Entry::getKey).toList());
+                        .mapToLong(Map.Entry::getKey).sorted().toArray());
                 found = classes.size() - 1;
             }
-            classes.get(found).add(u);
+            int[] members = Arrays.copyOf(classes.get(found), classes.get(found).length + 1);
+            members[members.length - 1] = u;
+            classes.set(found, members);
         }
-        List<long[]> bindings = new ArrayList<>();
-        bindings.add(new long[n]);
-        for (int c = 0; c < classes.size(); c++) {
-            List<long[]> next = new ArrayList<>();
-            List<Integer> members = classes.get(c);
-            List<long[]> permutations = permutations(images.get(c).stream().mapToLong(Long::longValue).toArray());
-            for (long[] partial : bindings) {
-                for (long[] permutation : permutations) {
-                    long[] extended = partial.clone();
-                    for (int i = 0; i < members.size(); i++) {
-                        extended[members.get(i)] = permutation[i];
-                    }
-                    next.add(extended);
+        return new BindingIterator(n, classes, images);
+    }
+
+    private static final class BindingIterator implements Iterator<long[]> {
+        private final int vertexCount;
+        private final List<int[]> classes;
+        private final List<long[]> images;
+        private boolean done;
+
+        BindingIterator(int vertexCount, List<int[]> classes, List<long[]> images) {
+            this.vertexCount = vertexCount;
+            this.classes = classes;
+            this.images = images;
+            for (int c = 0; c < classes.size(); c++) {
+                if (images.get(c).length != classes.get(c).length) {
+                    done = true;
                 }
             }
-            bindings = next;
         }
-        return List.copyOf(bindings);
-    }
 
-    private static List<long[]> permutations(long[] values) {
-        List<long[]> out = new ArrayList<>();
-        permute(values.clone(), 0, out);
-        return out;
-    }
-
-    private static void permute(long[] values, int i, List<long[]> out) {
-        if (i == values.length) {
-            out.add(values.clone());
-            return;
+        @Override
+        public boolean hasNext() {
+            return !done;
         }
-        for (int j = i; j < values.length; j++) {
+
+        @Override
+        public long[] next() {
+            if (done) {
+                throw new java.util.NoSuchElementException();
+            }
+            long[] binding = new long[vertexCount];
+            for (int c = 0; c < classes.size(); c++) {
+                for (int i = 0; i < classes.get(c).length; i++) {
+                    binding[classes.get(c)[i]] = images.get(c)[i];
+                }
+            }
+            done = true;
+            for (int c = classes.size() - 1; c >= 0; c--) {
+                if (nextPermutation(images.get(c))) {
+                    done = false;
+                    break;
+                }
+            }
+            return binding;
+        }
+
+        private static boolean nextPermutation(long[] values) {
+            int i = values.length - 2;
+            while (i >= 0 && values[i] >= values[i + 1]) {
+                i--;
+            }
+            if (i < 0) {
+                Arrays.sort(values);
+                return false;
+            }
+            int j = values.length - 1;
+            while (values[j] <= values[i]) {
+                j--;
+            }
             long swap = values[i];
             values[i] = values[j];
             values[j] = swap;
-            permute(values, i + 1, out);
-            values[j] = values[i];
-            values[i] = swap;
+            for (int left = i + 1, right = values.length - 1; left < right; left++, right--) {
+                swap = values[left];
+                values[left] = values[right];
+                values[right] = swap;
+            }
+            return true;
         }
     }
 

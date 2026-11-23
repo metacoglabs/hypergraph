@@ -39,16 +39,20 @@ tenant is rejected.
 | `MACH` | otherwise | before searching, each query hyperedge's candidate set is cut to hyperedges that share members of the right types with some candidate of every adjacent query hyperedge, repeated until nothing changes; the search then only reads the remaining candidates |
 
 The filter in `MACH` mode only removes hyperedges that cannot take part in any embedding, so both modes return the
-same rows. MaCH's in-search forward checking and its dynamic order are not implemented.
+same rows. An explicit `MODE MACH` on a pattern whose signatures hold more than 2^20 hyperedges is refused rather than
+read in full. `EXPLAIN HYPERMATCH` shows the order without running the filter. MaCH's in-search forward checking and
+its dynamic order are not implemented.
 
 ## Bindings and parallel search
 
 A row is one tuple of stored hyperedges, one per query hyperedge. With `BINDINGS`, each tuple expands into every
 vertex assignment: query vertices with the same type and the same incident query hyperedges are interchangeable, so a
-tuple has the product of the factorials of those class sizes as bindings.
+tuple has the product of the factorials of those class sizes as bindings. Bindings are generated one at a time, so
+`LIMIT` stops the expansion early, and each one counts against the row budget.
 
 When the first step has more than 64 candidates and the statement reads a snapshot, the search is split over a
-fork/join pool with one worker per processor; each worker runs under the statement's page budget. Rows are sorted by
+fork/join pool with one worker per processor, shared by all statements; each worker runs under the statement's page
+budget. Rows are sorted by
 the tuple of hyperedge ids, so the result does not depend on scheduling.
 
 ## Limits
@@ -61,5 +65,5 @@ the tuple of hyperedge ids, so the result does not depend on scheduling.
 | roles, weights, validity, properties | filter the rows, or use `PATTERN` / `MATCH` |
 | ordered positions | ordered hyperedges match as sets |
 
-Every candidate checked counts as one row against the statement budget, and page visits count against the query page
-budget.
+Every candidate checked, every supporter probed by the `MACH` filter and every binding produced counts as one row
+against the statement budget, and page visits count against the query page budget.

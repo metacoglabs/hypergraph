@@ -12,6 +12,7 @@ import io.hstore.db.query.Session;
 import io.hstore.db.retrieve.HyperMatch.Mode;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.catalog.Branch;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -330,6 +331,63 @@ class HyperMatchTest {
     }
 
     @Test
+    void parallelSearchByAGrantedUserSurvivesConcurrentCommits() throws Exception {
+        try (Session admin = new Session(database)) {
+            admin.executeAll("""
+                    CREATE TENANT lab;
+                    CREATE USER analyst PASSWORD 'analyst-pass' TENANT lab ROLE none;
+                    CREATE USER loader PASSWORD 'loader-pass' TENANT lab ROLE writer;
+                    GRANT READ ON TYPE A TO analyst;
+                    GRANT READ ON TYPE B TO analyst;
+                    GRANT READ ON TYPE R TO analyst;
+                    """);
+        }
+        io.hstore.db.security.Principal analyst;
+        io.hstore.db.security.Principal loader;
+        try (Session one = new Session(database); Session two = new Session(database)) {
+            assertTrue(one.authenticate("analyst", "analyst-pass"));
+            assertTrue(two.authenticate("loader", "loader-pass"));
+            analyst = one.principal();
+            loader = two.principal();
+        }
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(8L);
+        database.write(io.hstore.engine.txn.TxnOptions.defaults(), loader, writer -> {
+            List<Long> as = new ArrayList<>();
+            List<Long> bs = new ArrayList<>();
+            for (int i = 0; i < 30; i++) {
+                as.add(writer.node("A", "a" + i));
+                bs.add(writer.node("B", "b" + i));
+            }
+            for (int e = 0; e < 300; e++) {
+                long edge = writer.edge("R");
+                writer.add(edge, as.get(random.nextInt(30)), MemberSpec.PLAIN);
+                writer.add(edge, bs.get(random.nextInt(30)), MemberSpec.PLAIN);
+            }
+            return null;
+        });
+        HyperQuery query = HyperQuery.builder().vertex("a", type("A")).vertex("b", type("B")).vertex("c", type("A"))
+                .edge("q0", type("R"), "a", "b").edge("q1", type("R"), "c", "b").build();
+        java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
+        Thread commits = Thread.ofPlatform().start(() -> {
+            for (int i = 0; !stop.get(); i++) {
+                int n = i;
+                database.write(io.hstore.engine.txn.TxnOptions.defaults(), loader, writer -> writer.node("C", "c" + n));
+            }
+        });
+        try {
+            for (int round = 0; round < 30; round++) {
+                long sequential = database.read(Branch.MAIN, analyst, reader -> HyperMatch.on(reader).count(query, Budget.DEFAULT.start()));
+                long parallel = database.read(Branch.MAIN, analyst, reader -> HyperMatch.on(reader).withThreads(4).count(query, Budget.DEFAULT.start()));
+                assertEquals(sequential, parallel);
+                assertTrue(sequential > 0);
+            }
+        } finally {
+            stop.set(true);
+            commits.join();
+        }
+    }
+
+    @Test
     void anchoredQueriesAgreeWithBruteForce() {
         compareWithBruteForce(Mode.AUTO, 1, true, 4L);
     }
@@ -348,10 +406,41 @@ class HyperMatchTest {
             List<long[]> tuples = match.tuples(query, Budget.DEFAULT.start(), Long.MAX_VALUE);
             assertEquals(1, tuples.size());
             assertEquals(edge, tuples.getFirst()[0]);
-            List<long[]> bindings = match.bindings(query, tuples.getFirst());
+            List<long[]> bindings = new ArrayList<>();
+            match.bindings(query, tuples.getFirst()).forEachRemaining(bindings::add);
             assertEquals(2, bindings.size());
             assertTrue(bindings.get(0)[0] != bindings.get(0)[1]);
             assertEquals(bindings.get(0)[0], bindings.get(1)[1]);
+            return null;
+        });
+    }
+
+    @Test
+    void bindingsOfALargeSymmetricEdgeAreProducedLazily() {
+        database.write(writer -> {
+            long edge = writer.edge("R");
+            for (int i = 0; i < 12; i++) {
+                writer.add(edge, writer.node("A", "m" + i), MemberSpec.PLAIN);
+            }
+            return null;
+        });
+        String pattern = "HYPERMATCH q:R(" + java.util.stream.IntStream.range(0, 12).mapToObj(i -> "v" + i + ":A")
+                .collect(java.util.stream.Collectors.joining(", ")) + ")";
+        try (Session session = new Session(database)) {
+            long started = System.nanoTime();
+            assertEquals(3, session.execute(pattern + " BINDINGS LIMIT 3").rows().size());
+            assertTrue(System.nanoTime() - started < 5_000_000_000L);
+        }
+    }
+
+    @Test
+    void explicitMachRefusesHugeCandidateSpacesAndExplainSkipsTheFilter() {
+        int a = type("A");
+        int r = type("R");
+        HyperQuery query = HyperQuery.builder().vertex("x", a).vertex("y", a).vertex("z", a)
+                .edge("q0", r, "x", "y").edge("q1", r, "y", "z").edge("q2", r, "z", "x").build();
+        database.read(reader -> {
+            assertTrue(HyperMatch.on(reader).withMode(Mode.MACH).explain(query).contains("candidate filter runs at execution"));
             return null;
         });
     }

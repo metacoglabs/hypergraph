@@ -65,6 +65,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -322,7 +323,7 @@ final class Executor {
             case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
             case Statement.StructuralMatch match -> read(reader -> structural(reader, match));
             case Statement.ExplainStructural(Statement.StructuralMatch match) -> read(reader ->
-                    QueryResult.message(hyperMatch(reader, match).describe(hyperQuery(reader, match))));
+                    QueryResult.message(hyperMatch(reader, match).explain(hyperQuery(reader, match))));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -656,35 +657,36 @@ final class Executor {
         long started = System.nanoTime();
         HyperQuery query = hyperQuery(reader, statement);
         HyperMatch match = hyperMatch(reader, statement);
-        IoTrace trace = IoTrace.withBudget(database().queryPageBudget(session.principal()));
+        Budget.Meter meter = Budget.DEFAULT.start();
+        HyperMatch.Plan plan = match.prepare(query, meter);
         if (statement.count()) {
-            long count = trace.call(() -> match.count(query, Budget.DEFAULT.start()));
-            return QueryResult.table(List.of("count"), List.of(List.of(QueryResult.number(count))));
+            return QueryResult.table(List.of("count"), List.of(List.of(QueryResult.number(match.count(plan, meter)))));
         }
         long limit = statement.limit().orElse(Long.MAX_VALUE);
-        List<long[]> tuples = trace.call(() -> match.tuples(query, Budget.DEFAULT.start(), limit));
+        List<long[]> tuples = match.tuples(plan, meter, limit);
         List<String> columns = new ArrayList<>(query.edges().stream().map(HyperQuery.Edge::name).toList());
         if (statement.bindings()) {
             columns.addAll(query.vertices().stream().map(HyperQuery.Vertex::name).toList());
         }
         List<List<Cell>> rows = new ArrayList<>();
-        for (long[] tuple : tuples) {
+        for (int t = 0; t < tuples.size() && rows.size() < limit; t++) {
+            long[] tuple = tuples.get(t);
             List<Cell> edges = Arrays.stream(tuple).mapToObj(edge -> atomCell(reader, edge)).toList();
             if (!statement.bindings()) {
                 rows.add(edges);
                 continue;
             }
-            for (long[] binding : match.bindings(query, tuple)) {
-                if (rows.size() >= limit) {
-                    break;
-                }
+            Iterator<long[]> bindings = match.bindings(query, tuple);
+            while (bindings.hasNext() && rows.size() < limit) {
+                meter.consume(1);
                 List<Cell> row = new ArrayList<>(edges);
-                Arrays.stream(binding).forEach(vertex -> row.add(atomCell(reader, vertex)));
+                Arrays.stream(bindings.next()).forEach(vertex -> row.add(atomCell(reader, vertex)));
                 rows.add(row);
             }
         }
-        return QueryResult.table(columns, rows).withTrace(new QueryResult.Trace(0, reader.generation(), match.describe(query), Double.NaN, rows.size(),
-                trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
+        Optional<IoTrace> trace = IoTrace.current();
+        return QueryResult.table(columns, rows).withTrace(new QueryResult.Trace(0, reader.generation(), match.describe(plan), Double.NaN, rows.size(),
+                trace.map(IoTrace::pagesRead).orElse(0L), trace.map(IoTrace::cacheHits).orElse(0L), System.nanoTime() - started));
     }
 
     private QueryResult transitions(Reader reader, Statement.Transitions statement) {
