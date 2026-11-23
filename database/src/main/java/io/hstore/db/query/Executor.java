@@ -67,6 +67,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -676,12 +677,17 @@ final class Executor {
         return map;
     }
 
+    private static final int EVIDENCE_MEMBER_CAP = 10_000;
+
     private QueryResult selectEvidence(Reader reader, Statement.SelectEvidence statement) {
-        Budget.Meter meter = Budget.DEFAULT.start();
+        Budget generation = new Budget(500_000, Budget.DEFAULT.maxDepth(), Budget.DEFAULT.maxTime().dividedBy(2));
         RankQuery query = rankQuery(reader, statement.query());
-        RoleTimeScorer scorer = new RoleTimeScorer(reader, query, meter);
-        Map<Long, Selection.Candidate> candidates = new LinkedHashMap<>();
+        Budget.Meter ranking = generation.start();
+        Map<Long, RoleTimeScorer.EdgeScore> scores = new LinkedHashMap<>();
+        Ranking.of(reader, query).top(ranking).forEach(score -> scores.put(score.edge(), score));
         Map<Long, Long> parents = new HashMap<>();
+        Budget.Meter expanding = generation.start();
+        RoleTimeScorer scorer = new RoleTimeScorer(reader, query, expanding);
         if (!statement.seeds().isEmpty()) {
             Map<Long, Double> seeds = new LinkedHashMap<>();
             statement.seeds().forEach(seed -> seeds.put(reader.require(session.resolve(reader, seed)).id(), 1.0));
@@ -695,31 +701,61 @@ final class Executor {
                 }
             };
             Expansion.Result expansion = Expansion.on(reader).run(seeds, new Expansion.Model(Map.of(), Map.of(), Map.of(), OptionalLong.empty(),
-                    0.5, 0.5, 0.1), relevance, (int) statement.candidates(), 0, 100_000, meter);
+                    0.5, 0.5, 0.1), relevance, (int) statement.candidates(), 0, 100_000, expanding);
             expansion.edges().forEach(found -> parents.put(found.edge(), found.parent()));
         }
-        List<RoleTimeScorer.EdgeScore> exact = Ranking.of(reader, query).top(meter);
-        List<Long> order = new ArrayList<>();
-        exact.forEach(score -> order.add(score.edge()));
-        parents.keySet().stream().filter(edge -> !order.contains(edge)).forEach(order::add);
+        Set<Long> order = new LinkedHashSet<>(scores.keySet());
+        order.addAll(parents.keySet());
+        Map<Long, Selection.Candidate> candidates = new LinkedHashMap<>();
+        boolean cut = false;
         for (long edge : order) {
-            Optional<RoleTimeScorer.EdgeScore> score = scorer.score(edge);
-            List<Long> members = new ArrayList<>();
-            reader.forEachMemberId(edge, members::add);
+            long[] members = reader.edge(edge).stream().limit(EVIDENCE_MEMBER_CAP + 1L).mapToLong(incidence -> incidence.member())
+                    .filter(reader::owns).toArray();
+            if (!expanding.tryConsume(members.length + 1L)) {
+                cut = true;
+                break;
+            }
+            if (members.length > EVIDENCE_MEMBER_CAP) {
+                continue;
+            }
+            Optional<RoleTimeScorer.EdgeScore> score = Optional.ofNullable(scores.get(edge));
+            boolean ofQueryType = query.type().map(type -> reader.typeOf(edge).orElse(-1) == type.id()).orElse(true);
+            if (score.isEmpty() && ofQueryType) {
+                try {
+                    score = scorer.score(edge);
+                } catch (HStoreException.ResourceLimit exhausted) {
+                    cut = true;
+                    break;
+                }
+            }
             double[] cover = score.map(RoleTimeScorer.EdgeScore::slotCover).orElse(new double[query.slots().size()]);
             candidates.put(edge, new Selection.Candidate(edge, score.map(found -> Math.max(0, Math.min(1, found.score()))).orElse(0.0), cover,
-                    Math.max(1, members.size()), members.stream().mapToLong(Long::longValue).toArray(),
-                    parents.getOrDefault(edge, Selection.UNREACHABLE)));
+                    Math.max(1, members.length), members, parents.getOrDefault(edge, Selection.UNREACHABLE)));
         }
         double[] weights = query.slots().stream().mapToDouble(RankQuery.Slot::weight).toArray();
         Selection.Options options = new Selection.Options((int) Math.min(Integer.MAX_VALUE, statement.top().orElse(Integer.MAX_VALUE)),
                 statement.budget().orElse(Long.MAX_VALUE), statement.kappa(), statement.lambda(), weights, statement.connected());
-        Selection.Outcome outcome = Selection.select(List.copyOf(candidates.values()), options, meter);
+        Selection.Outcome outcome = Selection.select(List.copyOf(candidates.values()), options, generation.start());
         QueryResult table = QueryResult.table(List.of("edge", "gain", "relevance"), outcome.selected().stream()
                 .map(found -> List.of(atomCell(reader, found.edge()), QueryResult.number(found.gain()), QueryResult.number(found.relevance())))
                 .toList());
-        return new QueryResult(table.columns(), table.rows(), table.message() + "; objective " + outcome.objective() + " of at most " + outcome.bound()
-                + " from " + candidates.size() + " candidates" + (outcome.singleton() ? "; the best single unit beat the greedy set" : ""), table.trace());
+        StringBuilder message = new StringBuilder(table.message()).append("; objective ").append(format(outcome.objective()));
+        message.append(Double.isFinite(outcome.bound()) ? " of at most " + format(outcome.bound()) : "")
+                .append(" from ").append(candidates.size()).append(" candidates");
+        if (outcome.singleton()) {
+            message.append("; the best single unit beat the greedy set");
+        }
+        if (outcome.exhausted()) {
+            message.append("; selection ran out of budget, so this is the greedy set so far and has no bound");
+        }
+        if (cut) {
+            message.append("; candidate generation ran out of budget, so later candidates were not considered");
+        }
+        return new QueryResult(table.columns(), table.rows(), message.toString(), table.trace());
+    }
+
+    private static String format(double value) {
+        return String.format(java.util.Locale.ROOT, "%.6g", value);
     }
 
     private QueryResult diffuse(Reader reader, Statement.Diffuse statement) {

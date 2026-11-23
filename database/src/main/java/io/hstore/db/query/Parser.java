@@ -368,7 +368,11 @@ public final class Parser {
             }
             double kappa = accept("KAPPA") ? number().doubleValue() : 0.5;
             double lambda = accept("LAMBDA") ? number().doubleValue() : 1.0;
-            long candidates = accept("CANDIDATES") ? longValue() : 200;
+            boolean counted = accept("CANDIDATES");
+            if (counted && seeds.isEmpty()) {
+                throw HStoreException.invalid("CANDIDATES counts the hyperedges reached from the seeds, so it needs FROM");
+            }
+            long candidates = counted ? longValue() : 200;
             if (candidates < 1 || candidates > 10_000) {
                 throw HStoreException.invalid("CANDIDATES must be between 1 and 10000");
             }

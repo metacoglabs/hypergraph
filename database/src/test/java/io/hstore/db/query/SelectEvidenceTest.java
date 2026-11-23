@@ -36,6 +36,7 @@ class SelectEvidenceTest {
                 CREATE NODE TYPE Person;
                 CREATE NODE TYPE Topic;
                 CREATE SET EDGE TYPE Meeting ROLES (actor, participant, subject);
+                CREATE SET EDGE TYPE Review ROLES (actor, subject);
                 INSERT NODE Person 'alice' AS $a;
                 INSERT NODE Person 'bob' AS $b;
                 INSERT NODE Topic 'claims' AS $t;
@@ -44,6 +45,8 @@ class SelectEvidenceTest {
                 INSERT EDGE Meeting MEMBERS ($a AS actor, $b AS participant, $t AS subject) AS $m2;
                 INSERT EDGE Meeting MEMBERS ($a AS actor, $u AS subject) AS $m3;
                 INSERT EDGE Meeting MEMBERS ($b AS actor, $u AS subject) AS $m4;
+                INSERT NODE Topic 'fraud' AS $v;
+                INSERT EDGE Review MEMBERS ($a AS actor, $v AS subject) AS $r1;
                 """);
     }
 
@@ -71,5 +74,14 @@ class SelectEvidenceTest {
         assertTrue(rows.rows().size() >= 1, rows.rows().toString());
         assertThrows(HStoreException.class, () -> session.execute("SELECT EVIDENCE FOR (RANK EDGE e:Meeting LIKE ($a) TOP 5) CONNECTED TOP 2"));
         assertThrows(HStoreException.class, () -> session.execute("SELECT EVIDENCE FOR (RANK EDGE e:Meeting LIKE ($a) TOP 5)"));
+        assertThrows(HStoreException.class, () -> session.execute("SELECT EVIDENCE FOR (RANK EDGE e:Meeting LIKE ($a) TOP 5) TOP 2 CANDIDATES 50"));
+    }
+
+    @Test
+    void hyperedgesOfAnotherTypeOnlyConnect() {
+        var rows = session.execute("SELECT EVIDENCE FOR (RANK EDGE e:Meeting LIKE ($a AS actor, ANY Topic AS subject) TOP 10) FROM $a TOP 5");
+        long review = session.variables().get("r1");
+        assertTrue(rows.rows().stream().noneMatch(row -> row.getFirst().render().split(" ")[0].equals("@" + review)), rows.rows().toString());
+        assertTrue(rows.rows().size() >= 2, rows.rows().toString());
     }
 }

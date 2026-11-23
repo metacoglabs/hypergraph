@@ -143,6 +143,10 @@ class SelectionTest {
     }
 
     private static double eagerGreedy(List<Candidate> candidates, Options options) {
+        return eagerGreedy(candidates, options, options.maxCost() != Long.MAX_VALUE);
+    }
+
+    private static double eagerGreedy(List<Candidate> candidates, Options options, boolean byCost) {
         List<Candidate> chosen = new ArrayList<>();
         Set<Long> used = new HashSet<>();
         while (true) {
@@ -157,7 +161,7 @@ class SelectionTest {
                 List<Candidate> with = new ArrayList<>(chosen);
                 with.add(candidate);
                 double gain = oracle(with, options) - base;
-                double density = options.maxCost() == Long.MAX_VALUE ? gain : gain / candidate.cost();
+                double density = byCost ? gain / candidate.cost() : gain;
                 if (density > bestDensity) {
                     best = candidate;
                     bestDensity = density;
@@ -193,7 +197,7 @@ class SelectionTest {
                 weights[c] = 0.1 + random.nextDouble();
             }
             boolean budgeted = random.nextBoolean();
-            Options options = new Options(budgeted ? 100 : 1 + random.nextInt(8), budgeted ? 3 + random.nextInt(15) : Long.MAX_VALUE,
+            Options options = new Options(budgeted ? Integer.MAX_VALUE : 1 + random.nextInt(8), budgeted ? 3 + random.nextInt(15) : Long.MAX_VALUE,
                     1 + random.nextDouble(), random.nextDouble(), weights, false);
             Outcome outcome = Selection.select(candidates, options, Budget.UNBOUNDED.start());
             double eager = eagerGreedy(candidates, options);
@@ -206,13 +210,65 @@ class SelectionTest {
     }
 
     @Test
+    void bothLimitsTogetherNeverLoseToCountOnlyGreedy() {
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(67L);
+        for (int q = 0; q < 500; q++) {
+            List<Candidate> candidates = randomCandidates(random, 4 + random.nextInt(9), 0, false);
+            Options options = new Options(1 + random.nextInt(4), 2 + random.nextInt(12), List.of(0.1, 0.25, 1.0).get(random.nextInt(3)), 0,
+                    new double[0], false);
+            Outcome outcome = Selection.select(candidates, options, Budget.UNBOUNDED.start());
+            assertTrue(outcome.objective() >= eagerGreedy(candidates, options, false) - 1e-9, "query " + q);
+        }
+    }
+
+    @Test
     void theBestSingleCandidateRescuesABadGreedyPrefix() {
-        Options options = new Options(10, 10, 1.0, 0, new double[0], false);
+        Options options = new Options(Integer.MAX_VALUE, 10, 1.0, 0, new double[0], false);
         Candidate cheap = new Candidate(1, 0.1, new double[0], 1, new long[]{1}, -1);
         Candidate big = new Candidate(2, 0.9, new double[0], 10, new long[]{2}, -1);
         Outcome outcome = Selection.select(List.of(cheap, big), options, Budget.UNBOUNDED.start());
         assertEquals(List.of(2L), outcome.selected().stream().map(Selected::edge).toList());
         assertTrue(outcome.singleton());
+    }
+
+    @Test
+    void aCountLimitAndABudgetTogetherKeepAGuarantee() {
+        List<Candidate> candidates = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            candidates.add(new Candidate(i, 0.02, new double[0], 1, new long[]{i}, -1));
+            candidates.add(new Candidate(100 + i, 1.0, new double[0], 100, new long[]{100 + i}, -1));
+        }
+        Outcome outcome = Selection.select(candidates, new Options(10, 1000, 1.0, 0, new double[0], false), Budget.UNBOUNDED.start());
+        assertTrue(outcome.objective() >= (1 - 1 / Math.E) / 2 * 10, outcome.toString());
+    }
+
+    @Test
+    void connectedUnitsArePricedByTheSlotsTheyUse() {
+        List<Candidate> candidates = List.of(
+                new Candidate(1, 0.2, new double[0], 1, new long[]{1}, -1),
+                new Candidate(2, 0.2, new double[0], 1, new long[]{2}, 1),
+                new Candidate(3, 0.2, new double[0], 1, new long[]{3}, 2),
+                new Candidate(4, 0.5, new double[0], 1, new long[]{4}, -1),
+                new Candidate(5, 0.5, new double[0], 1, new long[]{5}, -1),
+                new Candidate(6, 0.5, new double[0], 1, new long[]{6}, -1));
+        Outcome outcome = Selection.select(candidates, new Options(3, Long.MAX_VALUE, 1.0, 0, new double[0], true), Budget.UNBOUNDED.start());
+        assertEquals(1.5, outcome.objective(), 1e-12, outcome.toString());
+    }
+
+    @Test
+    void runningOutOfBudgetReturnsTheGreedyPrefix() {
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(66L);
+        List<Candidate> candidates = randomCandidates(random, 200, 2, true);
+        for (boolean connected : new boolean[]{false, true}) {
+            Options options = new Options(20, 60, 0.25, 1, new double[]{1, 1}, connected);
+            Outcome outcome = Selection.select(candidates, options, Budget.DEFAULT.withRows(300).start());
+            assertTrue(outcome.exhausted(), outcome.toString());
+            Map<Long, Candidate> byEdge = new HashMap<>();
+            candidates.forEach(candidate -> byEdge.put(candidate.edge(), candidate));
+            List<Candidate> chosen = outcome.selected().stream().map(Selected::edge).map(byEdge::get).toList();
+            assertTrue(feasible(chosen, options, byEdge));
+            assertEquals(oracle(chosen, options), outcome.objective(), 1e-9);
+        }
     }
 
     @Test

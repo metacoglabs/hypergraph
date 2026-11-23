@@ -58,7 +58,7 @@ public final class Selection {
     public record Selected(long edge, double gain, double relevance) {
     }
 
-    public record Outcome(List<Selected> selected, double objective, double bound, boolean singleton) {
+    public record Outcome(List<Selected> selected, double objective, double bound, boolean singleton, boolean exhausted) {
         public Outcome {
             selected = List.copyOf(selected);
         }
@@ -99,9 +99,27 @@ public final class Selection {
         }
 
         double gain(Collection<Candidate> unit) {
-            State next = new State(this);
-            unit.forEach(next::add);
-            return next.value() - value();
+            Map<Long, Double> added = new HashMap<>();
+            double relevanceGain = 0;
+            double[] missing = uncovered.clone();
+            for (Candidate candidate : unit) {
+                if (candidate.members().length > 0) {
+                    double share = candidate.relevance() / candidate.members().length;
+                    for (long member : candidate.members()) {
+                        double before = atoms.getOrDefault(member, 0.0) + added.getOrDefault(member, 0.0);
+                        relevanceGain += Math.min(options.kappa(), before + share) - Math.min(options.kappa(), before);
+                        added.merge(member, share, Double::sum);
+                    }
+                }
+                for (int i = 0; i < missing.length && i < candidate.cover().length; i++) {
+                    missing[i] *= 1 - candidate.cover()[i];
+                }
+            }
+            double coverageGain = 0;
+            for (int i = 0; i < missing.length; i++) {
+                coverageGain += options.slotWeights()[i] * (uncovered[i] - missing[i]);
+            }
+            return relevanceGain + options.lambda() * coverageGain;
         }
 
         void add(Candidate candidate) {
@@ -138,28 +156,66 @@ public final class Selection {
         for (Candidate candidate : candidates) {
             byEdge.putIfAbsent(candidate.edge(), candidate);
         }
+        boolean budgeted = options.maxCost() < Long.MAX_VALUE;
+        Outcome best = greedy(byEdge, options, meter, budgeted);
+        if (budgeted && options.maxEdges() < Integer.MAX_VALUE && !best.exhausted()) {
+            Outcome byCount = greedy(byEdge, options, meter, false);
+            if (byCount.objective() > best.objective() + 1e-12) {
+                best = byCount;
+            }
+        }
+        if (budgeted && !best.exhausted()) {
+            List<Candidate> ordered = new ArrayList<>(byEdge.values());
+            ordered.sort(Comparator.comparingLong(Candidate::edge));
+            for (Candidate candidate : ordered) {
+                if (!meter.tryConsume(1)) {
+                    return new Outcome(best.selected(), best.objective(), best.bound(), best.singleton(), true);
+                }
+                List<Candidate> unit = unit(candidate, byEdge, Set.of(), options);
+                if (unit == null || unit.size() > options.maxEdges() || cost(unit) > options.maxCost()) {
+                    continue;
+                }
+                State alone = new State(options);
+                double value = alone.gain(unit);
+                if (value > best.objective() + 1e-12) {
+                    List<Selected> only = new ArrayList<>();
+                    for (Candidate member : unit) {
+                        only.add(new Selected(member.edge(), alone.gain(List.of(member)), member.relevance()));
+                        alone.add(member);
+                    }
+                    best = new Outcome(only, value, best.bound(), true, false);
+                }
+            }
+        }
+        return best;
+    }
+
+    private static Outcome greedy(Map<Long, Candidate> byEdge, Options options, Budget.Meter meter, boolean byCost) {
         Set<Long> selected = new LinkedHashSet<>();
         State state = new State(options);
         List<Selected> picked = new ArrayList<>();
+        boolean exhausted = false;
         if (options.connected()) {
-            while (meter.tryConsume(1)) {
+            rounds:
+            while (state.count < options.maxEdges()) {
                 List<Candidate> bestUnit = null;
                 double bestDensity = 0;
-                long bestEdge = Long.MAX_VALUE;
                 for (Candidate candidate : byEdge.values()) {
                     if (selected.contains(candidate.edge())) {
                         continue;
+                    }
+                    if (!meter.tryConsume(1)) {
+                        exhausted = true;
+                        break rounds;
                     }
                     List<Candidate> unit = unit(candidate, byEdge, selected, options);
                     if (unit == null || state.count + unit.size() > options.maxEdges() || state.cost + cost(unit) > options.maxCost()) {
                         continue;
                     }
-                    meter.consume(1);
-                    double density = density(state.gain(unit), cost(unit), options);
-                    if (density > bestDensity || (density == bestDensity && density > 0 && candidate.edge() < bestEdge)) {
+                    double density = density(state.gain(unit), cost(unit), unit.size(), options, byCost);
+                    if (density > bestDensity) {
                         bestUnit = unit;
                         bestDensity = density;
-                        bestEdge = candidate.edge();
                     }
                 }
                 if (bestUnit == null) {
@@ -170,19 +226,26 @@ public final class Selection {
         } else {
             PriorityQueue<Key> heap = new PriorityQueue<>(Comparator.comparingDouble(Key::density).reversed().thenComparingLong(Key::edge));
             for (Candidate candidate : byEdge.values()) {
-                meter.consume(1);
-                heap.add(new Key(candidate.edge(), density(state.gain(List.of(candidate)), candidate.cost(), options)));
+                if (!meter.tryConsume(1)) {
+                    exhausted = true;
+                    break;
+                }
+                heap.add(new Key(candidate.edge(), density(state.gain(List.of(candidate)), candidate.cost(), 1, options, byCost)));
             }
-            while (!heap.isEmpty() && meter.tryConsume(1)) {
+            while (!exhausted && !heap.isEmpty() && state.count < options.maxEdges()) {
+                if (!meter.tryConsume(1)) {
+                    exhausted = true;
+                    break;
+                }
                 Key top = heap.poll();
                 Candidate candidate = byEdge.get(top.edge());
-                if (state.count + 1 > options.maxEdges() || state.cost + candidate.cost() > options.maxCost()) {
+                if (state.cost + candidate.cost() > options.maxCost()) {
                     continue;
                 }
                 double gain = state.gain(List.of(candidate));
-                double density = density(gain, candidate.cost(), options);
+                double density = density(gain, candidate.cost(), 1, options, byCost);
                 Key next = heap.peek();
-                if (next != null && density < next.density()) {
+                if (next != null && (density < next.density() || (density == next.density() && next.edge() < top.edge()))) {
                     heap.add(new Key(top.edge(), density));
                     continue;
                 }
@@ -191,28 +254,8 @@ public final class Selection {
                 }
             }
         }
-        double greedy = state.value();
-        Outcome best = new Outcome(picked, greedy, bound(byEdge.values(), state, selected, options), false);
-        if (options.maxCost() < Long.MAX_VALUE) {
-            for (Candidate candidate : byEdge.values()) {
-                List<Candidate> unit = unit(candidate, byEdge, Set.of(), options);
-                if (unit == null || unit.size() > options.maxEdges() || cost(unit) > options.maxCost()) {
-                    continue;
-                }
-                State alone = new State(options);
-                unit.forEach(alone::add);
-                if (alone.value() > best.objective() + 1e-12) {
-                    List<Selected> only = new ArrayList<>();
-                    State running = new State(options);
-                    for (Candidate member : unit) {
-                        only.add(new Selected(member.edge(), running.gain(List.of(member)), member.relevance()));
-                        running.add(member);
-                    }
-                    best = new Outcome(only, alone.value(), best.bound(), true);
-                }
-            }
-        }
-        return best;
+        double bound = exhausted ? Double.POSITIVE_INFINITY : bound(byEdge.values(), state, selected, options, meter);
+        return new Outcome(picked, state.value(), bound, false, exhausted || Double.isInfinite(bound));
     }
 
     private static void accept(List<Candidate> unit, State state, Set<Long> selected, List<Selected> picked) {
@@ -224,8 +267,14 @@ public final class Selection {
         }
     }
 
-    private static double density(double gain, long cost, Options options) {
-        return options.maxCost() == Long.MAX_VALUE ? gain : gain / cost;
+    private static double density(double gain, long cost, int size, Options options, boolean byCost) {
+        if (!byCost) {
+            return gain / size;
+        }
+        if (options.maxEdges() == Integer.MAX_VALUE) {
+            return gain / cost;
+        }
+        return gain / Math.max((double) cost / options.maxCost(), (double) size / options.maxEdges());
     }
 
     private static long cost(List<Candidate> unit) {
@@ -260,9 +309,12 @@ public final class Selection {
         return unit;
     }
 
-    private static double bound(Collection<Candidate> candidates, State state, Set<Long> selected, Options options) {
+    private static double bound(Collection<Candidate> candidates, State state, Set<Long> selected, Options options, Budget.Meter meter) {
         List<double[]> gains = new ArrayList<>();
         for (Candidate candidate : candidates) {
+            if (!meter.tryConsume(1)) {
+                return Double.POSITIVE_INFINITY;
+            }
             if (!selected.contains(candidate.edge())) {
                 double gain = state.gain(List.of(candidate));
                 if (gain > 0) {
