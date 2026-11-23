@@ -343,6 +343,46 @@ public final class Parser {
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
             return new Statement.Members(edge, role, weight, validAt, policy, limit());
         }
+        if (accept("REFINE")) {
+            expect("FROM");
+            List<Ref> roots = new ArrayList<>();
+            Optional<String> rootType = Optional.empty();
+            if (accept("TYPE")) {
+                rootType = Optional.of(identifier());
+            } else {
+                do {
+                    roots.add(ref());
+                } while (acceptSymbol(","));
+            }
+            List<Ast.RefineLevel> levels = new ArrayList<>();
+            while (accept("THROUGH")) {
+                levels.add(new Ast.RefineLevel(identifier(), refineRoles()));
+                if (levels.size() > 16) {
+                    throw HStoreException.invalid("REFINE goes through at most 16 levels");
+                }
+            }
+            expect("TO");
+            Optional<String> leafType = peek().kind() == Token.Kind.WORD && !peek().is("AS") && !peek().is("VALID") && !peek().is("WEIGHT")
+                    && !peek().is("DISTINCT") && !peek().is("TOP") ? Optional.of(identifier()) : Optional.empty();
+            List<String> leafRoles = refineRoles();
+            Optional<Ref> anchor = acceptSymbol("=") ? Optional.of(ref()) : Optional.empty();
+            Optional<Expr> validAt = validAt();
+            double low = 0;
+            double high = 1;
+            if (accept("WEIGHT")) {
+                expect("BETWEEN");
+                low = number().doubleValue();
+                expect("AND");
+                high = number().doubleValue();
+            }
+            boolean distinct = accept("DISTINCT");
+            expect("TOP");
+            long top = longValue();
+            if (top < 1 || top > 10_000) {
+                throw HStoreException.invalid("TOP must be between 1 and 10000");
+            }
+            return new Statement.Refine(List.copyOf(roots), rootType, List.copyOf(levels), leafType, leafRoles, anchor, validAt, low, high, distinct, top);
+        }
         if (accept("TRANSITIONS")) {
             expect("EDGE");
             String variable = identifier();
@@ -1246,6 +1286,16 @@ public final class Parser {
             throw error("expected a $variable but found " + token);
         }
         return token.text();
+    }
+
+    private List<String> refineRoles() {
+        List<String> roles = new ArrayList<>();
+        if (accept("AS")) {
+            do {
+                roles.add(identifier());
+            } while (accept("OR"));
+        }
+        return List.copyOf(roles);
     }
 
     private Ast.Instant transitionInstant() {

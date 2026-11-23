@@ -185,6 +185,26 @@ EXPAND @120 DEPTH 2 LIMIT 20;
 -- | [@120, @83, @11] | @11 Patient:'kavya-iyer'     | EMIT |
 ```
 
+## Hierarchical refinement
+
+`REFINE` ([HQL](hql.md#refine)) walks down nested hyperedges from given roots through a fixed number of levels and
+returns the best paths to leaf members, scored by the product of the membership weights on the path
+(`hora/Refinement.java`). Each `THROUGH` level names the child hyperedge type and the roles its membership in the
+parent must have; `TO` names the leaf type and roles; `VALID AT` and `WEIGHT BETWEEN` apply to every membership on the
+path. `DISTINCT` keeps the best path per leaf.
+
+The search is best-first over a heap of path bounds. A path's bound is its weight product so far; when an edge is
+first taken from the heap, the bound is tightened by the largest membership weight in its member tree (its root
+summary). Every later factor is at most 1, so a bound is never below the score of any path under it, and results come
+out in exact descending order: the search stops after `TOP k`. Child hyperedges come from the child-edge index (slot
+56), whose summaries prune by role, validity and weight before any child is read; leaves come from the member tree,
+pruned by the same summaries. Weights must lie in `[0, 1]`; an edge with others fails the statement and is named.
+
+With `TO … = @leaf` the search runs bottom-up instead: from the leaf's reverse-index postings to its parents, level by
+level, keeping paths that end at a root. A path never visits the same hyperedge twice. Each opened edge and each
+emitted path counts against the row budget; when it runs out the rows returned are a correct prefix of the answer and
+the message says so. Children and leaves of another tenant are skipped.
+
 ## Pattern matching
 
 `PATTERN (vars) WHERE constraints` (`PatternMatcher`) is a conjunctive query over node and edge variables:

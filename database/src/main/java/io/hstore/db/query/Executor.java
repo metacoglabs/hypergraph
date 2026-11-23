@@ -14,6 +14,7 @@ import io.hstore.db.evidence.EvidencePolicy;
 import io.hstore.db.evidence.Provenance;
 import io.hstore.db.evidence.Qualifier;
 import io.hstore.db.hora.Budget;
+import io.hstore.db.hora.Refinement;
 import io.hstore.db.hora.Field;
 import io.hstore.db.hora.Hora;
 import io.hstore.db.hora.Pattern;
@@ -317,6 +318,7 @@ final class Executor {
             case Statement.SetAlgebra algebra -> algebra.into().isPresent() ? write(writer -> setAlgebra(writer, algebra)) : read(reader -> setAlgebra(reader, algebra));
             case Statement.Rank rank -> read(reader -> rank(reader, rank));
             case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
+            case Statement.Refine refine -> read(reader -> refine(reader, refine));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -605,6 +607,28 @@ final class Executor {
         QueryResult result = QueryResult.table(match.projections().stream().map(Ast.Projection::alias).toList(), rows);
         return result.withTrace(new QueryResult.Trace(0, reader.generation(), plan.chosen().path().describe(), plan.chosen().rows(),
                 rows.size(), trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
+    }
+
+    private QueryResult refine(Reader reader, Statement.Refine statement) {
+        Evaluator evaluator = evaluator(reader);
+        List<Long> roots = statement.rootType().isPresent()
+                ? reader.atomsOfType(reader.requireReadableType(statement.rootType().get()).id()).boxed().toList()
+                : statement.roots().stream().map(ref -> session.resolve(reader, ref)).toList();
+        OptionalInt rootType = statement.rootType().map(name -> OptionalInt.of(reader.requireReadableType(name).id())).orElse(OptionalInt.empty());
+        List<Refinement.Level> levels = statement.levels().stream()
+                .map(level -> new Refinement.Level(reader.requireReadableType(level.type()).id(), level.roles())).toList();
+        OptionalInt leafType = statement.leafType().map(name -> OptionalInt.of(reader.requireReadableType(name).id())).orElse(OptionalInt.empty());
+        OptionalLong anchor = statement.leafAnchor().map(ref -> OptionalLong.of(session.resolve(reader, ref))).orElse(OptionalLong.empty());
+        OptionalLong validAt = statement.validAt().map(expr -> OptionalLong.of((long) evaluator.value(expr, Map.of()).number()
+                .orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")))).orElse(OptionalLong.empty());
+        Refinement.Spec spec = new Refinement.Spec(roots, rootType, levels, new Refinement.LeafSpec(leafType, statement.leafRoles(), anchor), validAt,
+                statement.weightLow(), statement.weightHigh(), statement.distinct() ? Refinement.Mode.DISTINCT : Refinement.Mode.ALL,
+                (int) statement.top());
+        Refinement.Outcome outcome = Refinement.on(reader).run(spec, Budget.DEFAULT.start());
+        QueryResult result = QueryResult.table(List.of("path", "leaf", "score"), outcome.results().stream()
+                .map(found -> List.of(QueryResult.text(found.path().stream().map(edge -> "@" + edge).collect(Collectors.joining(" > "))),
+                        atomCell(reader, found.leaf()), QueryResult.number(found.score()))).toList());
+        return outcome.prefix() ? new QueryResult(result.columns(), result.rows(), result.message() + " (budget reached; a prefix of the answer)", result.trace()) : result;
     }
 
     private QueryResult transitions(Reader reader, Statement.Transitions statement) {

@@ -3,6 +3,8 @@
 
 package io.hstore.db;
 
+import io.hstore.db.hora.Nesting;
+import io.hstore.db.hora.NestingSlots;
 import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertyIndex;
@@ -163,6 +165,18 @@ public sealed class Reader permits Writer {
                 .filter(entry -> entry.value().validAt(instant))
                 .mapToLong(Entry::key)
                 .filter(this::owns);
+    }
+
+    public OptionalInt typeOf(long atom) {
+        return view.atom(atom).filter(this::admits).map(record -> OptionalInt.of(record.type())).orElse(OptionalInt.empty());
+    }
+
+    public boolean edgeAtom(long atom) {
+        return view.atom(atom).filter(this::admits).map(record -> record instanceof AtomRecord.EdgeRecord).orElse(false);
+    }
+
+    public Tree<NestingSlots.ChildLink> childLinks(long parent) {
+        return onlyDefaultTenant() || visible(parent) ? Nesting.tree(view, parent) : Tree.empty(NestingSlots.CHILD_INDEX.postingSchema(), view.source());
     }
 
     public LongStream validityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
