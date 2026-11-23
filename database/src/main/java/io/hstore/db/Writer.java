@@ -10,6 +10,7 @@ import io.hstore.db.memory.MemorySlots;
 import io.hstore.db.memory.Revision;
 import io.hstore.db.memory.RevisionSpec;
 import io.hstore.db.memory.Section;
+import io.hstore.db.memory.VectorRecord;
 import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertyIndex;
@@ -356,17 +357,72 @@ public final class Writer extends Reader {
         principal().requireWrite();
         requireWritable(atom);
         SemanticPlane semantic = database.semantic();
-        int id = semantic.existingModel(model).orElseGet(() -> {
-            if (!model.equals(semantic.encoder().model())) {
-                principal().requireGlobal();
-            }
-            return semantic.model(model);
-        });
+        int id = modelId(model);
         semantic.validate(engineView(), model, id, vector);
         long ref = writePayload(Embedding.encode(vector));
         Embedding embedding = new Embedding(id, version, vector.length, ref);
         txn.put(Embedding.EMBEDDINGS, atom, embedding);
         txn.updateAtom(atom, record -> record instanceof AtomRecord.NodeRecord node ? node.withEmbeddingRef(ref) : record);
+    }
+
+    private int modelId(String model) {
+        SemanticPlane semantic = database.semantic();
+        return semantic.existingModel(model).orElseGet(() -> {
+            if (!model.equals(semantic.encoder().model())) {
+                principal().requireGlobal();
+            }
+            return semantic.model(model);
+        });
+    }
+
+    public VectorRecord vector(long owner, String view, String model, int version, float[] vector) {
+        principal().requireWrite();
+        requireVectorOwner(owner);
+        VectorRecord.requireView(view);
+        int id = modelId(model);
+        database.semantic().validate(engineView(), model, id, vector);
+        for (VectorRecord existing : VectorRecord.ofOwner(txn, owner)) {
+            if (existing.view().equals(view) && existing.model() == id) {
+                txn.delete(VectorRecord.VECTORS, existing.id());
+                if (txn.branch() == Branch.MAIN) {
+                    erase(existing.payload(), 0);
+                    database.erasureRequested(txn);
+                }
+            }
+        }
+        byte[] encoded = Embedding.encode(vector);
+        long ref = writePayload(encoded);
+        database.unsettled(txn, ref, tenant(), encoded.length);
+        VectorRecord record = new VectorRecord(database.engine().transactions().allocateAtom(), owner, view, id, version, vector.length, ref,
+                tenant(), true);
+        txn.put(VectorRecord.VECTORS, record.id(), record);
+        return record;
+    }
+
+    public VectorRecord vector(long owner, String view, String text) {
+        Encoder.Encoded encoded = database.semantic().encoder().encode(text);
+        return vector(owner, view, encoded.model(), encoded.version(), encoded.vector());
+    }
+
+    private void requireVectorOwner(long owner) {
+        Atom target = require(owner);
+        if (database.memoryTypes().contains(target.type().id())) {
+            Documents.owner(target.record()).ifPresentOrElse(this::requireWritable,
+                    () -> {
+                        throw HStoreException.invalid("atom " + owner + " has no document");
+                    });
+        } else {
+            requireWritable(owner);
+        }
+    }
+
+    private void dropVectors(long owner, boolean erase) {
+        for (VectorRecord record : VectorRecord.ofOwner(txn, owner)) {
+            if (erase) {
+                erase(record.payload(), 0);
+            }
+            txn.delete(VectorRecord.VECTORS, record.id());
+        }
     }
 
     public void delete(long atom) {
@@ -384,6 +440,7 @@ public final class Writer extends Reader {
                     }));
         }
         Security.charge(txn, tenant(), new Usage(-1, target.isEdge() ? -1 : 0, 0));
+        dropVectors(atom, false);
         txn.delete(PropertySlots.PROPERTIES, atom);
         txn.delete(Embedding.EMBEDDINGS, atom);
         txn.delete(atom);
@@ -409,11 +466,18 @@ public final class Writer extends Reader {
             throw HStoreException.limit("a revision holds at most " + Documents.MAX_BYTES + " bytes of Markdown, not " + bytes.length);
         }
         int valueLimit = Layout.of(database.engine().options().pageSize()).maxValueBytes();
-        return Documents.append(txn, database.memoryTypes(), document, tenant(), principal().user(), markdown, bytes, spec, valueLimit, () -> {
-            long payload = writePayload(bytes);
-            database.unsettled(txn, payload, tenant(), bytes.length);
-            return payload;
-        });
+        Revision revision = Documents.append(txn, database.memoryTypes(), document, tenant(), principal().user(), markdown, bytes, spec, valueLimit,
+                () -> {
+                    long payload = writePayload(bytes);
+                    database.unsettled(txn, payload, tenant(), bytes.length);
+                    return payload;
+                });
+        if (spec.embed()) {
+            for (Section section : Documents.sections(txn, database.memoryTypes(), tenant(), revision)) {
+                vector(section.id(), "content", new String(bytes, section.start(), section.end() - section.start(), StandardCharsets.UTF_8));
+            }
+        }
+        return revision;
     }
 
     public Documents.Purged purge(long document) {
@@ -446,11 +510,13 @@ public final class Writer extends Reader {
         for (int i = 0; i < revisions.size(); i++) {
             Revision revision = revisions.get(i);
             for (Section section : sections.get(i)) {
+                dropVectors(section.id(), true);
                 txn.delete(MemorySlots.SECTIONS, section.id());
                 txn.delete(section.id());
                 count++;
             }
             erase(revision.payload(), revision.length());
+            dropVectors(revision.id(), true);
             bytes += revision.length();
             txn.delete(MemorySlots.REVISIONS, revision.id());
             txn.delete(revision.id());
@@ -473,6 +539,7 @@ public final class Writer extends Reader {
                 erase(ref, 0);
             }
         });
+        dropVectors(document, true);
         Security.charge(txn, tenant(), new Usage(-(revisions.size() + count), 0, -bytes));
         delete(target.id());
         for (long edge : touched) {
@@ -491,6 +558,7 @@ public final class Writer extends Reader {
             }
         }));
         view.get(Embedding.EMBEDDINGS, atom).ifPresent(embedding -> refs.add(embedding.payloadRef()));
+        VectorRecord.ofOwner(view, atom).forEach(record -> refs.add(record.payload()));
         return refs;
     }
 

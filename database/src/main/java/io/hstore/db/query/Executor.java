@@ -26,6 +26,8 @@ import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.Revision;
 import io.hstore.db.memory.RevisionSpec;
 import io.hstore.db.memory.Section;
+import io.hstore.db.memory.TextIndex;
+import io.hstore.db.memory.VectorRecord;
 import io.hstore.db.query.Ast.Expr;
 import io.hstore.db.query.Ast.MemberClause;
 import io.hstore.db.query.Ast.Statement;
@@ -33,6 +35,7 @@ import io.hstore.db.query.QueryResult.Cell;
 import io.hstore.db.retrieve.HyperMatch;
 import io.hstore.db.retrieve.HyperQuery;
 import io.hstore.db.retrieve.RankQuery;
+import io.hstore.db.retrieve.Rrf;
 import io.hstore.db.retrieve.Ranking;
 import io.hstore.db.retrieve.RoleTimeScorer;
 import io.hstore.db.retrieve.Similarity;
@@ -56,6 +59,7 @@ import io.hstore.db.temporal.StateBindings;
 import io.hstore.db.temporal.Temporal;
 import io.hstore.db.temporal.Transitions;
 import io.hstore.db.temporal.FeedFold;
+import io.hstore.db.semantic.Encoder;
 import io.hstore.db.value.Json;
 import io.hstore.db.value.Value;
 import io.hstore.db.view.MaterializedViews;
@@ -308,13 +312,29 @@ final class Executor {
                 long document = session.resolve(writer, revise.document());
                 List<Long> sources = revise.sources().stream().map(ref -> session.resolve(writer, ref)).toList();
                 Revision revision = writer.appendRevision(document, revise.markdown(),
-                        new RevisionSpec(revise.validFrom(), revise.validTo(), sources, revise.note()));
+                        new RevisionSpec(revise.validFrom(), revise.validTo(), sources, revise.note(), revise.embed()));
                 revise.bind().ifPresent(name -> session.bind(name, revision.id()));
                 return table(List.of("revision", "number", "sections", "recorded_at", "valid_from"), Stream.of(List.of(atomCell(writer, revision.id()),
                         QueryResult.number(revision.number()), QueryResult.number(revision.sections()), instant(revision.recordedAt()),
                         instant(revision.validFrom()))));
             });
             case Statement.Revisions(Ast.Ref document) -> read(reader -> revisions(reader, session.resolve(reader, document)));
+            case Statement.SearchText search -> read(reader -> searchText(reader, search));
+            case Statement.EmbedView embed -> write(writer -> {
+                long owner = session.resolve(writer, embed.owner());
+                VectorRecord record = embed.text().isPresent() ? writer.vector(owner, embed.view(), embed.text().get())
+                        : writer.vector(owner, embed.view(), embed.model().orElseThrow(), 1, embed.vector().orElseThrow());
+                return QueryResult.message("vector @" + record.id() + " stored as view " + record.view() + " of @" + owner);
+            });
+            case Statement.VectorsOf(Ast.Ref owner) -> read(reader -> {
+                long id = session.resolve(reader, owner);
+                reader.require(id);
+                return table(List.of("vector", "view", "model", "dimensions"), reader.vectors(id).stream()
+                        .sorted(Comparator.comparing(VectorRecord::view).thenComparingLong(VectorRecord::id))
+                        .map(record -> List.of(QueryResult.number(record.id()), QueryResult.text(record.view()),
+                                QueryResult.text(modelName(record.model())), QueryResult.number(record.dimensions()))));
+            });
+            case Statement.NearestVectors nearest -> read(reader -> nearestVectors(reader, nearest));
             case Statement.RevisionOf of -> read(reader -> revisionOf(reader, of));
             case Statement.SectionsOf(Ast.Ref target) -> read(reader -> sectionsOf(reader, session.resolve(reader, target)));
             case Statement.ShowSection(Ast.Ref ref) -> read(reader -> showSection(reader, session.resolve(reader, ref)));
@@ -997,7 +1017,7 @@ final class Executor {
                 + (result.complete() ? "" : "; the budget ran out, so the list may be incomplete"), table.trace());
     }
 
-    private static final int RRF_CONSTANT = 60;
+    private static final int RRF_CONSTANT = Rrf.K;
     private static final ScopedValue<Budget> STATEMENT_BUDGET = ScopedValue.newInstance();
     private static final ScopedValue<IoTrace> SHARED_TRACE = ScopedValue.newInstance();
 
@@ -1083,7 +1103,7 @@ final class Executor {
                 int rank = ranks.merge(kind, 1, Integer::sum);
                 items++;
                 long id = atom.getAsLong();
-                terms.computeIfAbsent(id, _ -> new ArrayList<>()).add(1.0 / (RRF_CONSTANT + rank));
+                terms.computeIfAbsent(id, _ -> new ArrayList<>()).add(Rrf.term(rank));
                 sources.computeIfAbsent(id, _ -> new ArrayList<>()).add(name + (kind.isEmpty() ? "" : " " + kind) + "#" + rank);
                 if (fromExact) {
                     exact.add(id);
@@ -1672,6 +1692,37 @@ final class Executor {
 
     private QueryResult memberList(Reader reader, LongStream members) {
         return table(List.of("member"), members.mapToObj(member -> List.of(atomCell(reader, member))));
+    }
+
+    private String modelName(int model) {
+        return database().engine().dictionary().nameOf(model);
+    }
+
+    private QueryResult searchText(Reader reader, Statement.SearchText search) {
+        TextIndex.Options options = new TextIndex.Options(search.top(), search.history(), Set.copyOf(search.types()));
+        return table(List.of("section", "document", "revision", "score", "path", "terms"), reader.searchText(search.query(), options, budget().start())
+                .stream().map(hit -> {
+                    Section section = reader.section(hit.section()).orElseThrow();
+                    return List.of(atomCell(reader, hit.section()), atomCell(reader, hit.document()), atomCell(reader, hit.revision()),
+                            QueryResult.number(hit.score()), QueryResult.text(String.join(" / ", reader.headingPath(section))),
+                            QueryResult.text(String.join(" ", hit.terms())));
+                }));
+    }
+
+    private QueryResult nearestVectors(Reader reader, Statement.NearestVectors nearest) {
+        float[] query;
+        String model;
+        if (nearest.text().isPresent()) {
+            Encoder.Encoded encoded = database().semantic().encoder().encode(nearest.text().get());
+            query = encoded.vector();
+            model = encoded.model();
+        } else {
+            query = nearest.vector().orElseThrow();
+            model = nearest.model().orElseThrow();
+        }
+        return table(List.of("owner", "view", "distance", "vector"), reader.nearestVectors(model, query, nearest.top(), nearest.view(),
+                SemanticPlane.Consistency.FRESH).stream().map(hit -> List.of(atomCell(reader, hit.owner()), QueryResult.text(hit.view()),
+                QueryResult.number(hit.distance()), QueryResult.number(hit.vector()))));
     }
 
     private static Cell instant(long value) {

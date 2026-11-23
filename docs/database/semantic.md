@@ -28,6 +28,8 @@ record Embedding(int model, int version, int dimensions, long payloadRef)
 
 - Slot `EMBEDDINGS` = 36, tree schema 72, keyed by atom id; one embedding per atom (a new embedding replaces the
   previous one regardless of model).
+- Several vectors per atom, each under a named view and model, are vector records (slot 60) with their own HNSW
+  index per model; see [memory](memory.md#vectors).
 - `model` is the model name interned in dictionary namespace `SemanticPlane.MODEL_NAMESPACE` = 11.
 - The vector is stored in the [payload store](data-model.md#payloads) as `dimensions × float32` little-endian
   (`Embedding.encode/decode`, via a `MemorySegment` with `JAVA_FLOAT_UNALIGNED` in `LITTLE_ENDIAN` order) and

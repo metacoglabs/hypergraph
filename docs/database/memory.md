@@ -56,6 +56,43 @@ revision 7 is the same part of the document, and equal content hashes show it di
 atom of the system type `$Section`, keyed `<node>@<number>#<ordinal>`. A hyperedge can link a person, a decision and
 the section that records it, and every retrieval statement can reach the section through that hyperedge.
 
+## Full-text search
+
+Every section is indexed for BM25 when it is written, in the same transaction, so the index always matches the
+committed data and can be read at any retained generation or branch. `Reader.searchText(query, options)` and
+`SEARCH TEXT` rank sections; the code is `memory/Tokenizer.java` and `memory/TextIndex.java`.
+
+Text is normalised with NFKD, accents are dropped and letters are lower-cased. A term is a run of letters and digits.
+Runs joined by `.`, `-` or `_` are indexed both separately and as one term, so `Reader.retrieve` gives `reader`,
+`retrieve` and `reader.retrieve`. Terms are cut at 64 characters. The heading line belongs to its section's text.
+
+The score of a section is the sum over the query's terms of
+`idf · tf · (k1 + 1) / (tf + k1 · (1 − b + b · length / average length))`, with `k1 = 1.2`, `b = 0.75` and
+`idf = ln(1 + (N − df + 0.5) / (df + 0.5))`. `N` and the average length count the sections of each node's latest
+revision in the tenant, or of every revision with `HISTORY`; `df` counts the same set. A repeated query term counts
+once per repetition. These statistics are kept per tenant, so one tenant's writing never changes another tenant's
+scores. Results the user may not read are removed after scoring, and ties go to the smaller section id.
+
+Postings are keyed by a 64-bit hash of tenant and term and carry a further 32-bit fingerprint of the term, which is
+checked on every posting.
+
+## Vectors
+
+`Writer.vector(owner, view, model, version, vector)` and `EMBED … VIEW` store a vector record for any atom the user may
+change, or for a revision or section of such a node. An owner can hold several views (`people`, `decisions`,
+`content`, …) and several models; storing the same view and model again replaces the vector. Views are 1 to 64
+letters, digits or `_ . : / -`. Each model keeps one HNSW index of vector records, beside the per-atom index used by
+`SIMILAR TO`, persisted and caught up from the change feed in the same way. `Reader.nearestVectors` searches it and
+falls back to an exact scan inside a transaction or on a branch.
+
+`REVISE … EMBED` encodes every section with the configured encoder and stores it as the section's `content` view.
+Deleting an atom drops its vectors; purging a node erases the vectors of the node, its revisions and its sections.
+
+## Fusion
+
+`Rrf.combine(lists)` in `retrieve/Rrf.java` fuses ranked lists by reciprocal rank: an item scores `1 / (60 + rank)`
+in every list it appears in. `FUSE` uses the same terms.
+
 ## Visibility
 
 Revisions and sections belong to the tenant of their node and are visible exactly when the node is: a user who may

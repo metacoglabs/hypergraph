@@ -3,6 +3,7 @@
 
 package io.hstore.db.semantic;
 
+import io.hstore.db.memory.VectorRecord;
 import io.hstore.db.payload.PayloadStore;
 import io.hstore.engine.Dictionary;
 import io.hstore.engine.HStoreException;
@@ -40,6 +41,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 public final class SemanticPlane implements AutoCloseable {
@@ -59,6 +61,7 @@ public final class SemanticPlane implements AutoCloseable {
     private final PayloadStore payloads;
     private final Encoder encoder;
     private final Map<Integer, HnswIndex> indexes = new ConcurrentHashMap<>();
+    private final Map<Integer, HnswIndex> vectorIndexes = new ConcurrentHashMap<>();
     private final Map<Integer, Integer> dimensions = new ConcurrentHashMap<>();
     private final ReentrantLock progressLock = new ReentrantLock();
     private final Condition advanced = progressLock.newCondition();
@@ -106,6 +109,14 @@ public final class SemanticPlane implements AutoCloseable {
                     indexes.put(Integer.parseInt(model), HnswIndex.readFrom(in));
                 }
             }
+            for (String model : properties.getProperty("vector-models", "").split(",")) {
+                if (model.isBlank()) {
+                    continue;
+                }
+                try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(directory.resolve("vec-" + model + ".idx"))))) {
+                    vectorIndexes.put(Integer.parseInt(model), HnswIndex.readFrom(in));
+                }
+            }
             indexedGeneration = generation;
             persistedGeneration = generation;
             LOG.log(System.Logger.Level.INFO, "loaded semantic index at generation {0} ({1} models)", generation, indexes.size());
@@ -113,6 +124,7 @@ public final class SemanticPlane implements AutoCloseable {
         } catch (IOException | RuntimeException unreadable) {
             LOG.log(System.Logger.Level.WARNING, "semantic index files are unreadable; rebuilding from embeddings", unreadable);
             indexes.clear();
+            vectorIndexes.clear();
             return OptionalLong.empty();
         }
     }
@@ -132,9 +144,18 @@ public final class SemanticPlane implements AutoCloseable {
                 }
                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             }
+            for (Map.Entry<Integer, HnswIndex> entry : vectorIndexes.entrySet()) {
+                Path target = directory.resolve("vec-" + entry.getKey() + ".idx");
+                Path temporary = directory.resolve("vec-" + entry.getKey() + ".tmp");
+                try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary)))) {
+                    entry.getValue().writeTo(out);
+                }
+                Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            }
             Properties properties = new Properties();
             properties.setProperty("generation", Long.toString(indexedGeneration));
             properties.setProperty("models", indexes.keySet().stream().map(String::valueOf).collect(Collectors.joining(",")));
+            properties.setProperty("vector-models", vectorIndexes.keySet().stream().map(String::valueOf).collect(Collectors.joining(",")));
             Path temporary = directory.resolve("state.tmp");
             try (OutputStream out = Files.newOutputStream(temporary)) {
                 properties.store(out, null);
@@ -164,7 +185,9 @@ public final class SemanticPlane implements AutoCloseable {
         Embedding.requireValid(vector);
         int expected = dimensions.computeIfAbsent(model, _ -> name.equals(encoder.model()) ? encoder.dimensions()
                 : view.scan(Embedding.EMBEDDINGS).values().filter(embedding -> embedding.model() == model)
-                        .mapToInt(Embedding::dimensions).findFirst().orElse(vector.length));
+                        .mapToInt(Embedding::dimensions).findFirst()
+                        .orElseGet(() -> view.scan(VectorRecord.VECTORS).values().filter(record -> record.model() == model)
+                                .mapToInt(VectorRecord::dimensions).findFirst().orElse(vector.length)));
         if (vector.length != expected) {
             throw HStoreException.invalid("model '" + name + "' takes " + expected + "-dimensional vectors, not " + vector.length);
         }
@@ -177,6 +200,7 @@ public final class SemanticPlane implements AutoCloseable {
     private long rebuild() {
         try (Snapshot snapshot = engine.snapshot()) {
             snapshot.scan(Embedding.EMBEDDINGS).stream().forEach(entry -> guarded(entry.key(), () -> index(entry.key(), entry.value())));
+            snapshot.scan(VectorRecord.VECTORS).stream().forEach(entry -> guarded(entry.key(), () -> indexVector(entry.value())));
             indexedGeneration = snapshot.generation();
             return snapshot.generation();
         }
@@ -188,6 +212,7 @@ public final class SemanticPlane implements AutoCloseable {
             LOG.log(System.Logger.Level.WARNING, "change feed skipped generations {0} to {1}; rebuilding the semantic index",
                     acknowledged + 1, firstRetained - 1);
             indexes.clear();
+            vectorIndexes.clear();
             rebuild();
         } finally {
             applyLock.unlock();
@@ -199,6 +224,13 @@ public final class SemanticPlane implements AutoCloseable {
         try {
             if (event.branch() == Branch.MAIN) {
                 for (SlotChange<?> change : event.slots()) {
+                    if (change.slot() == VectorRecord.VECTORS) {
+                        guarded(change.key(), () -> {
+                            change.before().map(VectorRecord.class::cast)
+                                    .ifPresent(record -> Optional.ofNullable(vectorIndexes.get(record.model())).ifPresent(index -> index.remove(record.id())));
+                            change.after().map(VectorRecord.class::cast).ifPresent(this::indexVector);
+                        });
+                    }
                     if (change.slot() == Embedding.EMBEDDINGS) {
                         guarded(change.key(), () -> change.after().map(Embedding.class::cast).ifPresentOrElse(
                                 embedding -> index(change.key(), embedding),
@@ -206,6 +238,7 @@ public final class SemanticPlane implements AutoCloseable {
                     }
                 }
                 indexes.replaceAll((_, index) -> index.tombstoneRatio() > TOMBSTONE_LIMIT ? index.compacted() : index);
+                vectorIndexes.replaceAll((_, index) -> index.tombstoneRatio() > TOMBSTONE_LIMIT ? index.compacted() : index);
             }
             indexedGeneration = Math.max(indexedGeneration, event.generation());
         } finally {
@@ -233,6 +266,49 @@ public final class SemanticPlane implements AutoCloseable {
         indexes.values().forEach(index -> index.remove(atom));
         Embedding.requireValid(vector);
         indexes.computeIfAbsent(embedding.model(), _ -> new HnswIndex(16, 128)).upsert(atom, vector);
+    }
+
+    private void indexVector(VectorRecord record) {
+        if (!record.indexed()) {
+            return;
+        }
+        float[] vector = Embedding.decode(payloads.read(record.payload()));
+        Embedding.requireValid(vector);
+        vectorIndexes.computeIfAbsent(record.model(), _ -> new HnswIndex(16, 128)).upsert(record.id(), vector);
+    }
+
+    public List<VectorRecord.Hit> nearestVectors(View view, int model, float[] query, int k, Consistency consistency,
+                                                 Predicate<VectorRecord> admit) {
+        Comparator<VectorRecord.Hit> order = Comparator.comparingDouble(VectorRecord.Hit::distance).thenComparingLong(VectorRecord.Hit::vector);
+        if (view instanceof Transaction || view.branch() != Branch.MAIN || !awaitIndexed(view.generation(), consistency)) {
+            return view.scan(VectorRecord.VECTORS).values()
+                    .filter(record -> record.model() == model && record.dimensions() == query.length && record.indexed() && admit.test(record))
+                    .map(record -> new VectorRecord.Hit(record.id(), record.owner(), record.view(), distance(record.payload(), query)))
+                    .sorted(order)
+                    .limit(k)
+                    .toList();
+        }
+        HnswIndex index = vectorIndexes.get(model);
+        if (index == null) {
+            return List.of();
+        }
+        int indexed = index.size();
+        for (int candidates = Math.max(k * 4, 32); ; candidates *= 4) {
+            List<VectorRecord.Hit> hits = index.nearest(query, candidates, candidates * 2).stream()
+                    .flatMap(neighbor -> view.get(VectorRecord.VECTORS, neighbor.id()).stream())
+                    .filter(record -> record.model() == model && record.dimensions() == query.length && record.indexed() && admit.test(record))
+                    .map(record -> new VectorRecord.Hit(record.id(), record.owner(), record.view(), distance(record.payload(), query)))
+                    .sorted(order)
+                    .limit(k)
+                    .toList();
+            if (hits.size() >= k || candidates >= indexed) {
+                return hits;
+            }
+        }
+    }
+
+    private float distance(long payload, float[] query) {
+        return Embedding.cosineDistance(Embedding.normalized(query), Embedding.normalized(Embedding.decode(payloads.read(payload))));
     }
 
     public List<Hit> nearest(View view, int model, float[] query, int k, Consistency consistency, LongPredicate admit) {

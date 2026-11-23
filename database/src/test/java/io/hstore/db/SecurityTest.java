@@ -584,6 +584,31 @@ class SecurityTest {
     }
 
     @Test
+    void textSearchAndVectorsStayInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            bob.executeAll("""
+                    INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $b;
+                    REVISE $b MARKDOWN 'zebra stripes seen at the clinic' AS $r;
+                    """);
+            String before = bob.execute("SEARCH TEXT 'zebra'").rows().getFirst().get(3).render();
+            alice.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
+                    REVISE $p MARKDOWN 'zebra zebra zebra' AS $r;
+                    EMBED $p VIEW 'summary' TEXT 'zebra patient summary';
+                    """);
+            long patient = alice.variables().get("p");
+            QueryResult hits = bob.execute("SEARCH TEXT 'zebra' TOP 10");
+            assertEquals(1, hits.rows().size());
+            assertEquals(before, hits.rows().getFirst().get(3).render());
+            assertEquals(1, alice.execute("SEARCH TEXT 'zebra' TOP 10").rows().size());
+            assertTrue(bob.execute("NEAREST VECTORS TO 'zebra patient summary' TOP 10").rows().isEmpty());
+            assertEquals(1, alice.execute("NEAREST VECTORS TO 'zebra patient summary' TOP 10").rows().size());
+            assertThrows(HStoreException.class, () -> bob.execute("EMBED @" + patient + " VIEW 'x' TEXT 'y'"));
+            assertThrows(HStoreException.class, () -> bob.execute("VECTORS OF @" + patient));
+        }
+    }
+
+    @Test
     void expansionValuesIgnoreOtherTenantsMembers() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("""

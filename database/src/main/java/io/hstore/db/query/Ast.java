@@ -340,7 +340,20 @@ public final class Ast {
         }
 
         record Revise(Ref document, String markdown, OptionalLong validFrom, long validTo, List<Ref> sources, String note,
-                      Optional<String> bind) implements Statement {
+                      boolean embed, Optional<String> bind) implements Statement {
+        }
+
+        record SearchText(String query, List<String> types, boolean history, int top) implements Statement {
+        }
+
+        record EmbedView(Ref owner, String view, Optional<String> text, Optional<float[]> vector, Optional<String> model) implements Statement {
+        }
+
+        record VectorsOf(Ref owner) implements Statement {
+        }
+
+        record NearestVectors(Optional<String> text, Optional<float[]> vector, Optional<String> model, Optional<String> view, int top)
+                implements Statement {
         }
 
         record Revisions(Ref document) implements Statement {
