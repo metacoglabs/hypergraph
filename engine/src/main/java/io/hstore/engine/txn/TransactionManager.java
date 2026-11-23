@@ -210,9 +210,7 @@ public final class TransactionManager {
     }
 
     public void awaitPublished(long generation) {
-        if (current().id() < generation) {
-            committer.awaitPublished(generation);
-        }
+        committer.awaitPublished(generation);
     }
 
     CommitResult commit(Transaction txn) {
@@ -474,6 +472,7 @@ public final class TransactionManager {
         GroupCommitter.Pending pending = new GroupCommitter.Pending(next, () -> {
             current.set(retain(next));
             storage.references().provisional(next.id(), provisional);
+            storage.faults().reach(CrashPoint.FEED_APPEND);
             if (!event.isEmpty()) {
                 storage.feed().append(event);
             }
