@@ -3,6 +3,7 @@
 
 package io.hstore.db.temporal;
 
+import io.hstore.db.HypergraphDatabase;
 import io.hstore.engine.catalog.Branch;
 
 import java.util.Collection;
@@ -14,6 +15,10 @@ public record Lineage(Map<Integer, Branch> branches, int branch) {
 
     public Lineage {
         branches = Map.copyOf(branches);
+    }
+
+    public static Lineage of(HypergraphDatabase database, int branch) {
+        return of(database.engine().transactions().current().branches().values(), branch);
     }
 
     public static Lineage of(Collection<Branch> branches, int branch) {
