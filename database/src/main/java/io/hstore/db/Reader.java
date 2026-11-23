@@ -185,6 +185,12 @@ public sealed class Reader permits Writer {
         return ValidityIndex.count(view, tenant(), edgeType, side, lowExclusive, highInclusive);
     }
 
+    public Tree<IndexValues.Incident> incidentPostings(long atom) {
+        return onlyDefaultTenant() || visible(atom)
+                ? view.incidentTree(atom)
+                : Tree.empty(EngineSlots.REVERSE_INDEX.postingSchema(), view.source());
+    }
+
     public Tree<?> incidentTree(long atom) {
         return onlyDefaultTenant() || visible(atom)
                 ? view.incidentTree(atom)

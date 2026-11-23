@@ -617,20 +617,27 @@ final class Executor {
 
     private QueryResult expandFrom(Reader reader, Statement.ExpandFrom statement) {
         Evaluator evaluator = evaluator(reader);
+        if (!(statement.minimum() >= 0 && statement.minimum() <= 1)) {
+            throw HStoreException.invalid("MIN must lie in [0, 1]");
+        }
         Map<Long, Double> seeds = new LinkedHashMap<>();
-        statement.seeds().forEach(seed -> seeds.merge(reader.require(session.resolve(reader, seed.atom())).id(), seed.weight(), Math::max));
+        statement.seeds().forEach(seed -> {
+            if (seeds.put(reader.require(session.resolve(reader, seed.atom())).id(), seed.weight()) != null) {
+                throw HStoreException.invalid("EXPAND FROM names a seed twice");
+            }
+        });
         Map<Integer, Double> factors = new HashMap<>();
         statement.through().forEach(found -> {
             TypeDef type = reader.requireReadableType(found.type());
             if (!type.kind().isEdge()) {
                 throw HStoreException.invalid(found.type() + " is not a hyperedge type");
             }
-            factors.put(type.id(), found.weight());
+            if (factors.put(type.id(), found.weight()) != null) {
+                throw HStoreException.invalid("THROUGH names " + found.type() + " twice");
+            }
         });
-        Map<String, Double> exit = new HashMap<>();
-        statement.exit().forEach(factor -> exit.put(factor.role(), factor.factor()));
-        Map<String, Double> entry = new HashMap<>();
-        statement.entry().forEach(factor -> entry.put(factor.role(), factor.factor()));
+        Map<String, Double> exit = factorMap(statement.exit(), "EXIT");
+        Map<String, Double> entry = factorMap(statement.entry(), "ENTER");
         OptionalLong validAt = statement.validAt().map(expr -> OptionalLong.of((long) evaluator.value(expr, Map.of()).number()
                 .orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")))).orElse(OptionalLong.empty());
         Expansion.Model model = new Expansion.Model(factors, exit, entry, validAt, statement.hubDamping(), statement.edgeDamping(), statement.gate());
@@ -652,8 +659,11 @@ final class Executor {
                 .map(found -> List.of(atomCell(reader, found.edge()), QueryResult.number(found.value()), QueryResult.number(found.relevance()),
                         atomCell(reader, found.via()), found.parent() < 0 ? QueryResult.scalar(Value.NULL) : atomCell(reader, found.parent())))
                 .toList());
+        String truncated = result.droppedBound() > 0
+                ? "; the frontier was truncated, so rows with value below " + String.format(java.util.Locale.ROOT, "%.6g", result.droppedBound()) + " may be missing"
+                : "";
         return new QueryResult(table.columns(), table.rows(), table.message() + "; stopped on " + result.stop().name().toLowerCase(java.util.Locale.ROOT)
-                + ", every other hyperedge has value at most " + result.bound(), table.trace());
+                + ", every other hyperedge has value at most " + String.format(java.util.Locale.ROOT, "%.6g", result.bound()) + truncated, table.trace());
     }
 
     private static Map<String, Double> factorMap(List<Ast.RoleFactor> factors, String clause) {

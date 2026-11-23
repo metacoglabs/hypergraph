@@ -69,8 +69,13 @@ class ExpansionTest {
             for (int i = 0; i < 50; i++) {
                 people.add(writer.node("Person", "p" + i));
             }
+            long hub = writer.node("Person", "hub");
+            people.add(hub);
             for (int e = 0; e < 120; e++) {
                 long edge = writer.edge(random.nextInt(3) == 0 ? "Project" : "Meeting");
+                if (e % 3 == 0) {
+                    writer.add(edge, hub, MemberSpec.roles(ROLES.get(random.nextInt(3))).withWeight(0.1 + random.nextInt(10) / 10.0));
+                }
                 for (int m = 0; m < 1 + random.nextInt(6); m++) {
                     Validity validity = random.nextInt(4) == 0 ? new Validity(random.nextInt(10), 10 + random.nextInt(10)) : Validity.ALWAYS;
                     writer.add(edge, people.get(random.nextInt(people.size())), MemberSpec.roles(ROLES.get(random.nextInt(3)))
@@ -264,6 +269,59 @@ class ExpansionTest {
                 }
             });
         }
+    }
+
+    @Test
+    void truncatedFrontiersStayExactAboveTheDroppedBound() {
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(53L);
+        randomGraph(random);
+        Map<Long, Double> seeds = Map.of(people.getLast(), 1.0);
+        Map<Long, Double> exact = database.read(reader -> exactValues(reader, seeds, Model.plain(), Relevance.NONE));
+        List<Double> ranked = exact.values().stream().sorted(java.util.Comparator.reverseOrder()).toList();
+        Result cut = database.read(reader -> Expansion.on(reader).run(seeds, Model.plain(), Relevance.NONE, 60, 0, 8, Budget.UNBOUNDED.start()));
+        assertTrue(cut.droppedBound() > 0, cut.toString());
+        for (int i = 0; i < cut.edges().size() && cut.edges().get(i).value() > cut.droppedBound(); i++) {
+            assertEquals(ranked.get(i), cut.edges().get(i).value(), 1e-12);
+        }
+    }
+
+    @Test
+    void aRelevanceScorerOutOfBudgetEndsTheRunCleanly() {
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(54L);
+        randomGraph(random);
+        int[] calls = {0};
+        Relevance tired = new Relevance() {
+            public double bound(long edge) {
+                if (++calls[0] > 20) {
+                    throw io.hstore.engine.HStoreException.limit("out of rows");
+                }
+                return 1;
+            }
+
+            public OptionalDouble score(long edge) {
+                return OptionalDouble.of(0.5);
+            }
+        };
+        Result result = database.read(reader -> Expansion.on(reader).run(Map.of(people.getLast(), 1.0), Model.plain(), tired, 50, 0, 1_000_000,
+                Budget.UNBOUNDED.start()));
+        assertEquals(Expansion.Stop.BUDGET, result.stop());
+    }
+
+    @Test
+    void aHyperedgeSeedIsReturnedAndExpanded() {
+        long[] ids = database.write(writer -> {
+            long a = writer.node("Person", "a");
+            long b = writer.node("Person", "b");
+            long meeting = writer.edge("Meeting");
+            writer.add(meeting, a, MemberSpec.PLAIN);
+            writer.add(meeting, b, MemberSpec.PLAIN);
+            long project = writer.edge("Project");
+            writer.add(project, b, MemberSpec.PLAIN);
+            return new long[]{meeting, project};
+        });
+        Result result = database.read(reader -> Expansion.on(reader).run(Map.of(ids[0], 1.0), Model.plain(), Relevance.NONE, 5, 0, 1_000,
+                Budget.UNBOUNDED.start()));
+        assertEquals(List.of(ids[0], ids[1]), result.edges().stream().map(Accepted::edge).toList());
     }
 
     @Test
