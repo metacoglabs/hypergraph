@@ -181,7 +181,7 @@ class RefinementTest {
                 path.add(member.atom());
                 walk(reader, spec, member.atom(), level + 1, score * member.weight(), path, out);
                 path.removeLast();
-            } else if (passes(member, spec.leaf().roles(), spec.validAt(), spec.weightLow(), spec.weightHigh())
+            } else if (!path.contains(member.atom()) && passes(member, spec.leaf().roles(), spec.validAt(), spec.weightLow(), spec.weightHigh())
                     && spec.leaf().type().stream().allMatch(type -> type == reader.typeOf(member.atom()).orElse(-1))
                     && spec.leaf().anchor().stream().allMatch(anchor -> anchor == member.atom())) {
                 out.add(new Result(List.copyOf(path), member.atom(), score * member.weight()));
@@ -276,17 +276,82 @@ class RefinementTest {
     }
 
     @Test
-    void weightsOutsideTheUnitRangeAreRefused() {
+    void weightRangesOutsideTheUnitIntervalAreRefusedAndOddMembersIgnored() {
+        assertThrows(HStoreException.class, () -> new Spec(List.of(), OptionalInt.empty(), List.of(),
+                new LeafSpec(OptionalInt.empty(), List.of(), OptionalLong.empty()), OptionalLong.empty(), 0, 2, Mode.ALL, 5));
+        long[] ids = database.write(writer -> {
+            long root = writer.edge("Investigation");
+            long claim = writer.edge("Claim");
+            long provider = writer.node("Provider", "p");
+            writer.add(root, claim, MemberSpec.roles("subject").withWeight(0.5));
+            writer.add(root, writer.node("Analyst", "n"), MemberSpec.roles("lead").withWeight(1.5));
+            writer.add(claim, provider, MemberSpec.roles("provider").withWeight(0.5));
+            return new long[]{root, claim, provider};
+        });
+        Spec spec = new Spec(List.of(ids[0]), OptionalInt.empty(), List.of(new Level(type("Claim"), List.of())),
+                new LeafSpec(OptionalInt.empty(), List.of(), OptionalLong.empty()), OptionalLong.empty(), 0, 1, Mode.ALL, 5);
+        List<Result> results = database.read(reader -> Refinement.on(reader).run(spec, Budget.DEFAULT.start()).results());
+        assertEquals(List.of(ids[2]), results.stream().map(Result::leaf).toList());
+        assertEquals(0.25, results.getFirst().score(), 1e-9);
+    }
+
+    @Test
+    void aLeafNeverRepeatsAnEdgeOnItsPathInEitherDirection() {
+        long[] ids = database.write(writer -> {
+            long root = writer.edge("Investigation");
+            long claim = writer.edge("Claim");
+            writer.add(root, claim, MemberSpec.roles("subject").withWeight(1.0));
+            writer.add(claim, root, MemberSpec.roles("subject").withWeight(1.0));
+            return new long[]{root, claim};
+        });
+        Spec down = new Spec(List.of(ids[0]), OptionalInt.empty(), List.of(new Level(type("Claim"), List.of())),
+                new LeafSpec(OptionalInt.empty(), List.of(), OptionalLong.empty()), OptionalLong.empty(), 0, 1, Mode.ALL, 5);
+        Spec up = new Spec(List.of(ids[0]), OptionalInt.empty(), List.of(new Level(type("Claim"), List.of())),
+                new LeafSpec(OptionalInt.empty(), List.of(), OptionalLong.of(ids[0])), OptionalLong.empty(), 0, 1, Mode.ALL, 5);
+        database.read(reader -> {
+            assertEquals(List.of(), Refinement.on(reader).run(down, Budget.DEFAULT.start()).results());
+            assertEquals(List.of(), Refinement.on(reader).run(up, Budget.DEFAULT.start()).results());
+            return null;
+        });
+    }
+
+    @Test
+    void budgetsNeverReturnAWrongAnswer() {
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(33L);
+        Graph graph = randomGraph(random);
+        List<Long> providers = database.read(reader -> reader.atomsOfType(type("Provider")).boxed().toList());
+        Spec anchored = new Spec(graph.roots(), OptionalInt.empty(), List.of(new Level(type("Claim"), List.of())),
+                new LeafSpec(OptionalInt.empty(), List.of(), OptionalLong.of(providers.getFirst())), OptionalLong.empty(), 0, 1, Mode.ALL, 50);
+        Spec byType = new Spec(List.of(), OptionalInt.of(type("Investigation")), List.of(new Level(type("Claim"), List.of())),
+                new LeafSpec(OptionalInt.empty(), List.of(), OptionalLong.empty()), OptionalLong.empty(), 0, 1, Mode.ALL, 50);
+        database.read(reader -> {
+            assertThrows(HStoreException.class, () -> Refinement.on(reader).run(anchored, Budget.DEFAULT.withRows(2).start()));
+            assertThrows(HStoreException.class, () -> Refinement.on(reader).run(byType, Budget.DEFAULT.withRows(3).start()));
+            Refinement.Outcome all = Refinement.on(reader).run(byType, Budget.DEFAULT.start());
+            for (int rows = 5; rows < 400; rows += 7) {
+                Refinement.Outcome cut;
+                try {
+                    cut = Refinement.on(reader).run(byType, Budget.DEFAULT.withRows(rows).start());
+                } catch (HStoreException refused) {
+                    continue;
+                }
+                assertEquals(all.results().subList(0, cut.results().size()).stream().map(Result::score).toList(),
+                        cut.results().stream().map(Result::score).toList(), rows + " rows");
+            }
+            return null;
+        });
+    }
+
+    @Test
+    void repeatedRootsAreCountedOnce() {
         long root = database.write(writer -> {
             long investigation = writer.edge("Investigation");
-            writer.add(investigation, writer.edge("Claim"), MemberSpec.roles("subject").withWeight(1.5));
+            writer.add(investigation, writer.node("Provider", "p"), MemberSpec.roles("lead").withWeight(0.5));
             return investigation;
         });
-        Spec spec = new Spec(List.of(root), OptionalInt.empty(), List.of(new Level(type("Claim"), List.of())),
-                new LeafSpec(OptionalInt.empty(), List.of(), OptionalLong.empty()), OptionalLong.empty(), 0, 2, Mode.ALL, 5);
-        HStoreException refused = database.read(reader -> assertThrows(HStoreException.class,
-                () -> Refinement.on(reader).run(spec, Budget.DEFAULT.start())));
-        assertTrue(refused.getMessage().contains("outside [0, 1]"), refused.getMessage());
+        Spec spec = new Spec(List.of(root, root), OptionalInt.empty(), List.of(),
+                new LeafSpec(OptionalInt.empty(), List.of(), OptionalLong.empty()), OptionalLong.empty(), 0, 1, Mode.ALL, 5);
+        assertEquals(1, (int) database.read(reader -> Refinement.on(reader).run(spec, Budget.DEFAULT.start()).results().size()));
     }
 
     @Test

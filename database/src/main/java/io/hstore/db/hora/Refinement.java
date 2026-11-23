@@ -20,6 +20,7 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.stream.LongStream;
 
 public final class Refinement {
 
@@ -47,6 +48,9 @@ public final class Refinement {
             }
             if (weightLow > weightHigh) {
                 throw HStoreException.invalid("weight range is empty");
+            }
+            if (weightLow < 0 || weightHigh > 1) {
+                throw HStoreException.invalid("REFINE scores multiply membership weights and needs a weight range inside [0, 1]");
             }
         }
     }
@@ -88,6 +92,9 @@ public final class Refinement {
     }
 
     public Outcome run(Spec spec, Budget.Meter meter) {
+        for (long root : spec.roots()) {
+            reader.require(root);
+        }
         if (spec.levels().size() + 1 > meter.budget().maxDepth()) {
             throw HStoreException.invalid("a refinement of " + (spec.levels().size() + 1) + " levels exceeds the depth limit of "
                     + meter.budget().maxDepth());
@@ -145,13 +152,16 @@ public final class Refinement {
 
     private Outcome topDown(Spec spec, Budget.Meter meter) {
         PriorityQueue<Item> frontier = new PriorityQueue<>(ORDER);
-        for (long root : spec.roots()) {
-            reader.require(root);
+        LongStream roots = spec.roots().isEmpty() && spec.rootType().isPresent()
+                ? reader.atomsOfType(spec.rootType().getAsInt())
+                : spec.roots().stream().mapToLong(Long::longValue).distinct();
+        roots.forEach(root -> {
+            meter.consume(1);
             if (!reader.edgeAtom(root) || spec.rootType().stream().anyMatch(type -> type != reader.typeOf(root).orElse(-1))) {
-                continue;
+                return;
             }
             frontier.add(new Item.Edge(root, 0, 1.0, 1.0, false, new long[]{root}));
-        }
+        });
         List<Result> results = new ArrayList<>();
         Set<Long> emitted = new HashSet<>();
         while (!frontier.isEmpty() && results.size() < spec.k()) {
@@ -161,7 +171,8 @@ public final class Refinement {
             }
             switch (item) {
                 case Item.Leaf(long member, double score, long[] path) -> {
-                    if (!reader.visible(member) || spec.leaf().type().stream().anyMatch(type -> type != reader.typeOf(member).orElse(-1))) {
+                    if (contains(path, member) || !reader.visible(member)
+                            || spec.leaf().type().stream().anyMatch(type -> type != reader.typeOf(member).orElse(-1))) {
                         continue;
                     }
                     if (spec.mode() == Mode.DISTINCT && !emitted.add(member)) {
@@ -172,11 +183,8 @@ public final class Refinement {
                 case Item.Edge(long edge, int level, double prefix, double bound, boolean opened, long[] path) -> {
                     Hyperedge hyperedge = reader.edge(edge);
                     Summary summary = hyperedge.summary();
-                    if (!summary.isEmpty() && (summary.weightMin() < 0 || summary.weightMax() > Weight.ONE)) {
-                        throw HStoreException.invalid("hyperedge " + edge + " has membership weights outside [0, 1], so path bounds do not hold");
-                    }
                     if (!opened) {
-                        double tightened = summary.isEmpty() ? 0 : prefix * Weight.toDouble(summary.weightMax());
+                        double tightened = summary.isEmpty() ? 0 : prefix * Math.min(Weight.toDouble(summary.weightMax()), spec.weightHigh());
                         Item next = frontier.peek();
                         if (next != null && tightened < next.bound()) {
                             frontier.add(new Item.Edge(edge, level, prefix, tightened, true, path));
@@ -188,6 +196,7 @@ public final class Refinement {
                         reader.childLinks(edge).scan(found -> summaryPasses(spec, found, child.roles())).forEach(entry -> {
                             long childEdge = entry.key();
                             ChildLink link = entry.value();
+                            meter.consume(1);
                             if (contains(path, childEdge) || !reader.owns(childEdge)
                                     || !passes(spec, child.roles(), link.roleSet(), link.weight(), link.validFrom(), link.validTo())
                                     || reader.typeOf(childEdge).orElse(-1) != child.edgeType()) {
@@ -199,6 +208,7 @@ public final class Refinement {
                     } else {
                         hyperedge.members().scan(found -> summaryPasses(spec, found, spec.leaf().roles())).forEach(entry -> {
                             Incidence incidence = entry.value();
+                            meter.consume(1);
                             if (passes(spec, spec.leaf().roles(), incidence.roleSet(), incidence.weight(), incidence.validFrom(), incidence.validTo())) {
                                 frontier.add(new Item.Leaf(incidence.member(), prefix * incidence.weightValue(), path));
                             }
@@ -217,18 +227,23 @@ public final class Refinement {
             return new Outcome(List.of(), false);
         }
         Set<Long> roots = new HashSet<>(spec.roots());
+        if (roots.isEmpty() && spec.rootType().isEmpty()) {
+            return new Outcome(List.of(), false);
+        }
         List<Result> found = new ArrayList<>();
         boolean[] stopped = {false};
         int lastLevel = spec.levels().size();
         reader.incidentEdges(anchor).forEach(posting -> {
-            if (stopped[0]) {
+            meter.consume(1);
+            if (!rolesMatch(spec.leaf().roles(), posting.roleSet())
+                    || spec.validAt().stream().anyMatch(t -> !(posting.validFrom() <= t && t < posting.validTo()))) {
                 return;
             }
             long edge = posting.edge();
             reader.incidence(edge, anchor).ifPresent(incidence -> {
                 if (passes(spec, spec.leaf().roles(), incidence.roleSet(), incidence.weight(), incidence.validFrom(), incidence.validTo())
                         && edgeOfLevel(spec, edge, lastLevel)) {
-                    climb(spec, roots, edge, lastLevel, incidence.weightValue(), new ArrayList<>(List.of(edge)), anchor, found, meter, stopped);
+                    climb(spec, roots, edge, lastLevel, incidence.weightValue(), new ArrayList<>(List.of(anchor, edge)), anchor, found, meter, stopped);
                 }
             });
         });
@@ -254,16 +269,10 @@ public final class Refinement {
 
     private void climb(Spec spec, Set<Long> roots, long edge, int level, double score, List<Long> pathUp, long leaf,
                        List<Result> found, Budget.Meter meter, boolean[] stopped) {
-        if (stopped[0]) {
-            return;
-        }
-        if (!meter.tryConsume(1)) {
-            stopped[0] = true;
-            return;
-        }
+        meter.consume(1);
         if (level == 0) {
             if (roots.isEmpty() || roots.contains(edge)) {
-                List<Long> path = new ArrayList<>(pathUp);
+                List<Long> path = new ArrayList<>(pathUp.subList(1, pathUp.size()));
                 java.util.Collections.reverse(path);
                 found.add(new Result(path, leaf, score));
             }
@@ -271,7 +280,12 @@ public final class Refinement {
         }
         Level through = spec.levels().get(level - 1);
         reader.incidentEdges(edge).forEach(posting -> {
+            meter.consume(1);
             long parent = posting.edge();
+            if (!rolesMatch(through.roles(), posting.roleSet())
+                    || spec.validAt().stream().anyMatch(t -> !(posting.validFrom() <= t && t < posting.validTo()))) {
+                return;
+            }
             if (pathUp.contains(parent) || !edgeOfLevel(spec, parent, level - 1)) {
                 return;
             }

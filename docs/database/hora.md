@@ -198,12 +198,15 @@ first taken from the heap, the bound is tightened by the largest membership weig
 summary). Every later factor is at most 1, so a bound is never below the score of any path under it, and results come
 out in exact descending order: the search stops after `TOP k`. Child hyperedges come from the child-edge index (slot
 56), whose summaries prune by role, validity and weight before any child is read; leaves come from the member tree,
-pruned by the same summaries. Weights must lie in `[0, 1]`; an edge with others fails the statement and is named.
+pruned by the same summaries. `WEIGHT BETWEEN` must lie inside `[0, 1]`, so a membership with a weight outside it is never
+followed and every bound holds.
 
 With `TO … = @leaf` the search runs bottom-up instead: from the leaf's reverse-index postings to its parents, level by
 level, keeping paths that end at a root. A path never visits the same hyperedge twice. Each opened edge and each
-emitted path counts against the row budget; when it runs out the rows returned are a correct prefix of the answer and
-the message says so. Children and leaves of another tenant are skipped.
+pushed child or leaf counts against the row budget. When a top-down search runs out, the rows returned are a correct
+prefix of the answer and the message says so; when roots are still being read, or a bottom-up search runs out, the
+statement fails instead, since its rows would not be a prefix. A leaf is never a hyperedge already on its path.
+Children and leaves of another tenant are skipped.
 
 ## Pattern matching
 
