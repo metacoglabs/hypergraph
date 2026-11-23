@@ -95,7 +95,7 @@ class RetrievalPlannerTest {
     @Test
     void fusionAddsReciprocalRanksAndReportsCutExactResults() {
         QueryResult rank = session.execute("RANK EDGE e:Meeting LIKE ($a AS host) TOP 5");
-        QueryResult evidence = session.execute("SELECT EVIDENCE FOR (RANK EDGE e:Meeting LIKE ($c) TOP 5) TOP 2");
+        QueryResult evidence = session.execute("SELECT EVIDENCE FOR (RANK EDGE e:Meeting LIKE ($c) TOP 2) TOP 2");
         Map<String, Double> expected = new HashMap<>();
         for (QueryResult part : List.of(rank, evidence)) {
             for (int i = 0; i < part.rows().size(); i++) {
@@ -125,6 +125,39 @@ class RetrievalPlannerTest {
     }
 
     @Test
+    void explainChecksLikeTheStatementAndRefusesNesting() {
+        assertThrows(HStoreException.class, () -> session.execute("EXPLAIN DIFFUSE FROM @999999 TOP 3"));
+        assertThrows(HStoreException.class, () -> session.execute("EXPLAIN REFINE FROM TYPE Nowhere THROUGH Meeting TO Person TOP 3"));
+        assertThrows(HStoreException.class, () -> session.execute("EXPLAIN SIMILAR TO (q:Meeting(a:Ghost)) IN CHILDREN OF Episode TOP 1"));
+        assertThrows(HStoreException.class, () -> session.execute("EXPLAIN EXPLAIN MOTIFS"));
+        assertThrows(HStoreException.class, () -> session.execute("FUSE (FUSE (MOTIF 94), (MOTIF 94)), (MOTIF 94)"));
+        assertThrows(HStoreException.class, () -> session.execute("AT GENERATION 1 EXPLAIN BRANCH DELTA side"));
+        assertThrows(HStoreException.class, () -> session.execute("AT GENERATION 1 AT GENERATION 1 MOTIFS"));
+        assertTrue(session.execute("EXPLAIN BRANCH DELTA side SINCE GENERATION 1").message().contains("generation 1"));
+        assertTrue(session.execute("EXPLAIN COMPARE BRANCH side AND main").message().contains("common ancestor"));
+    }
+
+    @Test
+    void refineFromATypeChecksTheRootTypeBottomUp() {
+        var rows = session.execute("REFINE FROM TYPE Episode THROUGH Meeting TO Person = $a TOP 5").rows();
+        assertEquals(1, rows.size(), rows.toString());
+        assertTrue(rows.getFirst().getFirst().render().contains("Episode"), rows.toString());
+        assertTrue(session.execute("REFINE FROM TYPE Meeting THROUGH Meeting TO Person = $a TOP 5").rows().isEmpty());
+    }
+
+    @Test
+    void readsCapsTheWalk() {
+        StringBuilder script = new StringBuilder();
+        for (int i = 0; i < 3_000; i++) {
+            script.append("INSERT EDGE Meeting MEMBERS ($a, $b);\n");
+        }
+        session.executeAll(script.toString());
+        String unlimited = session.execute("DIFFUSE FROM $a TOP 3").message();
+        String capped = session.execute("DIFFUSE FROM $a READS 200 TOP 3").message();
+        assertTrue(capped.contains("budget"), capped + " vs " + unlimited);
+    }
+
+    @Test
     void aFirstScanBeyondTheBudgetIsRefusedBeforeItStarts() {
         StringBuilder script = new StringBuilder();
         for (int i = 0; i < 40; i++) {
@@ -138,6 +171,7 @@ class RetrievalPlannerTest {
             io.hstore.db.hora.Budget.Meter meter = io.hstore.db.hora.Budget.DEFAULT.withRows(10).start();
             assertThrows(HStoreException.ResourceLimit.class, () -> io.hstore.db.retrieve.HyperMatch.on(reader).prepare(query, meter));
             assertEquals(0, meter.consumed());
+            assertEquals(41, io.hstore.db.retrieve.HyperMatch.on(reader).count(query, io.hstore.db.hora.Budget.DEFAULT.withRows(10).start()));
             return null;
         });
     }

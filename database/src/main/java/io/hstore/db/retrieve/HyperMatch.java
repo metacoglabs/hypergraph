@@ -93,7 +93,15 @@ public final class HyperMatch {
     }
 
     public long count(HyperQuery query, Budget.Meter meter) {
-        return count(prepare(query, meter), meter);
+        return count(prepareCount(query, meter), meter);
+    }
+
+    public Plan prepareCount(HyperQuery query, Budget.Meter meter) {
+        Plan plan = plan(query, Budget.UNBOUNDED.start(), false);
+        if (plan.steps().length == 1 && !plan.steps()[0].isAnchor() && reader.onlyDefaultTenant() && !reader.signatureCollides(plan.steps()[0].signature())) {
+            return plan;
+        }
+        return prepare(query, meter);
     }
 
     public long count(Plan plan, Budget.Meter meter) {

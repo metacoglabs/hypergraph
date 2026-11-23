@@ -95,7 +95,8 @@ public final class Similarity {
     }
 
     public static Shape shapeOf(Reader reader, long[] edges) {
-        return new Similarity(reader, new Shape(new int[0], new int[0], new int[0][], new long[0]), false, Budget.UNBOUNDED).shape(edges);
+        return new Similarity(reader, new Shape(new int[0], new int[0], new int[0][], new long[0]), false, Budget.DEFAULT.withRows(2 * Budget.DEFAULT.maxRows()))
+                .shape(edges);
     }
 
     private Read read(long edge) {
@@ -240,7 +241,7 @@ public final class Similarity {
         try {
             switch (space) {
                 case Space.Children(int containerType) -> reader.atomsOfType(containerType).forEach(container -> {
-                    generation.consume(1);
+                    generation.consume(1 + reader.cardinality(container));
                     found.accept(new Candidate(container, children(reader, container)));
                 });
                 case Space.Given(List<long[]> sets) -> {

@@ -103,8 +103,9 @@ public final class Parser {
         if (inner instanceof Statement.Authenticate) {
             throw HStoreException.invalid("AUTHENTICATE cannot run at a past generation");
         }
-        if (inner instanceof Statement.BranchDelta || inner instanceof Statement.BranchSurvivors || inner instanceof Statement.CompareBranches
-                || inner instanceof Statement.NearestBranch || inner instanceof Statement.BranchAfter) {
+        Statement core = inner instanceof Statement.ExplainRetrieval(Statement explained) ? explained : inner;
+        if (core instanceof Statement.BranchDelta || core instanceof Statement.BranchSurvivors || core instanceof Statement.CompareBranches
+                || core instanceof Statement.NearestBranch || core instanceof Statement.BranchAfter) {
             throw HStoreException.invalid("branch statements compare branch heads, so AT GENERATION and AS OF do not apply to them");
         }
         return inner;
@@ -132,11 +133,19 @@ public final class Parser {
         }
         if (accept("AT")) {
             expect("GENERATION");
-            return new Statement.At(longValue(), historical(statement()));
+            long generation = longValue();
+            if (peekWord("AT") || peekWord("AS")) {
+                throw HStoreException.invalid("a statement takes one AT GENERATION or AS OF");
+            }
+            return new Statement.At(generation, historical(statement()));
         }
         if (peek().is("AS") && peek(1).is("OF")) {
             index += 2;
-            return new Statement.AsOf(instant(), historical(statement()));
+            long instant = instant();
+            if (peekWord("AT") || peekWord("AS")) {
+                throw HStoreException.invalid("a statement takes one AT GENERATION or AS OF");
+            }
+            return new Statement.AsOf(instant, historical(statement()));
         }
         if (accept("CREATE")) {
             return create();
@@ -336,6 +345,9 @@ public final class Parser {
             if (accept("MATCH")) {
                 return new Statement.Explain(match());
             }
+            if (peekWord("EXPLAIN") || peekWord("AT") || peekWord("AS")) {
+                throw HStoreException.invalid("EXPLAIN takes one retrieval statement");
+            }
             Statement inner = statement();
             if (!explainable(inner)) {
                 throw HStoreException.invalid("EXPLAIN takes MATCH, HYPERMATCH or a retrieval statement such as RANK, TRANSITIONS, "
@@ -347,6 +359,9 @@ public final class Parser {
             List<Statement> parts = new ArrayList<>();
             do {
                 expectSymbol("(");
+                if (peekWord("FUSE") || peekWord("EXPLAIN") || peekWord("AT") || peekWord("AS")) {
+                    throw HStoreException.invalid("FUSE parts are single retrieval statements");
+                }
                 Statement part = statement();
                 if (!fusable(part)) {
                     throw HStoreException.invalid("FUSE takes MATCH, RANK, HYPERMATCH, REFINE, DIFFUSE, EXPAND FROM, SELECT EVIDENCE, MOTIF, "
@@ -466,14 +481,16 @@ public final class Parser {
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
             double alpha = accept("ALPHA") ? number().doubleValue() : 0.2;
             double epsilon = 1e-4;
+            OptionalLong reads = OptionalLong.empty();
             if (accept("EPSILON")) {
                 epsilon = number().doubleValue();
             } else if (accept("READS")) {
-                long reads = longValue();
-                if (reads < 1 || !(alpha > 0 && alpha < 1)) {
+                long budget = longValue();
+                if (budget < 1 || !(alpha > 0 && alpha < 1)) {
                     throw HStoreException.invalid("READS needs at least one read and ALPHA between 0 and 1");
                 }
-                epsilon = (2 - alpha) / (alpha * reads);
+                epsilon = (2 - alpha) / (alpha * budget);
+                reads = OptionalLong.of(budget);
             }
             expect("TOP");
             long top = longValue();
@@ -481,7 +498,7 @@ public final class Parser {
             if (top < 0 || top > 10_000 || edges < 0 || edges > 10_000) {
                 throw HStoreException.invalid("TOP and EDGES must be between 0 and 10000");
             }
-            return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, top, edges);
+            return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, reads, top, edges);
         }
         if (accept("REFINE")) {
             expect("FROM");

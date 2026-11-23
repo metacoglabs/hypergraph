@@ -271,7 +271,7 @@ public final class Refinement {
                        List<Result> found, Budget.Meter meter, boolean[] stopped) {
         meter.consume(1);
         if (level == 0) {
-            if (roots.isEmpty() || roots.contains(edge)) {
+            if (roots.isEmpty() ? spec.rootType().stream().allMatch(type -> reader.typeOf(edge).orElse(-1) == type) : roots.contains(edge)) {
                 List<Long> path = new ArrayList<>(pathUp.subList(1, pathUp.size()));
                 java.util.Collections.reverse(path);
                 found.add(new Result(path, leaf, score));

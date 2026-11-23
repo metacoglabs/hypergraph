@@ -389,8 +389,8 @@ public final class Ast {
         }
 
         record Diffuse(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
-                       Optional<Expr> validAt, Optional<EvidencePolicy> policy, double alpha, double epsilon, long top, long edges)
-                implements Statement {
+                       Optional<Expr> validAt, Optional<EvidencePolicy> policy, double alpha, double epsilon, OptionalLong reads, long top,
+                       long edges) implements Statement {
         }
 
         record Refine(List<Ref> roots, Optional<String> rootType, List<RefineLevel> levels, Optional<String> leafType,

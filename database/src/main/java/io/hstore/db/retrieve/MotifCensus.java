@@ -136,7 +136,7 @@ public final class MotifCensus {
         return new Budget(rows, Budget.DEFAULT.maxDepth(), SAFETY);
     }
 
-    private static final java.time.Duration SAFETY = java.time.Duration.ofMinutes(5);
+    private static final java.time.Duration SAFETY = Budget.DEFAULT.maxTime().dividedBy(3);
 
     public List<Count> profile(long edge, Budget.Meter meter) {
         reader.require(edge);

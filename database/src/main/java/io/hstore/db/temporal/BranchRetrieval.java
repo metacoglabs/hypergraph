@@ -133,16 +133,31 @@ public final class BranchRetrieval {
     }
 
     public String plan(int branch) {
-        AncestorPoint from = fork(branch);
+        return plan(branch, OptionalLong.empty());
+    }
+
+    public String plan(int branch, OptionalLong since) {
+        AncestorPoint from = since.isPresent()
+                ? new AncestorPoint(Lineage.of(database, branch).branchAt(since.getAsLong()), since.getAsLong())
+                : fork(branch);
+        return route(from, since.isPresent() ? "generation " + since.getAsLong() : "the fork point at generation " + from.generation());
+    }
+
+    public String planCompare(int left, int right) {
+        AncestorPoint point = ancestor(left, right);
+        return "both branches from their common ancestor: " + route(point, "the ancestor at generation " + point.generation());
+    }
+
+    private String route(AncestorPoint from, String name) {
         try (Snapshot base = snapshotOrNull(from)) {
             if (base != null) {
-                return "snapshot of the fork point at generation " + from.generation() + " compared with the branch head";
+                return "snapshot of " + name + " compared with the branch head";
             }
         }
         if (database.engine().feed().covers(from.generation())) {
-            return "change-feed fold from the fork point at generation " + from.generation() + " (its snapshot is no longer retained)";
+            return "change-feed fold from " + name + " (its snapshot is no longer retained)";
         }
-        return "fails: the fork point at generation " + from.generation() + " is neither retained nor covered by the change feed";
+        return "fails: " + name + " is neither retained nor covered by the change feed";
     }
 
     public AncestorPoint ancestor(int left, int right) {

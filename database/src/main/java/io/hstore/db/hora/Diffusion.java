@@ -107,6 +107,9 @@ public final class Diffusion {
     private Params params;
     private long reads;
 
+    private Budget.Meter meter;
+    private boolean starved;
+
     private Diffusion(Reader reader) {
         this.reader = reader;
     }
@@ -118,6 +121,7 @@ public final class Diffusion {
     public Result run(Map<Long, Double> seeds, Model model, Params params, Budget.Meter meter) {
         this.model = model;
         this.params = params;
+        this.meter = meter;
         double total = 0;
         Map<Long, Double> atoms = new LinkedHashMap<>();
         Map<Long, Double> edges = new LinkedHashMap<>();
@@ -152,6 +156,10 @@ public final class Diffusion {
         });
         boolean exhausted = false;
         while (!due.isEmpty()) {
+            if (starved) {
+                exhausted = true;
+                break;
+            }
             Due next = due.poll();
             double mass = next.edge() ? edgeResidual.getOrDefault(next.id(), 0.0) : atomResidual.getOrDefault(next.id(), 0.0);
             long cost = next.edge() ? edgeCost(next.id()) : atomCost(next.id());
@@ -198,11 +206,34 @@ public final class Diffusion {
     }
 
     private long atomCost(long atom) {
-        return atomCosts.computeIfAbsent(atom, id -> owns(id) ? Math.max(1, reader.degree(id)) : 1);
+        return atomCosts.computeIfAbsent(atom, id -> {
+            if (!owns(id)) {
+                return 1L;
+            }
+            long raw = Math.max(1, reader.postingCount(id));
+            if (reader.onlyDefaultTenant()) {
+                return raw;
+            }
+            if (!meter.tryConsume(raw)) {
+                starved = true;
+                return Long.MAX_VALUE / 4;
+            }
+            return Math.max(1, reader.degree(id));
+        });
     }
 
     private long edgeCost(long edge) {
-        return edgeCosts.computeIfAbsent(edge, id -> Math.max(1, reader.memberIds(id).filter(reader::owns).count()));
+        return edgeCosts.computeIfAbsent(edge, id -> {
+            long raw = Math.max(1, reader.cardinality(id));
+            if (reader.onlyDefaultTenant()) {
+                return raw;
+            }
+            if (!meter.tryConsume(raw)) {
+                starved = true;
+                return Long.MAX_VALUE / 4;
+            }
+            return Math.max(1, reader.memberIds(id).filter(reader::owns).count());
+        });
     }
 
     private void addAtom(long atom, double mass) {

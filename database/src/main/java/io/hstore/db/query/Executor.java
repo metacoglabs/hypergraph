@@ -403,12 +403,12 @@ final class Executor {
                 long id = session.resolve(reader, atom);
                 Hora hora = Hora.on(reader);
                 LongStream neighbors = reader.require(id).isEdge()
-                        ? hora.edgeNeighbors(id, threshold, Budget.DEFAULT)
-                        : hora.neighbors(id, threshold, Budget.DEFAULT);
+                        ? hora.edgeNeighbors(id, threshold, budget())
+                        : hora.neighbors(id, threshold, budget());
                 return table(List.of("neighbor"), limited(neighbors.mapToObj(neighbor -> List.of(atomCell(reader, neighbor))), limit));
             });
             case Statement.OverlapJoin(String type, long threshold, OptionalLong limit) -> read(reader -> table(List.of("left", "right", "overlap"),
-                    limited(Hora.on(reader).overlapJoin(reader.atoms(type).boxed().toList(), threshold, Budget.DEFAULT)
+                    limited(Hora.on(reader).overlapJoin(reader.atoms(type).boxed().toList(), threshold, budget())
                             .map(pair -> List.of(atomCell(reader, pair.left()), atomCell(reader, pair.right()), QueryResult.number(pair.overlap()))), limit)));
             case Statement.Closure(Ast.Ref edge, int dimension, OptionalLong limit) -> read(reader -> table(List.of("simplex"),
                     limited(Hora.on(reader).closure(session.resolve(reader, edge), dimension, budget(limit))
@@ -639,7 +639,7 @@ final class Executor {
 
     private QueryResult query(Reader reader, Ast.Match match) {
         long started = System.nanoTime();
-        IoTrace trace = IoTrace.withBudget(database().queryPageBudget(session.principal()));
+        IoTrace trace = pageTrace();
         Planner.Plan plan = planner(reader).plan(match);
         Evaluator evaluator = evaluator(reader);
         AtomicLong produced = new AtomicLong();
@@ -700,7 +700,7 @@ final class Executor {
         OptionalLong validAt = statement.validAt().map(expr -> OptionalLong.of((long) evaluator.value(expr, Map.of()).number()
                 .orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")))).orElse(OptionalLong.empty());
         Expansion.Model model = new Expansion.Model(factors, exit, entry, validAt, statement.hubDamping(), statement.edgeDamping(), statement.gate());
-        Budget.Meter meter = Budget.DEFAULT.start();
+        Budget.Meter meter = budget().start();
         Expansion.Relevance relevance = statement.towards().<Expansion.Relevance>map(rank -> {
             RoleTimeScorer scorer = new RoleTimeScorer(reader, rankQuery(reader, rank), meter);
             return new Expansion.Relevance() {
@@ -738,12 +738,12 @@ final class Executor {
     private static final int EVIDENCE_MEMBER_CAP = 10_000;
 
     private QueryResult selectEvidence(Reader reader, Statement.SelectEvidence statement) {
-        Budget generation = new Budget(500_000, Budget.DEFAULT.maxDepth(), Budget.DEFAULT.maxTime().dividedBy(2));
+        Budget generation = new Budget(Math.max(1, budget().maxRows() / 3), budget().maxDepth(), budget().maxTime().dividedBy(3));
         RankQuery query = rankQuery(reader, statement.query());
         Budget.Meter ranking = generation.start();
         Map<Long, RoleTimeScorer.EdgeScore> scores = new LinkedHashMap<>();
         Ranking.of(reader, query).top(ranking).forEach(score -> scores.put(score.edge(), score));
-        Map<Long, Long> parents = new HashMap<>();
+        Map<Long, Long> parents = new LinkedHashMap<>();
         Budget.Meter expanding = generation.start();
         RoleTimeScorer scorer = new RoleTimeScorer(reader, query, expanding);
         if (!statement.seeds().isEmpty()) {
@@ -766,6 +766,7 @@ final class Executor {
         order.addAll(parents.keySet());
         Map<Long, Selection.Candidate> candidates = new LinkedHashMap<>();
         boolean cut = false;
+        int skipped = 0;
         for (long edge : order) {
             long[] members = reader.edge(edge).stream().limit(EVIDENCE_MEMBER_CAP + 1L).mapToLong(incidence -> incidence.member())
                     .filter(reader::owns).toArray();
@@ -774,6 +775,7 @@ final class Executor {
                 break;
             }
             if (members.length > EVIDENCE_MEMBER_CAP) {
+                skipped++;
                 continue;
             }
             Optional<RoleTimeScorer.EdgeScore> score = Optional.ofNullable(scores.get(edge));
@@ -809,6 +811,9 @@ final class Executor {
         if (cut) {
             message.append("; candidate generation ran out of budget, so later candidates were not considered");
         }
+        if (skipped > 0) {
+            message.append("; ").append(skipped).append(" candidates with more than ").append(EVIDENCE_MEMBER_CAP).append(" members were left out");
+        }
         return new QueryResult(table.columns(), table.rows(), message.toString(), table.trace());
     }
 
@@ -829,9 +834,9 @@ final class Executor {
     private QueryResult motifs(Reader reader, Statement.Motifs statement) {
         MotifCensus census = MotifCensus.of(reader, motifScope(reader, statement.type()));
         MotifCensus.Result result = switch (statement.mode()) {
-            case "EXACT" -> census.exact(Budget.DEFAULT.start());
-            case "SAMPLE" -> census.sample(statement.samples(), statement.seed(), Budget.DEFAULT.start());
-            default -> census.auto(statement.seed(), Budget.DEFAULT.maxRows());
+            case "EXACT" -> census.exact(budget().start());
+            case "SAMPLE" -> census.sample(statement.samples(), statement.seed(), budget().start());
+            default -> census.auto(statement.seed(), budget().maxRows());
         };
         QueryResult table = QueryResult.table(List.of("class", "shape", "count", "standard_error"), result.counts().stream()
                 .map(count -> List.<Cell>of(QueryResult.number(count.code()), QueryResult.text(MotifClasses.shape(count.code())),
@@ -849,7 +854,7 @@ final class Executor {
 
     private QueryResult motifProfile(Reader reader, Statement.MotifProfile statement) {
         long edge = reader.require(session.resolve(reader, statement.edge())).id();
-        List<MotifCensus.Count> counts = MotifCensus.of(reader, motifScope(reader, statement.type())).profile(edge, Budget.DEFAULT.start());
+        List<MotifCensus.Count> counts = MotifCensus.of(reader, motifScope(reader, statement.type())).profile(edge, budget().start());
         return QueryResult.table(List.of("class", "shape", "count"), counts.stream()
                 .map(count -> List.<Cell>of(QueryResult.number(count.code()), QueryResult.text(MotifClasses.shape(count.code())),
                         QueryResult.number(Math.round(count.estimate()))))
@@ -869,7 +874,7 @@ final class Executor {
         }
         MotifMatcher.Query query = new MotifMatcher.Query(statement.code(), types, around, regions, statement.nested(),
                 statement.rankBy().map(MotifMatcher.Weight::valueOf), (int) limit);
-        MotifMatcher.Result result = MotifMatcher.find(reader, query, Budget.DEFAULT.start());
+        MotifMatcher.Result result = MotifMatcher.find(reader, query, budget().start());
         List<String> columns = new ArrayList<>(List.of("e1", "e2", "e3"));
         statement.rankBy().ifPresent(_ -> columns.add("weight"));
         QueryResult table = QueryResult.table(columns, result.occurrences().stream().map(found -> {
@@ -956,8 +961,8 @@ final class Executor {
                     .map(set -> set.stream().mapToLong(ref -> reader.require(session.resolve(reader, ref)).id()).toArray()).toList());
         };
         Similarity.Result result = statement.within().isPresent()
-                ? Similarity.within(reader, query, statement.identity(), space, statement.within().getAsDouble(), Budget.DEFAULT)
-                : Similarity.top(reader, query, statement.identity(), space, (int) statement.top().getAsLong(), Budget.DEFAULT);
+                ? Similarity.within(reader, query, statement.identity(), space, statement.within().getAsDouble(), budget())
+                : Similarity.top(reader, query, statement.identity(), space, (int) statement.top().getAsLong(), budget());
         QueryResult table = QueryResult.table(List.of("candidate", "edges", "lower", "upper"), result.hits().stream()
                 .map(hit -> List.<Cell>of(atomCell(reader, hit.key()), QueryResult.text(Arrays.stream(hit.edges()).mapToObj(edge -> "@" + edge)
                         .collect(Collectors.joining(", "))), QueryResult.number(hit.lower()),
@@ -970,6 +975,20 @@ final class Executor {
     }
 
     private static final int RRF_CONSTANT = 60;
+    private static final ScopedValue<Budget> STATEMENT_BUDGET = ScopedValue.newInstance();
+    private static final ScopedValue<IoTrace> SHARED_TRACE = ScopedValue.newInstance();
+
+    private static Budget budget() {
+        return STATEMENT_BUDGET.isBound() ? STATEMENT_BUDGET.get() : Budget.DEFAULT;
+    }
+
+    private IoTrace pageTrace() {
+        return SHARED_TRACE.isBound() ? SHARED_TRACE.get() : IoTrace.withBudget(database().queryPageBudget(session.principal()));
+    }
+
+    private static boolean partial(QueryResult result) {
+        return result.message().toLowerCase(java.util.Locale.ROOT).contains("budget");
+    }
 
     private QueryResult evaluate(Reader reader, Statement statement) {
         return switch (statement) {
@@ -990,7 +1009,8 @@ final class Executor {
     private static boolean exactFamily(Statement statement, QueryResult result) {
         return switch (statement) {
             case Statement.Diffuse _, Statement.SelectEvidence _ -> false;
-            case Statement.ExpandFrom _ -> !result.message().contains("truncated") && !result.message().contains("budget");
+            case Statement.Refine _ -> !result.message().contains("prefix");
+            case Statement.ExpandFrom _ -> !result.message().contains("truncated");
             case Statement.Similar _ -> result.message().contains("distances are exact") && !result.message().contains("incomplete");
             case Statement.MotifMatch _ -> !result.message().contains("budget ran out");
             default -> true;
@@ -1014,32 +1034,43 @@ final class Executor {
     }
 
     private QueryResult fuse(Reader reader, Statement.Fuse statement) {
-        Map<Long, Double> scores = new LinkedHashMap<>();
+        int parts = statement.statements().size();
+        Budget share = new Budget(Math.max(1, budget().maxRows() / parts), budget().maxDepth(), budget().maxTime().dividedBy(parts));
+        IoTrace trace = pageTrace();
+        Map<Long, List<Double>> terms = new LinkedHashMap<>();
         Map<Long, List<String>> sources = new LinkedHashMap<>();
         Set<Long> exact = new HashSet<>();
         List<String> notes = new ArrayList<>();
-        for (int i = 0; i < statement.statements().size(); i++) {
+        for (int i = 0; i < parts; i++) {
             Statement part = statement.statements().get(i);
-            QueryResult result = evaluate(reader, part);
-            boolean fromExact = exactFamily(part, result);
+            QueryResult result = ScopedValue.where(STATEMENT_BUDGET, share).where(SHARED_TRACE, trace).call(() -> evaluate(reader, part));
+            boolean cut = partial(result);
+            boolean fromExact = exactFamily(part, result) && !cut;
             String name = family(part) + (statement.statements().stream().filter(other -> family(other).equals(family(part))).count() > 1 ? "" + (i + 1) : "");
+            int kindColumn = result.columns().indexOf("kind");
+            Map<String, Integer> ranks = new HashMap<>();
             Set<Long> seen = new HashSet<>();
-            int rank = 0;
+            int items = 0;
             for (List<Cell> row : result.rows()) {
                 OptionalLong atom = row.stream().filter(cell -> cell instanceof Cell.AtomCell).mapToLong(cell -> ((Cell.AtomCell) cell).id()).findFirst();
                 if (atom.isEmpty() || !seen.add(atom.getAsLong())) {
                     continue;
                 }
-                rank++;
+                String kind = kindColumn < 0 ? "" : row.get(kindColumn).render();
+                int rank = ranks.merge(kind, 1, Integer::sum);
+                items++;
                 long id = atom.getAsLong();
-                scores.merge(id, 1.0 / (RRF_CONSTANT + rank), Double::sum);
-                sources.computeIfAbsent(id, _ -> new ArrayList<>()).add(name + "#" + rank);
+                terms.computeIfAbsent(id, _ -> new ArrayList<>()).add(1.0 / (RRF_CONSTANT + rank));
+                sources.computeIfAbsent(id, _ -> new ArrayList<>()).add(name + (kind.isEmpty() ? "" : " " + kind) + "#" + rank);
                 if (fromExact) {
                     exact.add(id);
                 }
             }
-            notes.add(name + " " + (fromExact ? "exact" : "approximate") + ", " + rank + " items");
+            notes.add(name + " " + (fromExact ? "exact" : "approximate") + ", " + items + " items"
+                    + (cut ? " (cut short by its budget)" : "") + (items == 0 && !result.rows().isEmpty() ? " (its rows hold no atoms)" : ""));
         }
+        Map<Long, Double> scores = new LinkedHashMap<>();
+        terms.forEach((id, values) -> scores.put(id, values.stream().sorted().mapToDouble(Double::doubleValue).sum()));
         List<Long> order = new ArrayList<>(scores.keySet());
         order.sort(Comparator.<Long>comparingDouble(scores::get).reversed().thenComparingLong(Long::longValue));
         long limit = statement.limit().orElse(Long.MAX_VALUE);
@@ -1052,7 +1083,75 @@ final class Executor {
                 + String.join("; ", notes) + (cutExact > 0 ? "; LIMIT left out " + cutExact + " results of exact lists" : ""), table.trace());
     }
 
+    private void validate(Reader reader, Statement statement) {
+        java.util.function.Consumer<Ast.Ref> atom = ref -> reader.require(session.resolve(reader, ref));
+        java.util.function.Consumer<String> type = name -> reader.requireReadableType(name);
+        switch (statement) {
+            case Statement.Refine refine -> {
+                refine.roots().forEach(atom);
+                refine.rootType().ifPresent(type);
+                refine.levels().forEach(level -> type.accept(level.type()));
+                refine.leafType().ifPresent(type);
+                refine.leafAnchor().ifPresent(atom);
+            }
+            case Statement.Diffuse diffuse -> {
+                diffuse.seeds().forEach(seed -> atom.accept(seed.atom()));
+                diffuse.through().forEach(found -> type.accept(found.type()));
+            }
+            case Statement.ExpandFrom expansion -> {
+                expansion.seeds().forEach(seed -> atom.accept(seed.atom()));
+                expansion.through().forEach(found -> type.accept(found.type()));
+                expansion.towards().ifPresent(rank -> rankQuery(reader, rank));
+            }
+            case Statement.SelectEvidence selection -> {
+                rankQuery(reader, selection.query());
+                selection.seeds().forEach(atom);
+            }
+            case Statement.Rank rank -> rankQuery(reader, rank);
+            case Statement.MotifProfile profile -> {
+                atom.accept(profile.edge());
+                profile.type().ifPresent(type);
+            }
+            case Statement.MotifMatch match -> {
+                match.types().forEach(found -> found.ifPresent(type));
+                match.around().ifPresent(atom);
+                match.regions().forEach(region -> {
+                    region.member().ifPresent(atom);
+                    region.memberType().ifPresent(type);
+                });
+            }
+            case Statement.Motifs motifs -> motifs.type().ifPresent(type);
+            case Statement.Similar similar -> {
+                similar.example().forEach(atom);
+                similar.container().ifPresent(atom);
+                switch (similar.space()) {
+                    case Ast.SimilarSpace.Children(String name) -> type.accept(name);
+                    case Ast.SimilarSpace.Around(Ast.Ref anchor, long _, List<String> through) -> {
+                        atom.accept(anchor);
+                        through.forEach(type);
+                    }
+                    case Ast.SimilarSpace.Sets(List<List<Ast.Ref>> sets) -> sets.forEach(set -> set.forEach(atom));
+                }
+                patternTypes(similar.pattern()).forEach(type);
+            }
+            case Statement.Transitions transitions -> transitions.type().ifPresent(type);
+            case Statement.Fuse fuse -> fuse.statements().forEach(part -> validate(reader, part));
+            default -> {
+            }
+        }
+    }
+
+    private static List<String> patternTypes(List<Ast.StructuralEdge> pattern) {
+        List<String> names = new ArrayList<>();
+        pattern.forEach(edge -> {
+            names.add(edge.type());
+            edge.vertices().forEach(vertex -> vertex.type().ifPresent(names::add));
+        });
+        return names;
+    }
+
     private String explain(Reader reader, Statement statement) {
+        validate(reader, statement);
         List<String> lines = new ArrayList<>();
         switch (statement) {
             case Statement.Query(Ast.Match match) -> {
@@ -1080,7 +1179,7 @@ final class Executor {
             }
             case Statement.BranchDelta delta -> {
                 lines.add("family branches  exact, or fails");
-                lines.add(branches().plan(session.branchId(delta.branch())));
+                lines.add(branches().plan(session.branchId(delta.branch()), delta.since()));
             }
             case Statement.BranchSurvivors survivors -> {
                 lines.add("family branches  exact, or fails");
@@ -1088,8 +1187,7 @@ final class Executor {
             }
             case Statement.CompareBranches compare -> {
                 lines.add("family branches  exact, or fails");
-                lines.add("left: " + branches().plan(session.branchId(compare.left())));
-                lines.add("right: " + branches().plan(session.branchId(compare.right())));
+                lines.add(branches().planCompare(session.branchId(compare.left()), session.branchId(compare.right())));
             }
             case Statement.NearestBranch nearest -> {
                 lines.add("family branches  exact top " + nearest.top());
@@ -1201,7 +1299,8 @@ final class Executor {
         Diffusion.Model model = new Diffusion.Model(types, typeWeights, new Diffusion.RoleFactors(exit, entry), validAt,
                 statement.policy().orElse(EvidencePolicy.ANY));
         Diffusion.Result result = Hora.on(reader).diffuse(seeds, model,
-                new Diffusion.Params(statement.alpha(), statement.epsilon(), (int) statement.top(), (int) statement.edges()), Budget.DEFAULT.start());
+                new Diffusion.Params(statement.alpha(), statement.epsilon(), (int) statement.top(), (int) statement.edges()),
+                (statement.reads().isPresent() ? budget().withRows(statement.reads().getAsLong()) : budget()).start());
         List<List<Cell>> rows = new ArrayList<>();
         result.atoms().forEach(scored -> rows.add(List.of(QueryResult.text("atom"), atomCell(reader, scored.id()),
                 QueryResult.number(scored.estimate()), QueryResult.number(scored.upper()))));
@@ -1215,7 +1314,7 @@ final class Executor {
     private QueryResult refine(Reader reader, Statement.Refine statement) {
         Evaluator evaluator = evaluator(reader);
         List<Long> roots = statement.rootType().isPresent()
-                ? reader.atomsOfType(reader.requireReadableType(statement.rootType().get()).id()).boxed().toList()
+                ? List.<Long>of()
                 : statement.roots().stream().map(ref -> session.resolve(reader, ref)).toList();
         OptionalInt rootType = statement.rootType().map(name -> OptionalInt.of(reader.requireReadableType(name).id())).orElse(OptionalInt.empty());
         List<Refinement.Level> levels = statement.levels().stream()
@@ -1227,7 +1326,7 @@ final class Executor {
         Refinement.Spec spec = new Refinement.Spec(roots, rootType, levels, new Refinement.LeafSpec(leafType, statement.leafRoles(), anchor), validAt,
                 statement.weightLow(), statement.weightHigh(), statement.distinct() ? Refinement.Mode.DISTINCT : Refinement.Mode.ALL,
                 (int) statement.top());
-        Refinement.Outcome outcome = Refinement.on(reader).run(spec, Budget.DEFAULT.start());
+        Refinement.Outcome outcome = Refinement.on(reader).run(spec, budget().start());
         QueryResult result = QueryResult.table(List.of("path", "leaf", "score"), outcome.results().stream()
                 .map(found -> List.of(QueryResult.text(found.path().stream().map(edge -> atomCell(reader, edge).render()).collect(Collectors.joining(" > "))),
                         atomCell(reader, found.leaf()), QueryResult.number(found.score()))).toList());
@@ -1235,7 +1334,7 @@ final class Executor {
     }
 
     private BranchRetrieval branches() {
-        return BranchRetrieval.on(database(), Budget.DEFAULT.start());
+        return BranchRetrieval.on(database(), budget().start());
     }
 
     private String branchName(int id) {
@@ -1321,8 +1420,8 @@ final class Executor {
         long started = System.nanoTime();
         HyperQuery query = hyperQuery(reader, statement);
         HyperMatch match = hyperMatch(reader, statement);
-        Budget.Meter meter = Budget.DEFAULT.start();
-        HyperMatch.Plan plan = match.prepare(query, meter);
+        Budget.Meter meter = budget().start();
+        HyperMatch.Plan plan = statement.count() ? match.prepareCount(query, meter) : match.prepare(query, meter);
         if (statement.count()) {
             return QueryResult.table(List.of("count"), List.of(List.of(QueryResult.number(match.count(plan, meter)))));
         }
@@ -1368,7 +1467,7 @@ final class Executor {
         }
         List<FeedFold.Change> changes = Transitions.of(reader, type, from, to,
                 statement.appeared() ? Transitions.Direction.APPEARED : Transitions.Direction.DISAPPEARED, statement.members(),
-                Budget.DEFAULT.start());
+                budget().start());
         return table(statement.members() ? List.of("edge", "member") : List.of("edge"), limited(changes.stream().map(change -> switch (change) {
             case FeedFold.Change.Membership(long edge, long member) -> List.of(atomCell(reader, edge), atomCell(reader, member));
             case FeedFold.Change.Edge(long edge) -> List.of(atomCell(reader, edge));
@@ -1385,9 +1484,9 @@ final class Executor {
 
     private QueryResult rank(Reader reader, Statement.Rank statement) {
         long started = System.nanoTime();
-        IoTrace trace = IoTrace.withBudget(database().queryPageBudget(session.principal()));
+        IoTrace trace = pageTrace();
         Ranking ranking = Ranking.of(reader, rankQuery(reader, statement));
-        List<RoleTimeScorer.EdgeScore> scores = trace.call(() -> ranking.top(Budget.DEFAULT.start()));
+        List<RoleTimeScorer.EdgeScore> scores = trace.call(() -> ranking.top(budget().start()));
         List<List<Cell>> rows = scores.stream().map(scored -> List.of(atomCell(reader, scored.edge()), QueryResult.number(scored.score()),
                 component(scored.components().members()), component(scored.components().roles()), component(scored.components().attributes()),
                 component(scored.components().time()), component(scored.components().topology()))).toList();
@@ -1570,7 +1669,7 @@ final class Executor {
         query.bindings().forEach((variable, ref) -> constraints.add(new Pattern.Constraint.Bound(variable, session.resolve(reader, ref))));
         Pattern pattern = new Pattern(query.variables(), constraints);
         List<String> columns = query.variables().stream().map(Pattern.Variable::name).toList();
-        return table(columns, limited(new PatternMatcher(reader).match(pattern, Budget.DEFAULT)
+        return table(columns, limited(new PatternMatcher(reader).match(pattern, budget())
                 .map(binding -> columns.stream().map(column -> atomCell(reader, binding.get(column))).toList()), query.limit()));
     }
 
@@ -1679,7 +1778,7 @@ final class Executor {
     }
 
     private static Budget budget(OptionalLong limit) {
-        return limit.isPresent() ? Budget.DEFAULT.withRows(Math.min(limit.getAsLong(), Budget.DEFAULT.maxRows())) : Budget.DEFAULT;
+        return limit.isPresent() ? budget().withRows(Math.min(limit.getAsLong(), budget().maxRows())) : budget();
     }
 
     private static <T> Stream<T> limited(Stream<T> rows, OptionalLong limit) {

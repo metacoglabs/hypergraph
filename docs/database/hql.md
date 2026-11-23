@@ -362,7 +362,8 @@ retrieval = rank | transitions | branch_delta | branch_survivors | compare_branc
 ```
 
 For a retrieval statement, `EXPLAIN` returns its family, whether its answer is exact, approximate with a
-certificate, or may fail, the plan chosen with the counts behind it, and the rule that chose it. Nothing is executed.
+certificate, or may fail, the plan chosen with the counts behind it, and the rule that chose it. The statement itself
+is not run, but its atoms and types are checked as if it were, and the counts it reports are read.
 See [planner](planner.md#retrieval-statements).
 
 Returns the plan as a message: the chosen access path with estimated rows and cost, the residual `Verify`
@@ -512,7 +513,9 @@ stored hyperedge with exactly those three members, and distinct query vertices m
 pins a vertex to an atom. The pattern must be connected and has at most 64 hyperedges and anchors.
 
 Columns: one per query hyperedge, holding the matched hyperedge; with `BINDINGS` also one per vertex, one row per
-vertex assignment. `COUNT` returns the number of hyperedge tuples. `EXPLAIN HYPERMATCH …` shows the mode and matching
+vertex assignment. `COUNT` returns the number of hyperedge tuples. `LIMIT` cuts the
+returned rows but not the search: every tuple is found first, so a pattern with too many matches runs out of budget
+even with a small `LIMIT`. `EXPLAIN HYPERMATCH …` shows the mode and matching
 order. How the search works is in [structural matching](structural-matching.md).
 
 ```
@@ -587,7 +590,9 @@ Runs two to eight retrieval statements on the same snapshot and merges their ans
 an item's score is the sum of `1 / (60 + rank)` over the lists it appears in. An item is the first atom of a row.
 Columns: `item, score, sources, exact`; `sources` lists each statement and the item's rank in it, and `exact` says
 whether one of the lists that returned it is exact. Scores of different statements are never added directly. When a
-`LIMIT` leaves out items that an exact list returned, the message says how many.
+`LIMIT` leaves out items that an exact list returned, the message says how many. The parts share the statement's
+budget in equal shares, and a part that ran out of its share is named in the message and counted as approximate. A
+`DIFFUSE` part ranks its atoms and its hyperedges separately.
 
 ```
 FUSE (RANK EDGE e:Meeting LIKE (@Person:'alice' AS host) TOP 20), (DIFFUSE FROM @Person:'alice' TOP 20) LIMIT 10;
