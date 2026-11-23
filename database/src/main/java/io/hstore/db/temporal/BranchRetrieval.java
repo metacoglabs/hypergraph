@@ -121,9 +121,7 @@ public final class BranchRetrieval {
     }
 
     private Map<Integer, Branch> branches() {
-        Map<Integer, Branch> found = new HashMap<>();
-        database.engine().branches().forEach(branch -> found.put(branch.id(), branch));
-        return found;
+        return new HashMap<>(database.engine().transactions().current().branches());
     }
 
     private Branch branch(int id) {
@@ -164,8 +162,12 @@ public final class BranchRetrieval {
     }
 
     public List<Net> delta(int branch, OptionalLong since, Route route, Scope scope) {
+        long current = database.engine().transactions().current().id();
+        if (since.isPresent() && since.getAsLong() > current) {
+            throw HStoreException.invalid("generation " + since.getAsLong() + " is after the current generation " + current);
+        }
         AncestorPoint from = since.isPresent()
-                ? new AncestorPoint(Lineage.of(database.engine().branches(), branch).branchAt(since.getAsLong()), since.getAsLong())
+                ? new AncestorPoint(Lineage.of(database, branch).branchAt(since.getAsLong()), since.getAsLong())
                 : fork(branch);
         Map<Key, Net> nets = net(from, branch, route);
         Map<Long, AtomValue> records = new HashMap<>();
@@ -197,6 +199,10 @@ public final class BranchRetrieval {
     }
 
     public List<Compared> compare(int left, int right, Scope scope) {
+        if (left == right) {
+            branch(left);
+            return List.of();
+        }
         AncestorPoint point = ancestor(left, right);
         Map<Key, Net> leftSide = net(point, left, Route.AUTO);
         Map<Key, Net> rightSide = net(point, right, Route.AUTO);
@@ -269,16 +275,16 @@ public final class BranchRetrieval {
     }
 
     public List<Distance> nearest(int target, List<Integer> candidates, Scope scope, int k) {
-        List<Distance> bounded = new ArrayList<>();
+        List<Integer> others = candidates.stream().filter(candidate -> candidate != target).distinct().toList();
+        Map<Integer, Snapshot> heads = new HashMap<>();
         try (Snapshot head = database.engine().snapshot(target)) {
+            for (int candidate : others) {
+                heads.put(candidate, database.engine().snapshot(candidate));
+            }
             long targetSize = size(head, scope);
-            for (int candidate : candidates) {
-                if (candidate == target) {
-                    continue;
-                }
-                try (Snapshot other = database.engine().snapshot(candidate)) {
-                    bounded.add(new Distance(candidate, -1, Math.abs(targetSize - size(other, scope))));
-                }
+            List<Distance> bounded = new ArrayList<>();
+            for (int candidate : others) {
+                bounded.add(new Distance(candidate, -1, Math.abs(targetSize - size(heads.get(candidate), scope))));
             }
             bounded.sort(Comparator.comparingLong(Distance::lowerBound).thenComparingInt(Distance::branch));
             List<Distance> best = new ArrayList<>();
@@ -286,16 +292,15 @@ public final class BranchRetrieval {
                 if (best.size() >= k && candidate.lowerBound() > best.get(k - 1).distance()) {
                     break;
                 }
-                try (Snapshot other = database.engine().snapshot(candidate.branch())) {
-                    long distance = distance(head, other, scope);
-                    best.add(new Distance(candidate.branch(), distance, candidate.lowerBound()));
-                    best.sort(Comparator.comparingLong(Distance::distance).thenComparingInt(Distance::branch));
-                    if (best.size() > k) {
-                        best.removeLast();
-                    }
+                best.add(new Distance(candidate.branch(), distance(head, heads.get(candidate.branch()), scope), candidate.lowerBound()));
+                best.sort(Comparator.comparingLong(Distance::distance).thenComparingInt(Distance::branch));
+                if (best.size() > k) {
+                    best.removeLast();
                 }
             }
             return List.copyOf(best);
+        } finally {
+            heads.values().forEach(Snapshot::close);
         }
     }
 
@@ -320,12 +325,15 @@ public final class BranchRetrieval {
     }
 
     public List<Succession> after(int branch, long generation, long window) {
+        if (window < 0) {
+            throw HStoreException.invalid("WINDOW must not be negative");
+        }
         ChangeFeed feed = database.engine().feed();
         if (!feed.covers(generation - 1)) {
             throw HStoreException.invalid("generation " + generation + " precedes the change feed (first retained " + feed.firstGeneration() + ")");
         }
         database.engine().transactions().awaitPublished(database.engine().transactions().current().id());
-        Lineage lineage = Lineage.of(database.engine().branches(), branch);
+        Lineage lineage = Lineage.of(database, branch);
         Set<Long> touched = new TreeSet<>();
         List<Succession> result = new ArrayList<>();
         long last = generation > Long.MAX_VALUE - window ? Long.MAX_VALUE : generation + window;
@@ -339,6 +347,9 @@ public final class BranchRetrieval {
                     break;
                 }
                 if (event.generation() == generation) {
+                    if (!lineage.includes(event.branch(), generation)) {
+                        throw HStoreException.invalid("generation " + generation + " is not on the history of branch " + branch);
+                    }
                     seen = true;
                     touched.addAll(atoms(event));
                     continue;
@@ -442,12 +453,14 @@ public final class BranchRetrieval {
                     result.put(new Key.Atom(atom), new Net(new Key.Atom(atom), Optional.of(AtomValue.of(record)), Optional.empty()));
                     if (record instanceof AtomRecord.EdgeRecord) {
                         before.edge(atom).ifPresent(edge -> edge.members().stream().forEach(entry -> {
+                            meter.consume(1);
                             Key key = new Key.Member(atom, entry.value().member());
                             result.put(key, new Net(key, Optional.of(entry.value()), Optional.empty()));
                         }));
                     }
                 }
                 case Temporal.Delta.MembersChanged(long edge, List<MemberChange> changes) -> changes.forEach(change -> {
+                    meter.consume(1);
                     Key key = new Key.Member(edge, change.member());
                     result.put(key, switch (change) {
                         case MemberChange.Added(long _, Incidence incidence, long _) -> new Net(key, Optional.empty(), Optional.of(incidence));
@@ -473,6 +486,7 @@ public final class BranchRetrieval {
             };
             properties(delta.key(), was, now, net -> result.put(net.key(), net));
         });
+        result.values().removeIf(net -> net.before().equals(net.after()));
         return result;
     }
 
@@ -483,13 +497,15 @@ public final class BranchRetrieval {
                     + feed.firstGeneration() + ")");
         }
         database.engine().transactions().awaitPublished(database.engine().transactions().current().id());
-        Lineage lineage = Lineage.of(database.engine().branches(), branch);
+        Lineage lineage = Lineage.of(database, branch);
         Map<Key, Net> folded = new TreeMap<>(KEY_ORDER);
         try (var events = feed.replay(from.generation())) {
             events.peek(_ -> meter.consume(1))
                     .filter(event -> lineage.includes(event.branch(), event.generation()))
-                    .forEach(event -> changes(event).forEach(net -> folded.merge(net.key(), net,
-                            (first, next) -> new Net(first.key(), first.before(), next.after()))));
+                    .forEach(event -> changes(event).forEach(net -> {
+                        meter.consume(1);
+                        folded.merge(net.key(), net, (first, next) -> new Net(first.key(), first.before(), next.after()));
+                    }));
         }
         folded.values().removeIf(net -> net.before().equals(net.after()));
         return folded;
@@ -508,6 +524,7 @@ public final class BranchRetrieval {
             }
             if (value.edge()) {
                 head.edge(atom).ifPresent(edge -> edge.members().stream().forEach(member -> {
+                    meter.consume(1);
                     Key key = new Key.Member(atom, member.value().member());
                     if (inScope(scope, key, records::get)) {
                         sink.accept(key, member.value());
@@ -516,6 +533,7 @@ public final class BranchRetrieval {
             }
         });
         head.scan(PropertySlots.PROPERTIES).stream().forEach(entry -> entry.value().entries().forEach((key, property) -> {
+            meter.consume(1);
             Key found = new Key.Property(entry.key(), key);
             if (inScope(scope, found, records::get)) {
                 sink.accept(found, property);

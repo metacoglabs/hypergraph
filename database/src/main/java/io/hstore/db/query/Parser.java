@@ -362,7 +362,13 @@ public final class Parser {
             String branch = identifier();
             expect("GENERATION");
             long generation = longValue();
-            long window = accept("WINDOW") ? longValue() : 1_000;
+            long window = 1_000;
+            if (accept("WINDOW")) {
+                if (peek().is("-")) {
+                    throw HStoreException.invalid("WINDOW must not be negative");
+                }
+                window = longValue();
+            }
             return new Statement.BranchAfter(branch, generation, window, limit());
         }
         if (accept("COMPARE")) {

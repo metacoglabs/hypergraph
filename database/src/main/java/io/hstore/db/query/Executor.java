@@ -330,7 +330,7 @@ final class Executor {
             case Statement.NearestBranch nearest -> read(reader -> {
                 List<Integer> among = nearest.among().isEmpty()
                         ? database().engine().branches().stream().filter(Branch::isActive).map(Branch::id).toList()
-                        : nearest.among().stream().map(session::branchId).toList();
+                        : nearest.among().stream().map(session::branchId).distinct().toList();
                 return QueryResult.table(List.of("branch", "distance", "lower_bound"), branches()
                         .nearest(session.branchId(nearest.target()), among, scope(reader, nearest.scope()), nearest.top()).stream()
                         .map(found -> List.of(QueryResult.text(branchName(found.branch())), QueryResult.number(found.distance()),

@@ -72,6 +72,7 @@ class BranchRetrievalTest {
                     CREATE NODE TYPE Person (score INT);
                     CREATE NODE TYPE Place;
                     CREATE SET EDGE TYPE Visit;
+                    CREATE ORDERED EDGE TYPE Route;
                     """);
         }
     }
@@ -369,6 +370,89 @@ class BranchRetrievalTest {
         database.engine().checkpoint();
         var refused = assertThrows(io.hstore.engine.HStoreException.class, () -> retrieval().delta(b1, OptionalLong.empty(), Route.AUTO));
         assertTrue(refused.getMessage().contains("neither retained nor covered"), refused.getMessage());
+    }
+
+    @Test
+    void movingAMemberOfAnOrderedEdgeIsNotAChangeOnEitherRoute() {
+        long[] ids = database.write(writer -> {
+            long route = writer.edge("Route");
+            long a = writer.node("Place", "a");
+            long b = writer.node("Place", "b");
+            writer.append(route, a, MemberSpec.PLAIN);
+            writer.append(route, b, MemberSpec.PLAIN);
+            return new long[]{route, a, b};
+        });
+        int side = database.engine().createBranch("side", Branch.MAIN).id();
+        database.write(TxnOptions.defaults().onBranch(side), writer -> {
+            writer.remove(ids[0], ids[1]);
+            writer.append(ids[0], ids[1], MemberSpec.PLAIN);
+            return null;
+        });
+        for (Route route : List.of(Route.SNAPSHOT, Route.FEED)) {
+            assertEquals(List.of(), retrieval().delta(side, OptionalLong.empty(), route), route.name());
+        }
+    }
+
+    @Test
+    void branchesWhoseParentWasMergedStillResolve() {
+        try (Session admin = new Session(database)) {
+            admin.executeAll("""
+                    INSERT NODE Place 'x' AS $x;
+                    INSERT EDGE Visit AS $v;
+                    CREATE BRANCH parent;
+                    USE BRANCH parent;
+                    """);
+            long beforeAdd = database.engine().transactions().current().id();
+            admin.executeAll("""
+                    ADD $x TO $v;
+                    CREATE BRANCH child FROM parent;
+                    USE BRANCH child;
+                    INSERT NODE Place 'y';
+                    USE MAIN;
+                    MERGE BRANCH parent;
+                    """);
+            int child = database.engine().branches().stream().filter(found -> found.name().equals("child")).findFirst().orElseThrow().id();
+            List<Compared> compared = retrieval().compare(child, Branch.MAIN, new Scope.Everything());
+            assertFalse(compared.isEmpty());
+            assertEquals(retrieval().delta(child, OptionalLong.of(beforeAdd), Route.SNAPSHOT), retrieval().delta(child, OptionalLong.of(beforeAdd), Route.FEED));
+            assertTrue(retrieval().delta(child, OptionalLong.of(beforeAdd), Route.FEED).stream().anyMatch(net -> net.key() instanceof Key.Member));
+        }
+    }
+
+    @Test
+    void everyChangeCountsAgainstTheBudget() {
+        int side = database.engine().createBranch("side", Branch.MAIN).id();
+        database.write(TxnOptions.defaults().onBranch(side), writer -> {
+            long visit = writer.edge("Visit");
+            for (int i = 0; i < 50; i++) {
+                writer.add(visit, writer.node("Place", "p" + i), MemberSpec.PLAIN);
+            }
+            return null;
+        });
+        for (Route route : List.of(Route.SNAPSHOT, Route.FEED)) {
+            assertThrows(io.hstore.engine.HStoreException.class,
+                    () -> BranchRetrieval.on(database, Budget.DEFAULT.withRows(20).start()).delta(side, OptionalLong.empty(), route), route.name());
+        }
+        assertThrows(io.hstore.engine.HStoreException.class,
+                () -> BranchRetrieval.on(database, Budget.DEFAULT.withRows(20).start()).survivors(side, new Scope.Everything()));
+    }
+
+    @Test
+    void edgeCasesAreAnsweredOrRefusedClearly() {
+        int side = database.engine().createBranch("side", Branch.MAIN).id();
+        database.write(TxnOptions.defaults().onBranch(side), writer -> writer.node("Place", "only-side"));
+        long sideCommit = database.engine().transactions().current().id();
+        database.write(writer -> writer.node("Place", "only-main"));
+        assertEquals(List.of(), retrieval().compare(side, side, new Scope.Everything()));
+        var future = assertThrows(io.hstore.engine.HStoreException.class,
+                () -> retrieval().delta(side, OptionalLong.of(database.engine().transactions().current().id() + 5), Route.AUTO));
+        assertTrue(future.getMessage().contains("after the current generation"), future.getMessage());
+        var elsewhere = assertThrows(io.hstore.engine.HStoreException.class, () -> retrieval().after(Branch.MAIN, sideCommit, 10));
+        assertTrue(elsewhere.getMessage().contains("not on the history"), elsewhere.getMessage());
+        try (Session admin = new Session(database)) {
+            assertThrows(io.hstore.engine.HStoreException.class, () -> admin.execute("BRANCH AFTER side GENERATION " + sideCommit + " WINDOW -1"));
+            assertEquals(1, admin.execute("NEAREST BRANCH TO side AMONG (main, main) TOP 5").rows().size());
+        }
     }
 
     @Test
