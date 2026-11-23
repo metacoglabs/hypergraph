@@ -343,6 +343,37 @@ public final class Parser {
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
             return new Statement.Members(edge, role, weight, validAt, policy, limit());
         }
+        if (peekWord("SELECT") && peekWordAt(1, "EVIDENCE")) {
+            expect("SELECT");
+            expect("EVIDENCE");
+            expect("FOR");
+            expectSymbol("(");
+            expect("RANK");
+            Statement.Rank query = rank();
+            expectSymbol(")");
+            List<Ref> seeds = new ArrayList<>();
+            if (accept("FROM")) {
+                do {
+                    seeds.add(ref());
+                } while (acceptSymbol(","));
+            }
+            boolean connected = accept("CONNECTED");
+            if (connected && seeds.isEmpty()) {
+                throw HStoreException.invalid("CONNECTED needs seeds given with FROM");
+            }
+            OptionalLong budget = accept("BUDGET") ? OptionalLong.of(longValue()) : OptionalLong.empty();
+            OptionalLong top = accept("TOP") ? OptionalLong.of(longValue()) : OptionalLong.empty();
+            if (budget.isEmpty() && top.isEmpty()) {
+                throw HStoreException.invalid("SELECT EVIDENCE needs TOP, BUDGET or both");
+            }
+            double kappa = accept("KAPPA") ? number().doubleValue() : 0.5;
+            double lambda = accept("LAMBDA") ? number().doubleValue() : 1.0;
+            long candidates = accept("CANDIDATES") ? longValue() : 200;
+            if (candidates < 1 || candidates > 10_000) {
+                throw HStoreException.invalid("CANDIDATES must be between 1 and 10000");
+            }
+            return new Statement.SelectEvidence(query, List.copyOf(seeds), connected, top, budget, kappa, lambda, candidates);
+        }
         if (accept("DIFFUSE")) {
             expect("FROM");
             List<Ast.DiffuseSeed> seeds = new ArrayList<>();
@@ -1390,6 +1421,15 @@ public final class Parser {
 
     private Token peek() {
         return tokens.get(index);
+    }
+
+    private boolean peekWord(String word) {
+        return peek().is(word);
+    }
+
+    private boolean peekWordAt(int ahead, String... words) {
+        Token token = peek(ahead);
+        return java.util.Arrays.stream(words).anyMatch(token::is);
     }
 
     private Token peek(int ahead) {

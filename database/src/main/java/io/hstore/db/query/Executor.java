@@ -28,6 +28,7 @@ import io.hstore.db.query.QueryResult.Cell;
 import io.hstore.db.retrieve.RankQuery;
 import io.hstore.db.retrieve.Ranking;
 import io.hstore.db.retrieve.RoleTimeScorer;
+import io.hstore.db.retrieve.Selection;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.security.Access;
 import io.hstore.db.security.Principal;
@@ -322,6 +323,7 @@ final class Executor {
             case Statement.Rank rank -> read(reader -> rank(reader, rank));
             case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
             case Statement.Diffuse diffuse -> read(reader -> diffuse(reader, diffuse));
+            case Statement.SelectEvidence selection -> read(reader -> selectEvidence(reader, selection));
             case Statement.ExpandFrom expansion -> read(reader -> expandFrom(reader, expansion));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
@@ -662,6 +664,52 @@ final class Executor {
             }
         }
         return map;
+    }
+
+    private QueryResult selectEvidence(Reader reader, Statement.SelectEvidence statement) {
+        Budget.Meter meter = Budget.DEFAULT.start();
+        RankQuery query = rankQuery(reader, statement.query());
+        RoleTimeScorer scorer = new RoleTimeScorer(reader, query, meter);
+        Map<Long, Selection.Candidate> candidates = new LinkedHashMap<>();
+        Map<Long, Long> parents = new HashMap<>();
+        if (!statement.seeds().isEmpty()) {
+            Map<Long, Double> seeds = new LinkedHashMap<>();
+            statement.seeds().forEach(seed -> seeds.put(reader.require(session.resolve(reader, seed)).id(), 1.0));
+            Expansion.Relevance relevance = new Expansion.Relevance() {
+                public double bound(long edge) {
+                    return scorer.bound(edge);
+                }
+
+                public OptionalDouble score(long edge) {
+                    return scorer.score(edge).map(found -> OptionalDouble.of(found.score())).orElse(OptionalDouble.empty());
+                }
+            };
+            Expansion.Result expansion = Expansion.on(reader).run(seeds, new Expansion.Model(Map.of(), Map.of(), Map.of(), OptionalLong.empty(),
+                    0.5, 0.5, 0.1), relevance, (int) statement.candidates(), 0, 100_000, meter);
+            expansion.edges().forEach(found -> parents.put(found.edge(), found.parent()));
+        }
+        List<RoleTimeScorer.EdgeScore> exact = Ranking.of(reader, query).top(meter);
+        List<Long> order = new ArrayList<>();
+        exact.forEach(score -> order.add(score.edge()));
+        parents.keySet().stream().filter(edge -> !order.contains(edge)).forEach(order::add);
+        for (long edge : order) {
+            Optional<RoleTimeScorer.EdgeScore> score = scorer.score(edge);
+            List<Long> members = new ArrayList<>();
+            reader.forEachMemberId(edge, members::add);
+            double[] cover = score.map(RoleTimeScorer.EdgeScore::slotCover).orElse(new double[query.slots().size()]);
+            candidates.put(edge, new Selection.Candidate(edge, score.map(found -> Math.max(0, Math.min(1, found.score()))).orElse(0.0), cover,
+                    Math.max(1, members.size()), members.stream().mapToLong(Long::longValue).toArray(),
+                    parents.getOrDefault(edge, Selection.UNREACHABLE)));
+        }
+        double[] weights = query.slots().stream().mapToDouble(RankQuery.Slot::weight).toArray();
+        Selection.Options options = new Selection.Options((int) Math.min(Integer.MAX_VALUE, statement.top().orElse(Integer.MAX_VALUE)),
+                statement.budget().orElse(Long.MAX_VALUE), statement.kappa(), statement.lambda(), weights, statement.connected());
+        Selection.Outcome outcome = Selection.select(List.copyOf(candidates.values()), options, meter);
+        QueryResult table = QueryResult.table(List.of("edge", "gain", "relevance"), outcome.selected().stream()
+                .map(found -> List.of(atomCell(reader, found.edge()), QueryResult.number(found.gain()), QueryResult.number(found.relevance())))
+                .toList());
+        return new QueryResult(table.columns(), table.rows(), table.message() + "; objective " + outcome.objective() + " of at most " + outcome.bound()
+                + " from " + candidates.size() + " candidates" + (outcome.singleton() ? "; the best single unit beat the greedy set" : ""), table.trace());
     }
 
     private QueryResult diffuse(Reader reader, Statement.Diffuse statement) {

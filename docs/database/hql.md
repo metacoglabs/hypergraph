@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `DIFFUSE`, `EXPAND FROM`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `SELECT EVIDENCE`, `DIFFUSE`, `EXPAND FROM`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -423,6 +423,21 @@ RANK EDGE e:Review
 -- | @14 Review    | 0.9734 | 1       | 1      | 1          | 0.8668 | 1        |
 -- | @16 Review    | 0.8083 | 0.6667  | 0.6667 | 1          | 1      | 0.75     |
 -- | @15 Review    | 0.7333 | 1       | 0.6667 | 0          | 1      | 1        |
+```
+
+### SELECT EVIDENCE
+
+```ebnf
+select_evidence = "SELECT" "EVIDENCE" "FOR" "(" rank ")" [ "FROM" ref { "," ref } ] [ "CONNECTED" ]
+                  ( "BUDGET" integer [ "TOP" integer ] | "TOP" integer ) [ "KAPPA" number ] [ "LAMBDA" number ] [ "CANDIDATES" integer ] ;
+```
+
+Chooses a small set of hyperedges that together answer a `RANK` query, for handing to an agent: at most `TOP`
+hyperedges, at most `BUDGET` members in total, or both. Columns: `edge, gain, relevance`, in the order chosen. See
+[evidence selection](ranking.md#evidence-selection).
+
+```
+SELECT EVIDENCE FOR (RANK EDGE e:Meeting LIKE (@Person:'alice' AS actor, ANY Topic AS subject) TOP 50) FROM @Person:'alice' CONNECTED BUDGET 40;
 ```
 
 ### EXPAND FROM
