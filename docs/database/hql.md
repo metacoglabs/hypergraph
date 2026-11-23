@@ -80,11 +80,11 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `SELECT EVIDENCE`, `DIFFUSE`, `EXPAND FROM`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
-| [Transactions, branches, time](#transactions-branches-and-time-travel) | `BEGIN`, `COMMIT`, `ROLLBACK`, `USE BRANCH`, `USE MAIN`, `CREATE BRANCH`, `DROP BRANCH`, `MERGE BRANCH`, `DIFF`, `AT GENERATION`, `AS OF`, `HISTORY`, `SHOW BRANCHES` |
+| [Transactions, branches, time](#transactions-branches-and-time-travel) | `BEGIN`, `COMMIT`, `ROLLBACK`, `USE BRANCH`, `USE MAIN`, `CREATE BRANCH`, `DROP BRANCH`, `MERGE BRANCH`, `BRANCH DELTA`, `BRANCH SURVIVORS`, `BRANCH AFTER`, `COMPARE BRANCH`, `NEAREST BRANCH`, `DIFF`, `AT GENERATION`, `AS OF`, `HISTORY`, `SHOW BRANCHES` |
 | [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `DROP VIEW`, `VIEW`, `SHOW VIEWS` |
 | [Tenancy](#tenancy-and-users) | `CREATE TENANT`, `ALTER TENANT`, `SHOW TENANTS`, `CREATE USER`, `ALTER USER`, `DROP USER`, `SHOW USERS`, `USE TENANT`, `AUTHENTICATE` |
 | [Session](#session-and-output) | `WHOAMI`, `FORMAT` |
@@ -471,6 +471,51 @@ residual, which bounds the total error. See [diffusion](hora.md#diffusion).
 DIFFUSE FROM @Person:'alice' THROUGH Meeting, Project WEIGHT 2 EXIT (participant 1, observer 0.2) VALID AT 1700000000000 TOP 10 EDGES 5;
 ```
 
+### REFINE
+
+```ebnf
+refine = "REFINE" "FROM" ( ref { "," ref } | "TYPE" identifier )
+         { "THROUGH" identifier [ "AS" identifier { "OR" identifier } ] }
+         "TO" [ identifier ] [ "AS" identifier { "OR" identifier } ] [ "=" ref ]
+         [ "VALID" "AT" additive ] [ "WEIGHT" "BETWEEN" number "AND" number ] [ "DISTINCT" ] "TOP" integer ;
+```
+
+Best paths from root hyperedges down through nested hyperedges to leaf members, scored by the product of membership
+weights (which must lie in `[0, 1]`). Columns: `path, leaf, score`, best first. See
+[hierarchical refinement](hora.md#hierarchical-refinement).
+
+```
+REFINE FROM @50 THROUGH Claim AS subject TO Provider AS provider VALID AT 7 DISTINCT TOP 2;
+-- | @50 > @62 | @10 Provider:'p10' | 0.63 |
+-- | @50 > @62 | @13 Provider:'p13' | 0.42 |
+```
+
+### HYPERMATCH
+
+```ebnf
+hypermatch = "HYPERMATCH" hyperedge { "," hyperedge } [ "WHERE" anchor { "AND" anchor } ]
+             [ "MODE" ( "AUTO" | "HGMATCH" | "MACH" ) ] ( "COUNT" | [ "BINDINGS" ] [ "LIMIT" integer ] ) ;
+hyperedge  = identifier ":" identifier "(" vertex { "," vertex } ")" ;
+vertex     = identifier [ ":" identifier ] ;
+anchor     = identifier "=" ref ;
+```
+
+Finds every occurrence of a pattern of hyperedges. Each query hyperedge names its type and its members; a vertex
+names its type the first time it appears. A match is exact: a query hyperedge with three members only matches a
+stored hyperedge with exactly those three members, and distinct query vertices map to distinct atoms. `WHERE u = @…`
+pins a vertex to an atom. The pattern must be connected and has at most 64 hyperedges and anchors.
+
+Columns: one per query hyperedge, holding the matched hyperedge; with `BINDINGS` also one per vertex, one row per
+vertex assignment. `COUNT` returns the number of hyperedge tuples. `EXPLAIN HYPERMATCH …` shows the mode and matching
+order. How the search works is in [structural matching](structural-matching.md).
+
+```
+HYPERMATCH q0:R(u2:A, u4:B), q1:R(u0:A, u1:C, u2), q2:R(u0, u1, u3:A, u4);
+-- | q0  | q1  | q2  |
+-- | @8  | @10 | @12 |
+-- | @9  | @11 | @13 |
+```
+
 ### TRANSITIONS
 
 ```ebnf
@@ -733,6 +778,24 @@ Session semantics (`Session`):
 - `MERGE BRANCH s` defaults the target to the branch's parent; merging a branch marks it merged and it disappears
   from `SHOW BRANCHES`. `DIFF` lists topology changes only (`created`, `deleted`, `added`, `removed`, `updated`
   members), not property changes.
+- Branch retrieval, for global admins (the grammar is below). `BRANCH DELTA b` lists what `b` changed since its fork
+  (or since `SINCE GENERATION g`): one row per incidence, atom or property, with its value before and after.
+  `BRANCH SURVIVORS b` lists the entries of `b`'s head untouched since the fork. `COMPARE BRANCH b AND c` classifies
+  every entry either branch changed since their common ancestor as `ONLY_LEFT`, `ONLY_RIGHT`, `BOTH_SAME` or
+  `BOTH_DIFFERENT`. `NEAREST BRANCH TO b` ranks other active branches by the number of differing entries. `BRANCH
+  AFTER b GENERATION g` lists later commits on `b` within `WINDOW` generations (default 1,000) that touched an atom
+  commit `g` touched; it shows what came after, not what was caused. How they are answered is in
+  [evidence and time](evidence-and-temporal.md#branch-retrieval).
+
+```ebnf
+branch_delta     = "BRANCH" "DELTA" identifier [ "SINCE" "GENERATION" integer ] [ scope ] [ "LIMIT" integer ] ;
+branch_survivors = "BRANCH" "SURVIVORS" identifier [ scope ] [ "LIMIT" integer ] ;
+branch_after     = "BRANCH" "AFTER" identifier "GENERATION" integer [ "WINDOW" integer ] [ "LIMIT" integer ] ;
+compare_branch   = "COMPARE" "BRANCH" identifier "AND" identifier [ scope ] [ "LIMIT" integer ] ;
+nearest_branch   = "NEAREST" "BRANCH" "TO" identifier [ "AMONG" "(" identifier { "," identifier } ")" ] [ scope ] "TOP" integer ;
+scope            = "SCOPE" ( "INCIDENCES" | "TYPE" identifier | "AROUND" ref ) ;
+```
+
 - `HISTORY LIMIT n` replays the change feed from generation `last - n` (default 20), so it shows the commits among
   the last `n` generations; commits that changed nothing are not in the feed. Columns:
   `generation, txn, time, branch, members, slots`.
