@@ -5,6 +5,7 @@ package io.hstore.engine.page;
 
 import io.hstore.engine.HStoreException;
 
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
@@ -36,6 +37,10 @@ public final class IoTrace {
 
     public void run(Runnable work) {
         ScopedValue.where(CURRENT, this).run(work);
+    }
+
+    public static Optional<IoTrace> current() {
+        return CURRENT.isBound() ? Optional.of(CURRENT.get()) : Optional.empty();
     }
 
     public static void recordHit() {

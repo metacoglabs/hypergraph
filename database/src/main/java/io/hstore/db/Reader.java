@@ -7,6 +7,8 @@ import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertyIndex;
 import io.hstore.db.property.PropertySlots;
+import io.hstore.db.retrieve.Signature;
+import io.hstore.db.retrieve.Signatures;
 import io.hstore.db.schema.Schema;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.security.Access;
@@ -163,6 +165,34 @@ public sealed class Reader permits Writer {
                 .filter(entry -> entry.value().validAt(instant))
                 .mapToLong(Entry::key)
                 .filter(this::owns);
+    }
+
+    public OptionalInt typeOf(long atom) {
+        return view.atom(atom).filter(this::admits).map(record -> OptionalInt.of(record.type())).orElse(OptionalInt.empty());
+    }
+
+    public boolean edgeAtom(long atom) {
+        return view.atom(atom).filter(this::admits).map(record -> record instanceof AtomRecord.EdgeRecord).orElse(false);
+    }
+
+    public long[] signatureEdges(Signature signature) {
+        return Signatures.edges(view, tenant(), signature).toArray();
+    }
+
+    public long signatureCount(Signature signature) {
+        return Signatures.count(view, tenant(), signature);
+    }
+
+    public boolean signatureCollides(Signature signature) {
+        return Signatures.collides(view, tenant(), signature);
+    }
+
+    public Optional<Signature> signatureOf(long edge) {
+        return visible(edge) ? Signatures.of(view, edge) : Optional.empty();
+    }
+
+    public boolean concurrentReads() {
+        return view instanceof Snapshot;
     }
 
     public LongStream validityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {

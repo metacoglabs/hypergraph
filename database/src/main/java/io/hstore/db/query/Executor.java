@@ -23,6 +23,8 @@ import io.hstore.db.query.Ast.Expr;
 import io.hstore.db.query.Ast.MemberClause;
 import io.hstore.db.query.Ast.Statement;
 import io.hstore.db.query.QueryResult.Cell;
+import io.hstore.db.retrieve.HyperMatch;
+import io.hstore.db.retrieve.HyperQuery;
 import io.hstore.db.retrieve.RankQuery;
 import io.hstore.db.retrieve.Ranking;
 import io.hstore.db.retrieve.RoleTimeScorer;
@@ -60,6 +62,7 @@ import io.hstore.engine.txn.Snapshot;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -317,6 +320,9 @@ final class Executor {
             case Statement.SetAlgebra algebra -> algebra.into().isPresent() ? write(writer -> setAlgebra(writer, algebra)) : read(reader -> setAlgebra(reader, algebra));
             case Statement.Rank rank -> read(reader -> rank(reader, rank));
             case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
+            case Statement.StructuralMatch match -> read(reader -> structural(reader, match));
+            case Statement.ExplainStructural(Statement.StructuralMatch match) -> read(reader ->
+                    QueryResult.message(hyperMatch(reader, match).describe(hyperQuery(reader, match))));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -605,6 +611,80 @@ final class Executor {
         QueryResult result = QueryResult.table(match.projections().stream().map(Ast.Projection::alias).toList(), rows);
         return result.withTrace(new QueryResult.Trace(0, reader.generation(), plan.chosen().path().describe(), plan.chosen().rows(),
                 rows.size(), trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
+    }
+
+    private HyperMatch hyperMatch(Reader reader, Statement.StructuralMatch statement) {
+        return HyperMatch.on(reader).withThreads(Math.max(1, Runtime.getRuntime().availableProcessors()))
+                .withMode(statement.mode().map(HyperMatch.Mode::valueOf).orElse(HyperMatch.Mode.AUTO));
+    }
+
+    private HyperQuery hyperQuery(Reader reader, Statement.StructuralMatch statement) {
+        Map<String, String> types = new LinkedHashMap<>();
+        for (Ast.StructuralEdge edge : statement.edges()) {
+            for (Ast.StructuralVertex vertex : edge.vertices()) {
+                types.putIfAbsent(vertex.name(), null);
+                vertex.type().ifPresent(type -> {
+                    String known = types.get(vertex.name());
+                    if (known != null && !known.equals(type)) {
+                        throw HStoreException.invalid("vertex " + vertex.name() + " is declared as " + known + " and " + type);
+                    }
+                    types.put(vertex.name(), type);
+                });
+            }
+        }
+        HyperQuery.Builder builder = HyperQuery.builder();
+        types.forEach((name, type) -> {
+            if (type == null) {
+                throw HStoreException.invalid("vertex " + name + " needs a type the first time it is named, as " + name + ":Type");
+            }
+            builder.vertex(name, reader.requireReadableType(type).id());
+        });
+        for (Ast.StructuralEdge edge : statement.edges()) {
+            TypeDef type = reader.requireReadableType(edge.type());
+            if (!type.kind().isEdge()) {
+                throw HStoreException.invalid(edge.type() + " is not a hyperedge type");
+            }
+            builder.edge(edge.name(), type.id(), edge.vertices().stream().map(Ast.StructuralVertex::name).toArray(String[]::new));
+        }
+        for (Ast.StructuralAnchor anchor : statement.anchors()) {
+            builder.anchor(anchor.vertex(), reader.require(session.resolve(reader, anchor.atom())).id());
+        }
+        return builder.build();
+    }
+
+    private QueryResult structural(Reader reader, Statement.StructuralMatch statement) {
+        long started = System.nanoTime();
+        HyperQuery query = hyperQuery(reader, statement);
+        HyperMatch match = hyperMatch(reader, statement);
+        IoTrace trace = IoTrace.withBudget(database().queryPageBudget(session.principal()));
+        if (statement.count()) {
+            long count = trace.call(() -> match.count(query, Budget.DEFAULT.start()));
+            return QueryResult.table(List.of("count"), List.of(List.of(QueryResult.number(count))));
+        }
+        long limit = statement.limit().orElse(Long.MAX_VALUE);
+        List<long[]> tuples = trace.call(() -> match.tuples(query, Budget.DEFAULT.start(), limit));
+        List<String> columns = new ArrayList<>(query.edges().stream().map(HyperQuery.Edge::name).toList());
+        if (statement.bindings()) {
+            columns.addAll(query.vertices().stream().map(HyperQuery.Vertex::name).toList());
+        }
+        List<List<Cell>> rows = new ArrayList<>();
+        for (long[] tuple : tuples) {
+            List<Cell> edges = Arrays.stream(tuple).mapToObj(edge -> atomCell(reader, edge)).toList();
+            if (!statement.bindings()) {
+                rows.add(edges);
+                continue;
+            }
+            for (long[] binding : match.bindings(query, tuple)) {
+                if (rows.size() >= limit) {
+                    break;
+                }
+                List<Cell> row = new ArrayList<>(edges);
+                Arrays.stream(binding).forEach(vertex -> row.add(atomCell(reader, vertex)));
+                rows.add(row);
+            }
+        }
+        return QueryResult.table(columns, rows).withTrace(new QueryResult.Trace(0, reader.generation(), match.describe(query), Double.NaN, rows.size(),
+                trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
     }
 
     private QueryResult transitions(Reader reader, Statement.Transitions statement) {
