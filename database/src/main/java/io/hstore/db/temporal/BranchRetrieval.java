@@ -132,6 +132,19 @@ public final class BranchRetrieval {
         return found;
     }
 
+    public String plan(int branch) {
+        AncestorPoint from = fork(branch);
+        try (Snapshot base = snapshotOrNull(from)) {
+            if (base != null) {
+                return "snapshot of the fork point at generation " + from.generation() + " compared with the branch head";
+            }
+        }
+        if (database.engine().feed().covers(from.generation())) {
+            return "change-feed fold from the fork point at generation " + from.generation() + " (its snapshot is no longer retained)";
+        }
+        return "fails: the fork point at generation " + from.generation() + " is neither retained nor covered by the change feed";
+    }
+
     public AncestorPoint ancestor(int left, int right) {
         Map<Integer, Branch> branches = branches();
         Map<Integer, Long> leftPath = new LinkedHashMap<>();
@@ -468,6 +481,16 @@ public final class BranchRetrieval {
                         case MemberChange.Updated(long _, Incidence was, Incidence now, long _, long _) -> new Net(key, Optional.of(was), Optional.of(now));
                     });
                 });
+            }
+        });
+        TreeDiff.diff(before.scan(EngineSlots.CATALOG), after.scan(EngineSlots.CATALOG)).forEach(delta -> {
+            if (delta instanceof TreeDiff.Delta.Changed<AtomRecord>(long atom, AtomRecord was, AtomRecord now)) {
+                AtomValue old = AtomValue.of(was);
+                AtomValue changed = AtomValue.of(now);
+                if (!old.equals(changed)) {
+                    meter.consume(1);
+                    result.put(new Key.Atom(atom), new Net(new Key.Atom(atom), Optional.of(old), Optional.of(changed)));
+                }
             }
         });
         Tree<PropertyBag> leftBags = before.scan(PropertySlots.PROPERTIES);

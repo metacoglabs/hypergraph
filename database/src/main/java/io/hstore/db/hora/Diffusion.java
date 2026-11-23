@@ -202,7 +202,7 @@ public final class Diffusion {
     }
 
     private long edgeCost(long edge) {
-        return edgeCosts.computeIfAbsent(edge, id -> Math.max(1, reader.cardinality(id)));
+        return edgeCosts.computeIfAbsent(edge, id -> Math.max(1, reader.memberIds(id).filter(reader::owns).count()));
     }
 
     private void addAtom(long atom, double mass) {
@@ -300,7 +300,7 @@ public final class Diffusion {
         double total = 0;
         for (var entry : reader.edge(edge).members().stream().toList()) {
             Incidence incidence = entry.value();
-            if (model.validAt().isPresent() && !incidence.validAt(model.validAt().getAsLong())) {
+            if (!owns(incidence.member()) || model.validAt().isPresent() && !incidence.validAt(model.validAt().getAsLong())) {
                 continue;
             }
             double weight = Math.max(incidence.weightValue(), 0) * roleFactor(model.roles().entry(), incidence.roleSet());

@@ -77,7 +77,7 @@ public sealed class Reader permits Writer {
         return principal.tenant();
     }
 
-    private boolean onlyDefaultTenant() {
+    public boolean onlyDefaultTenant() {
         Boolean known = onlyDefaultTenant;
         if (known == null) {
             try (View.Unrecorded _ = view.unrecorded()) {
@@ -211,11 +211,11 @@ public sealed class Reader permits Writer {
     }
 
     public LongStream validityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
-        return ValidityIndex.edges(view, tenant(), edgeType, side, lowExclusive, highInclusive);
+        return readable(edgeType) ? ValidityIndex.edges(view, tenant(), edgeType, side, lowExclusive, highInclusive) : LongStream.empty();
     }
 
     public long countValidityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
-        return ValidityIndex.count(view, tenant(), edgeType, side, lowExclusive, highInclusive);
+        return readable(edgeType) ? ValidityIndex.count(view, tenant(), edgeType, side, lowExclusive, highInclusive) : 0;
     }
 
     public Tree<IndexValues.Incident> incidentPostings(long atom) {

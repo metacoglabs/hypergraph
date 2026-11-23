@@ -272,6 +272,22 @@ class ExpansionTest {
     }
 
     @Test
+    void tiesAtTheCutGoToTheSmallerId() {
+        long[] ids = database.write(writer -> {
+            long a = writer.node("Person", "tie-a");
+            long b = writer.node("Person", "tie-b");
+            long small = writer.edge("Meeting");
+            writer.add(small, b, MemberSpec.PLAIN);
+            long large = writer.edge("Meeting");
+            writer.add(large, a, MemberSpec.PLAIN);
+            return new long[]{a, b, small, large};
+        });
+        Result result = database.read(reader -> Expansion.on(reader).run(Map.of(ids[0], 1.0, ids[1], 1.0), Model.plain(), Relevance.NONE, 1, 0, 1_000,
+                Budget.UNBOUNDED.start()));
+        assertEquals(List.of(ids[2]), result.edges().stream().map(Accepted::edge).toList());
+    }
+
+    @Test
     void truncatedFrontiersStayExactAboveTheDroppedBound() {
         RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(53L);
         randomGraph(random);

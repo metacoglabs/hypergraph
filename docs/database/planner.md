@@ -319,6 +319,30 @@ generation 190, pages read 1, cache hits 49, 1.674708 ms
 In JSON format the same data is the `trace` object (`generation, plan, estimatedRows, pagesRead, cacheHits,
 elapsedMicros`), which is how [HStore Studio](../operations/studio.md) renders its plan tab.
 
+## Retrieval statements
+
+The other retrieval statements each answer one question, and the statement fixes which. The planner never swaps an
+exact match for a ranking or a walk because one looks cheaper; it only chooses among plans that return the same
+answer, and it makes that choice by a rule on exact counts where an estimate would be a guess. `EXPLAIN` on any of
+them prints the family, the kind of answer, and the decision with its reason.
+
+| Statement | Answer | Plan choice |
+|---|---|---|
+| `RANK` | exact top `k` | candidates from the `MATCH` access paths; scoring in order of an upper bound |
+| `HYPERMATCH` | exact | candidate filter when the signature counts sum to at most 2^20, the pattern has more than two hyperedges and no anchor; otherwise on the fly. A pattern whose first scan alone exceeds the row budget is refused before it starts |
+| `TRANSITIONS` | exact, or fails | snapshot diff when both generations are retained, else the change feed when it covers the window, else an error; a snapshot released during the diff falls back to the feed |
+| `BRANCH …` | exact, or fails | the fork point's snapshot when retained, else the change feed; refused under `AT GENERATION` and `AS OF` |
+| `REFINE` | exact top `k` | bottom-up from a leaf anchor when there is one, else top-down best-first |
+| `DIFFUSE` | approximate with an L1 certificate | `READS r` sets `epsilon = (2 - alpha) / (alpha · r)`, so the work stays within `r` incidence reads |
+| `EXPAND FROM` | exact best-first under its chain value | stops on `TOP`, the budget or an empty frontier, and reports a bound for the rest |
+| `SELECT EVIDENCE` | greedy with a certified bound | the guarantee follows from the limits given |
+| `MOTIFS`, `MOTIF` | exact, or an estimate with a standard error | exact within half of the row budget, else sampling with a draw count fixed by a pilot run |
+| `SIMILAR TO` | exact up to five hyperedges per side, intervals above | lower bound first, then hyperedge maps with an optimal node assignment |
+| `FUSE` | ranks merged by reciprocal rank fusion | none: every part runs as written |
+
+A budget never turns an exact answer into an approximate one: exact statements fail with
+`ABORTED_RESOURCE_LIMIT` when they run out, and the approximate ones report how far they are from exact.
+
 ## Limitations
 
 - Negations never drive an access path; they are evaluated as residual filters.

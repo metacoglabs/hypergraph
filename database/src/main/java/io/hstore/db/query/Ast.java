@@ -366,6 +366,12 @@ public final class Ast {
         record ExplainStructural(StructuralMatch match) implements Statement {
         }
 
+        record ExplainRetrieval(Statement statement) implements Statement {
+        }
+
+        record Fuse(List<Statement> statements, OptionalLong limit) implements Statement {
+        }
+
         record Explain(Match match) implements Statement {
         }
 

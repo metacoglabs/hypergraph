@@ -303,19 +303,19 @@ public final class Expansion {
                         continue;
                     }
                     Hyperedge hyperedge = reader.edge(edge);
-                    double weightMax = hyperedge.summary().isEmpty() ? 0 : Weight.toDouble(hyperedge.summary().weightMax());
-                    if (weightMax <= 0) {
-                        continue;
-                    }
-                    long cardinality = Math.max(1, reader.cardinality(edge));
-                    if (!meter.tryConsume(cardinality)) {
+                    if (!meter.tryConsume(Math.max(1, hyperedge.summary().count()))) {
                         pending = value;
                         stop = Stop.BUDGET;
                         break;
                     }
-                    double damping = Math.pow(cardinality, -model.edgeDamping());
-                    for (var entry : hyperedge.members().stream().toList()) {
-                        Incidence incidence = entry.value();
+                    List<Incidence> visible = hyperedge.members().stream().map(io.hstore.engine.tree.Entry::value)
+                            .filter(incidence -> reader.owns(incidence.member())).toList();
+                    double weightMax = visible.stream().mapToDouble(Incidence::weightValue).max().orElse(0);
+                    if (weightMax <= 0) {
+                        continue;
+                    }
+                    double damping = Math.pow(Math.max(1, visible.size()), -model.edgeDamping());
+                    for (Incidence incidence : visible) {
                         if (settled.contains(incidence.member())
                                 || (model.validAt().isPresent() && !incidence.validAt(model.validAt().getAsLong()))) {
                             continue;

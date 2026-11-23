@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `MOTIFS`, `MOTIF`, `SIMILAR TO`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `FUSE`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `MOTIFS`, `MOTIF`, `SIMILAR TO`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -356,8 +356,14 @@ MATCH NODE p:Person WHERE p.name = 'Bob' RETURN json(p, '$.address.zip');   -- 1
 ### EXPLAIN
 
 ```ebnf
-explain = "EXPLAIN" match ;
+explain = "EXPLAIN" ( match | hypermatch | retrieval ) ;
+retrieval = rank | transitions | branch_delta | branch_survivors | compare_branch | nearest_branch | branch_after
+          | refine | diffuse | expand_from | select_evidence | motifs | motif_profile | motif | similar | fuse ;
 ```
+
+For a retrieval statement, `EXPLAIN` returns its family, whether its answer is exact, approximate with a
+certificate, or may fail, the plan chosen with the counts behind it, and the rule that chose it. Nothing is executed.
+See [planner](planner.md#retrieval-statements).
 
 Returns the plan as a message: the chosen access path with estimated rows and cost, the residual `Verify`
 filters in evaluation order, `Project`, `Sort`, `Limit`, and every rejected candidate. See
@@ -444,7 +450,7 @@ SELECT EVIDENCE FOR (RANK EDGE e:Meeting LIKE (@Person:'alice' AS actor, ANY Top
 
 ```ebnf
 expand_from = "EXPAND" "FROM" ref [ "WEIGHT" number ] { "," ref [ "WEIGHT" number ] }
-              [ "THROUGH" identifier [ "FACTOR" number ] { "," identifier [ "FACTOR" number ] } ]
+              [ "THROUGH" identifier [ ( "FACTOR" | "WEIGHT" ) number ] { "," identifier [ ( "FACTOR" | "WEIGHT" ) number ] } ]
               [ "EXIT" factors ] [ "ENTER" factors ] [ "VALID" "AT" additive ]
               [ "TOWARDS" "(" rank ")" [ "GATE" number ] ] [ "DAMPING" number number ] [ "MIN" number ] "TOP" integer ;
 ```
@@ -457,9 +463,9 @@ Seed weights lie in `(0, 1]`, factors and `MIN` in `[0, 1]`. Columns: `edge, val
 
 ```ebnf
 diffuse = "DIFFUSE" "FROM" ref [ "WEIGHT" number ] { "," ref [ "WEIGHT" number ] }
-          [ "THROUGH" identifier [ "WEIGHT" number ] { "," identifier [ "WEIGHT" number ] } ]
+          [ "THROUGH" identifier [ ( "WEIGHT" | "FACTOR" ) number ] { "," identifier [ ( "WEIGHT" | "FACTOR" ) number ] } ]
           [ "EXIT" factors ] [ "ENTER" factors ] [ "VALID" "AT" additive ] [ "POLICY" policy ]
-          [ "ALPHA" number ] [ "EPSILON" number ] "TOP" integer [ "EDGES" integer ] ;
+          [ "ALPHA" number ] [ "EPSILON" number | "READS" integer ] "TOP" integer [ "EDGES" integer ] ;
 factors = "(" identifier number { "," identifier number } ")" ;
 ```
 
@@ -474,9 +480,9 @@ DIFFUSE FROM @Person:'alice' THROUGH Meeting, Project WEIGHT 2 EXIT (participant
 ### REFINE
 
 ```ebnf
-refine = "REFINE" "FROM" ( ref { "," ref } | "TYPE" identifier )
-         { "THROUGH" identifier [ "AS" identifier { "OR" identifier } ] }
-         "TO" [ identifier ] [ "AS" identifier { "OR" identifier } ] [ "=" ref ]
+refine = "REFINE" "FROM" ( ref { "," ref } | "TYPE" type_name )
+         { "THROUGH" type_name [ "AS" identifier { "OR" identifier } ] }
+         "TO" [ type_name ] [ "AS" identifier { "OR" identifier } ] [ "=" ref ]
          [ "VALID" "AT" additive ] [ "WEIGHT" "BETWEEN" number "AND" number ] [ "DISTINCT" ] "TOP" integer ;
 ```
 
@@ -486,8 +492,8 @@ weights (which must lie in `[0, 1]`). Columns: `path, leaf, score`, best first. 
 
 ```
 REFINE FROM @50 THROUGH Claim AS subject TO Provider AS provider VALID AT 7 DISTINCT TOP 2;
--- | @50 > @62 | @10 Provider:'p10' | 0.63 |
--- | @50 > @62 | @13 Provider:'p13' | 0.42 |
+-- | @50 Investigation > @62 Claim | @10 Provider:'p10' | 0.63 |
+-- | @50 Investigation > @62 Claim | @13 Provider:'p13' | 0.42 |
 ```
 
 ### HYPERMATCH
@@ -522,7 +528,7 @@ HYPERMATCH q0:R(u2:A, u4:B), q1:R(u0:A, u1:C, u2), q2:R(u0, u1, u3:A, u4);
 motifs        = "MOTIFS" [ "OF" identifier ] [ "EXACT" | "SAMPLE" integer | "AUTO" ] [ "SEED" integer ] ;
 motif_profile = "MOTIF" "PROFILE" ref [ "OF" identifier ] ;
 motif         = "MOTIF" integer [ "TYPES" "(" slot_type "," slot_type "," slot_type ")" ] [ "AROUND" ref ]
-                { "REGION" string "HAS" ( ref | "ANY" [ identifier ] ) [ "ROLES" "(" roles { "," roles } ")" ] }
+                { "REGION" string "HAS" ( ref | "ANY" [ identifier | string ] ) [ "ROLES" "(" roles { "," roles } ")" ] }
                 [ "NESTED" ] [ "RANK" "BY" ( "COMMON" | "DISJOINT" | "INDEPENDENT" ) ] [ "LIMIT" integer ] ;
 slot_type     = identifier | "ANY" ;
 roles         = "ANY" | identifier { "OR" identifier } ;
@@ -568,6 +574,23 @@ equals `upper`. See [similarity search](similarity.md).
 SIMILAR TO (q1:Meeting(a:Person, b:Person, d:Doc), q2:Meeting(b, c:Person)) IN CHILDREN OF Episode TOP 5;
 SIMILAR TO CHILDREN OF @Episode:'2024-03' IN CHILDREN OF Episode WITHIN 3;
 SIMILAR TO EDGES (@41, @42) IDENTITY IN AROUND @41 SIZE 3 TOP 10;
+```
+
+### FUSE
+
+```ebnf
+fuse = "FUSE" "(" part ")" "," "(" part ")" { "," "(" part ")" } [ "LIMIT" integer ] ;
+part = match | rank | hypermatch | refine | diffuse | expand_from | select_evidence | motif | similar | transitions ;
+```
+
+Runs two to eight retrieval statements on the same snapshot and merges their answers by reciprocal rank fusion:
+an item's score is the sum of `1 / (60 + rank)` over the lists it appears in. An item is the first atom of a row.
+Columns: `item, score, sources, exact`; `sources` lists each statement and the item's rank in it, and `exact` says
+whether one of the lists that returned it is exact. Scores of different statements are never added directly. When a
+`LIMIT` leaves out items that an exact list returned, the message says how many.
+
+```
+FUSE (RANK EDGE e:Meeting LIKE (@Person:'alice' AS host) TOP 20), (DIFFUSE FROM @Person:'alice' TOP 20) LIMIT 10;
 ```
 
 ### TRANSITIONS
@@ -900,6 +923,8 @@ show_views   = "SHOW" "VIEWS" ;
 
 `VIEW v KEY k` columns: `key, value, staleness`; `VIEW v` columns: `key, value`; `SHOW VIEWS` columns:
 `id, name, kind, refresh, parameter, generation`. See [views](views-signals-stats.md#materialized-views).
+
+`type_name` is an identifier, or a string for a type whose name is also a keyword (`REFINE FROM TYPE 'Top' …`).
 
 `OVERLAP TOP k` takes k from 1 to 1000, and `ACTIVITY BUCKET` takes 1 ms up to 366 days; anything else is rejected
 when the view is created. A tenant can hold 32 views at most. `DROP VIEW` removes the view and all of its cells, and
