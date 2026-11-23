@@ -410,6 +410,27 @@ class SecurityTest {
     }
 
     @Test
+    void hypermatchStaysInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;"
+                    + "INSERT NODE Patient 'b2' {mrn: 'B-2'} AS $q; INSERT EDGE Encounter MEMBERS ($q AS patient);");
+            long globexPatient = bob.variables().get("p");
+            long acmeEdge = alice.variables().get("e");
+            assertEquals("1", cell(alice.execute("HYPERMATCH e:Encounter(p:Patient) COUNT")));
+            assertEquals("2", cell(bob.execute("HYPERMATCH e:Encounter(p:Patient) COUNT")));
+            assertTrue(alice.execute("HYPERMATCH e:Encounter(p:Patient) BINDINGS").rows().getFirst().getFirst().render()
+                    .startsWith("@" + acmeEdge));
+            assertThrows(HStoreException.class, () -> alice.execute("HYPERMATCH e:Encounter(p:Patient) WHERE p = @" + globexPatient));
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> Incidence.of(globexPatient));
+                return null;
+            });
+            assertEquals("0", cell(alice.execute("HYPERMATCH e:Encounter(p:Patient, q:Patient) COUNT")));
+        }
+    }
+
+    @Test
     void roleFilteredMatchesStayInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
