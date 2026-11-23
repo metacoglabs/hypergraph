@@ -158,7 +158,9 @@ class RefinementTest {
         for (long root : spec.roots()) {
             walk(reader, spec, root, 0, 1.0, new ArrayList<>(List.of(root)), all);
         }
-        all.sort(Comparator.comparingDouble(Result::score).reversed());
+        all.sort(Comparator.comparingDouble(Result::score).reversed()
+                .thenComparing(result -> result.path().stream().mapToLong(Long::longValue).toArray(), java.util.Arrays::compare)
+                .thenComparingLong(Result::leaf));
         List<Result> out = new ArrayList<>();
         Set<Long> seen = new HashSet<>();
         for (Result result : all) {
@@ -230,9 +232,52 @@ class RefinementTest {
             List<Result> expected = database.read(reader -> bruteForce(reader, query));
             List<Result> got = database.read(reader -> Refinement.on(reader).run(query, Budget.DEFAULT.start()).results());
             assertSameAnswer(expected, got, query.k(), query.toString());
+            assertEquals(expected.subList(0, Math.min(query.k(), expected.size())), got, "ties in " + query);
             checked += expected.isEmpty() ? 0 : 1;
         }
         assertTrue(checked > 100, "only " + checked + " queries had results");
+    }
+
+    @Test
+    void tiedPathsComeInTheSameOrderInBothDirections() {
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(33L);
+        Graph graph = database.write(writer -> {
+            List<Long> providers = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                providers.add(writer.node("Provider", "tied" + i));
+            }
+            List<Long> claims = new ArrayList<>();
+            for (int i = 0; i < 12; i++) {
+                long claim = writer.edge("Claim");
+                for (int m = 0; m < 1 + random.nextInt(3); m++) {
+                    writer.add(claim, providers.get(random.nextInt(providers.size())), MemberSpec.roles("provider"));
+                }
+                claims.add(claim);
+            }
+            List<Long> roots = new ArrayList<>();
+            for (int i = 0; i < 4; i++) {
+                long root = writer.edge("Investigation");
+                for (int m = 0; m < 2 + random.nextInt(4); m++) {
+                    writer.add(root, claims.get(random.nextInt(claims.size())), MemberSpec.roles("subject"));
+                }
+                roots.add(root);
+            }
+            return new Graph(roots, claims);
+        });
+        List<Long> providers = database.read(reader -> reader.atomsOfType(type("Provider")).boxed().toList());
+        for (Mode mode : Mode.values()) {
+            Spec all = new Spec(graph.roots(), OptionalInt.empty(), List.of(new Level(type("Claim"), List.of("subject"))),
+                    new LeafSpec(OptionalInt.of(type("Provider")), List.of("provider"), OptionalLong.empty()), OptionalLong.empty(), 0, 1, mode, 40);
+            List<Result> expected = database.read(reader -> bruteForce(reader, all));
+            List<Result> got = database.read(reader -> Refinement.on(reader).run(all, Budget.DEFAULT.start()).results());
+            assertEquals(expected.subList(0, Math.min(40, expected.size())), got, mode.name());
+            for (long provider : providers) {
+                Spec anchored = new Spec(graph.roots(), OptionalInt.empty(), List.of(new Level(type("Claim"), List.of("subject"))),
+                        new LeafSpec(OptionalInt.empty(), List.of("provider"), OptionalLong.of(provider)), OptionalLong.empty(), 0, 1, mode, 40);
+                List<Result> fromLeaf = database.read(reader -> Refinement.on(reader).run(anchored, Budget.DEFAULT.start()).results());
+                assertEquals(got.stream().filter(result -> result.leaf() == provider).toList(), fromLeaf, mode + " leaf " + provider);
+            }
+        }
     }
 
     @Test

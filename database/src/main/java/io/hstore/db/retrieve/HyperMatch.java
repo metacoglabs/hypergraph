@@ -19,11 +19,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.RecursiveTask;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -31,7 +33,7 @@ public final class HyperMatch {
 
     public enum Mode { AUTO, HGMATCH, MACH }
 
-    static final long CHS_CANDIDATE_LIMIT = 1L << 20;
+    public static final long CHS_CANDIDATE_LIMIT = 1L << 20;
     static final int BATCH = 64;
     private static final ForkJoinPool POOL = new ForkJoinPool(Math.max(1, Runtime.getRuntime().availableProcessors()));
     private static final Comparator<long[]> TUPLE_ORDER = Arrays::compare;
@@ -91,7 +93,15 @@ public final class HyperMatch {
     }
 
     public long count(HyperQuery query, Budget.Meter meter) {
-        return count(prepare(query, meter), meter);
+        return count(prepareCount(query, meter), meter);
+    }
+
+    public Plan prepareCount(HyperQuery query, Budget.Meter meter) {
+        Plan plan = plan(query, Budget.UNBOUNDED.start(), false);
+        if (plan.steps().length == 1 && !plan.steps()[0].isAnchor() && reader.onlyDefaultTenant() && !reader.signatureCollides(plan.steps()[0].signature())) {
+            return plan;
+        }
+        return prepare(query, meter);
     }
 
     public long count(Plan plan, Budget.Meter meter) {
@@ -109,7 +119,20 @@ public final class HyperMatch {
     }
 
     public Plan prepare(HyperQuery query, Budget.Meter meter) {
+        Plan plan = plan(query, Budget.UNBOUNDED.start(), false);
+        long first = firstScan(plan).orElse(0);
+        if (first > meter.budget().maxRows()) {
+            throw HStoreException.limit("the first scan alone reads " + first + " hyperedges, more than the budget of " + meter.budget().maxRows()
+                    + " rows; anchor a vertex or narrow a type");
+        }
         return plan(query, meter, true);
+    }
+
+    public OptionalLong firstScan(Plan plan) {
+        if (plan.steps().length == 0 || plan.steps()[0].isAnchor()) {
+            return OptionalLong.empty();
+        }
+        return OptionalLong.of(reader.signatureCount(plan.steps()[0].signature()));
     }
 
     public String explain(HyperQuery query) {
@@ -328,6 +351,13 @@ public final class HyperMatch {
     }
 
     private Result run(Plan plan, Budget.Meter meter, boolean collect) {
+        if (!collect && plan.steps().length == 1 && !plan.steps()[0].isAnchor() && reader.onlyDefaultTenant()
+                && !reader.signatureCollides(plan.steps()[0].signature())) {
+            meter.consume(1);
+            Result result = new Result();
+            result.count = reader.signatureCount(plan.steps()[0].signature());
+            return result;
+        }
         List<Embedding> roots = new ArrayList<>();
         for (long candidate : candidates(plan, 0, Embedding.EMPTY)) {
             meter.consume(1);
@@ -341,12 +371,12 @@ public final class HyperMatch {
         if (threads == 1 || !reader.concurrentReads() || roots.size() <= BATCH) {
             Result result = new Result();
             for (Embedding root : roots) {
-                search(plan, 1, root, meter, result, collect);
+                search(plan, 1, root, meter, result, collect, new AtomicBoolean());
             }
             return result;
         }
         Optional<IoTrace> trace = IoTrace.current();
-        return POOL.invoke(new SearchTask(plan, roots, 0, roots.size(), meter, collect, trace));
+        return POOL.invoke(new SearchTask(plan, roots, 0, roots.size(), meter, collect, trace, new AtomicBoolean()));
     }
 
     private final class SearchTask extends RecursiveTask<Result> {
@@ -357,8 +387,10 @@ public final class HyperMatch {
         private final Budget.Meter meter;
         private final boolean collect;
         private final Optional<IoTrace> trace;
+        private final AtomicBoolean stop;
 
-        SearchTask(Plan plan, List<Embedding> roots, int low, int high, Budget.Meter meter, boolean collect, Optional<IoTrace> trace) {
+        SearchTask(Plan plan, List<Embedding> roots, int low, int high, Budget.Meter meter, boolean collect, Optional<IoTrace> trace,
+                   AtomicBoolean stop) {
             this.plan = plan;
             this.roots = roots;
             this.low = low;
@@ -366,14 +398,15 @@ public final class HyperMatch {
             this.meter = meter;
             this.collect = collect;
             this.trace = trace;
+            this.stop = stop;
         }
 
         @Override
         protected Result compute() {
             if (high - low > BATCH) {
                 int middle = (low + high) >>> 1;
-                SearchTask left = new SearchTask(plan, roots, low, middle, meter, collect, trace);
-                SearchTask right = new SearchTask(plan, roots, middle, high, meter, collect, trace);
+                SearchTask left = new SearchTask(plan, roots, low, middle, meter, collect, trace, stop);
+                SearchTask right = new SearchTask(plan, roots, middle, high, meter, collect, trace, stop);
                 left.fork();
                 Result result = right.compute();
                 result.merge(left.join());
@@ -381,25 +414,33 @@ public final class HyperMatch {
             }
             Supplier<Result> work = () -> {
                 Result result = new Result();
-                for (int i = low; i < high; i++) {
-                    search(plan, 1, roots.get(i), meter, result, collect);
+                for (int i = low; i < high && !stop.get(); i++) {
+                    search(plan, 1, roots.get(i), meter, result, collect, stop);
                 }
                 return result;
             };
-            return trace.map(found -> found.call(work)).orElseGet(work);
+            try {
+                return trace.map(found -> found.call(work)).orElseGet(work);
+            } catch (RuntimeException failed) {
+                stop.set(true);
+                throw failed;
+            }
         }
     }
 
-    private void search(Plan plan, int k, Embedding embedding, Budget.Meter meter, Result result, boolean collect) {
+    private void search(Plan plan, int k, Embedding embedding, Budget.Meter meter, Result result, boolean collect, AtomicBoolean stop) {
         if (k == plan.steps().length) {
             sink(plan, embedding, result, collect);
             return;
         }
         for (long candidate : candidates(plan, k, embedding)) {
+            if (stop.get()) {
+                return;
+            }
             meter.consume(1);
             Optional<Embedding> next = extend(plan, k, embedding, candidate);
             if (next.isPresent()) {
-                search(plan, k + 1, next.get(), meter, result, collect);
+                search(plan, k + 1, next.get(), meter, result, collect, stop);
             }
         }
     }

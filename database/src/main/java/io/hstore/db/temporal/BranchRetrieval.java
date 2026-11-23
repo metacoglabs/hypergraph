@@ -132,6 +132,34 @@ public final class BranchRetrieval {
         return found;
     }
 
+    public String plan(int branch) {
+        return plan(branch, OptionalLong.empty());
+    }
+
+    public String plan(int branch, OptionalLong since) {
+        AncestorPoint from = since.isPresent()
+                ? new AncestorPoint(Lineage.of(database, branch).branchAt(since.getAsLong()), since.getAsLong())
+                : fork(branch);
+        return route(from, since.isPresent() ? "generation " + since.getAsLong() : "the fork point at generation " + from.generation());
+    }
+
+    public String planCompare(int left, int right) {
+        AncestorPoint point = ancestor(left, right);
+        return "both branches from their common ancestor: " + route(point, "the ancestor at generation " + point.generation());
+    }
+
+    private String route(AncestorPoint from, String name) {
+        try (Snapshot base = snapshotOrNull(from)) {
+            if (base != null) {
+                return "snapshot of " + name + " compared with the branch head";
+            }
+        }
+        if (database.engine().feed().covers(from.generation())) {
+            return "change-feed fold from " + name + " (its snapshot is no longer retained)";
+        }
+        return "fails: " + name + " is neither retained nor covered by the change feed";
+    }
+
     public AncestorPoint ancestor(int left, int right) {
         Map<Integer, Branch> branches = branches();
         Map<Integer, Long> leftPath = new LinkedHashMap<>();
@@ -468,6 +496,16 @@ public final class BranchRetrieval {
                         case MemberChange.Updated(long _, Incidence was, Incidence now, long _, long _) -> new Net(key, Optional.of(was), Optional.of(now));
                     });
                 });
+            }
+        });
+        TreeDiff.diff(before.scan(EngineSlots.CATALOG), after.scan(EngineSlots.CATALOG)).forEach(delta -> {
+            if (delta instanceof TreeDiff.Delta.Changed<AtomRecord>(long atom, AtomRecord was, AtomRecord now)) {
+                AtomValue old = AtomValue.of(was);
+                AtomValue changed = AtomValue.of(now);
+                if (!old.equals(changed)) {
+                    meter.consume(1);
+                    result.put(new Key.Atom(atom), new Net(new Key.Atom(atom), Optional.of(old), Optional.of(changed)));
+                }
             }
         });
         Tree<PropertyBag> leftBags = before.scan(PropertySlots.PROPERTIES);

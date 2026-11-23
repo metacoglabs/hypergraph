@@ -56,8 +56,8 @@ sample standard error of the `n` scaled counts. Draws are repeatable: the same `
 estimate as long as the row budget, not the time limit, is what ends the draws. `MOTIFS` without a mode tries the
 exact count with half of the statement's row budget. If that runs out, a short pilot run with a different seed fixes
 the number of draws, and the sample then makes exactly that many, so the choice between exact and sampled and the
-number of draws depend on the data and the seed but not on how busy the machine is. Each part also has a five minute
-safety limit.
+number of draws depend on the data and the seed but not on how busy the machine is, unless a phase reaches its
+ten-second safety limit, in which case the statement takes at most thirty seconds in all.
 
 The paper's more accurate estimator, MoCHy-A+, samples overlapping pairs uniformly. HStore has no structure that
 lists them, so it is not offered.

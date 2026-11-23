@@ -546,6 +546,43 @@ class SecurityTest {
     }
 
     @Test
+    void expansionValuesIgnoreOtherTenantsMembers() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
+                    INSERT NODE Patient 'p2' {mrn: 'A-2'} AS $q;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient WEIGHT 0.5, $q AS patient WEIGHT 0.5) AS $e1;
+                    INSERT EDGE Encounter MEMBERS ($q AS patient) AS $e2;
+                    """);
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p;");
+            long acmeEdge = alice.variables().get("e1");
+            long globexPatient = bob.variables().get("p");
+            String query = "EXPAND FROM @" + alice.variables().get("p") + " TOP 5";
+            String before = alice.execute(query).rows().toString();
+            String walk = "DIFFUSE FROM @" + alice.variables().get("p") + " EPSILON 0.2 TOP 10 EDGES 5";
+            String walked = alice.execute(walk).rows().toString();
+            int patient = database.engine().dictionary().roleSet(List.of("patient"));
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> new Incidence(globexPatient, patient, Weight.ONE,
+                        Long.MIN_VALUE, Long.MAX_VALUE, 0, 0));
+                return null;
+            });
+            assertEquals(before, alice.execute(query).rows().toString());
+            assertEquals(walked, alice.execute(walk).rows().toString());
+        }
+    }
+
+    @Test
+    void explainingABranchStatementNeedsAnEngineWideAdmin() {
+        database.engine().createBranch("probe", io.hstore.engine.catalog.Branch.MAIN);
+        try (Session alice = login("alice", "s3cret-pass")) {
+            assertThrows(HStoreException.class, () -> alice.execute("BRANCH DELTA probe"));
+            assertThrows(HStoreException.class, () -> alice.execute("EXPLAIN BRANCH DELTA probe"));
+            assertThrows(HStoreException.class, () -> alice.execute("EXPLAIN NEAREST BRANCH TO probe TOP 1"));
+        }
+    }
+
+    @Test
     void roleFilteredMatchesStayInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");

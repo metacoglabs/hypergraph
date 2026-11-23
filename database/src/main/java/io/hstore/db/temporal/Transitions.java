@@ -54,7 +54,16 @@ public final class Transitions {
         Map<Change, Span> spans = new HashMap<>();
         Map<Long, AtomRecord> records = new HashMap<>();
         if (chosen == Route.DIFF) {
-            diff(database, lineage, after, through, spans, records, meter);
+            try {
+                diff(database, reader, lineage, after, through, spans, records, meter);
+            } catch (HStoreException.InvalidSchema released) {
+                if (route == Route.DIFF || retained(database, lineage, after) && retained(database, lineage, through)) {
+                    throw released;
+                }
+                spans.clear();
+                records.clear();
+                fold(database, reader, lineage, after, through, spans, records, meter.budget().start());
+            }
         } else {
             fold(database, reader, lineage, after, through, spans, records, meter);
         }
@@ -89,10 +98,12 @@ public final class Transitions {
             return OptionalLong.of(retained.get());
         }
         OptionalLong found = OptionalLong.empty();
+        Budget.Meter meter = Budget.DEFAULT.start();
         try (var events = database.engine().feed().replay(0)) {
             var iterator = events.iterator();
             while (iterator.hasNext()) {
                 CommitEvent event = iterator.next();
+                meter.consume(1);
                 if (event.wallTime() > wallTime) {
                     break;
                 }
@@ -100,6 +111,20 @@ public final class Transitions {
             }
         }
         return found;
+    }
+
+    public static String plan(Reader reader, long after, long through) {
+        HypergraphDatabase database = reader.database();
+        Lineage lineage = Lineage.of(database, reader.engineView().branch());
+        if (retained(database, lineage, after) && retained(database, lineage, through)) {
+            return "snapshot diff of generations " + after + " and " + through + " (both snapshots are retained)";
+        }
+        ChangeFeed feed = database.engine().feed();
+        if (feed.covers(after)) {
+            return "change-feed fold from generation " + after + " to " + through + " (a snapshot is no longer retained; the feed starts at "
+                    + feed.firstGeneration() + ")";
+        }
+        return "fails: generation " + after + " is neither retained nor covered by the change feed, which starts at " + feed.firstGeneration();
     }
 
     private static boolean retained(HypergraphDatabase database, Lineage lineage, long generation) {
@@ -110,13 +135,24 @@ public final class Transitions {
         }
     }
 
-    private static void diff(HypergraphDatabase database, Lineage lineage, long after, long through,
+    private static void diff(HypergraphDatabase database, Reader reader, Lineage lineage, long after, long through,
                              Map<Change, Span> spans, Map<Long, AtomRecord> records, Budget.Meter meter) {
         try (Snapshot before = database.engine().snapshotAt(after, lineage.branchAt(after));
              Snapshot now = database.engine().snapshotAt(through, lineage.branchAt(through))) {
             Reader left = database.reader(before);
             Reader right = database.reader(now);
             Temporal.diff(left, right).forEach(delta -> {
+                Optional<AtomRecord> owner = switch (delta) {
+                    case Temporal.Delta.AtomCreated(long _, AtomRecord created) -> Optional.of(created);
+                    case Temporal.Delta.AtomDeleted(long _, AtomRecord deleted) -> Optional.of(deleted);
+                    case Temporal.Delta.MembersChanged(long edge, List<MemberChange> _) -> right.engineView().atom(edge).or(() -> left.engineView().atom(edge));
+                };
+                if (owner.isEmpty() || !reader.admits(owner.get())) {
+                    if (!meter.tryConsume(0)) {
+                        throw HStoreException.limit("the snapshot diff passed its time limit");
+                    }
+                    return;
+                }
                 meter.consume(1);
                 switch (delta) {
                     case Temporal.Delta.AtomCreated(long atom, AtomRecord created) -> {
@@ -161,7 +197,7 @@ public final class Transitions {
             throw HStoreException.invalid("generation " + after + " precedes the change feed (first retained " + feed.firstGeneration() + ")");
         }
         database.engine().transactions().awaitPublished(reader.generation());
-        FeedFold.Folded folded = FeedFold.fold(feed.replay(after), lineage, through, meter);
+        FeedFold.Folded folded = FeedFold.fold(feed.replay(after), lineage, through, meter, reader::admits, id -> reader.engineView().atom(id));
         spans.putAll(folded.changes());
         records.putAll(folded.records());
         TreeSet<Long> unknown = new TreeSet<>();
@@ -174,8 +210,8 @@ public final class Transitions {
         unknown.removeIf(records::containsKey);
         unknown.removeIf(atom -> reader.engineView().atom(atom).map(found -> records.put(atom, found) == null).orElse(false));
         if (!unknown.isEmpty() && through < reader.generation()) {
-            records.putAll(FeedFold.fold(feed.replay(through), Lineage.of(database, reader.engineView().branch()),
-                    reader.generation(), meter).records());
+            records.putAll(FeedFold.records(feed.replay(through), Lineage.of(database, reader.engineView().branch()),
+                    reader.generation(), meter, unknown));
         }
     }
 }

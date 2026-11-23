@@ -103,6 +103,11 @@ public final class Parser {
         if (inner instanceof Statement.Authenticate) {
             throw HStoreException.invalid("AUTHENTICATE cannot run at a past generation");
         }
+        Statement core = inner instanceof Statement.ExplainRetrieval(Statement explained) ? explained : inner;
+        if (core instanceof Statement.BranchDelta || core instanceof Statement.BranchSurvivors || core instanceof Statement.CompareBranches
+                || core instanceof Statement.NearestBranch || core instanceof Statement.BranchAfter) {
+            throw HStoreException.invalid("branch statements compare branch heads, so AT GENERATION and AS OF do not apply to them");
+        }
         return inner;
     }
 
@@ -128,11 +133,19 @@ public final class Parser {
         }
         if (accept("AT")) {
             expect("GENERATION");
-            return new Statement.At(longValue(), historical(statement()));
+            long generation = longValue();
+            if (peekWord("AT") || peekWord("AS")) {
+                throw HStoreException.invalid("a statement takes one AT GENERATION or AS OF");
+            }
+            return new Statement.At(generation, historical(statement()));
         }
         if (peek().is("AS") && peek(1).is("OF")) {
             index += 2;
-            return new Statement.AsOf(instant(), historical(statement()));
+            long instant = instant();
+            if (peekWord("AT") || peekWord("AS")) {
+                throw HStoreException.invalid("a statement takes one AT GENERATION or AS OF");
+            }
+            return new Statement.AsOf(instant, historical(statement()));
         }
         if (accept("CREATE")) {
             return create();
@@ -329,8 +342,38 @@ public final class Parser {
             if (accept("HYPERMATCH")) {
                 return new Statement.ExplainStructural(structuralMatch());
             }
-            expect("MATCH");
-            return new Statement.Explain(match());
+            if (accept("MATCH")) {
+                return new Statement.Explain(match());
+            }
+            if (peekWord("EXPLAIN") || peekWord("AT") || peekWord("AS")) {
+                throw HStoreException.invalid("EXPLAIN takes one retrieval statement");
+            }
+            Statement inner = statement();
+            if (!explainable(inner)) {
+                throw HStoreException.invalid("EXPLAIN takes MATCH, HYPERMATCH or a retrieval statement such as RANK, TRANSITIONS, "
+                        + "BRANCH DELTA, REFINE, DIFFUSE, EXPAND FROM, SELECT EVIDENCE, MOTIFS, MOTIF, SIMILAR TO or FUSE");
+            }
+            return new Statement.ExplainRetrieval(inner);
+        }
+        if (accept("FUSE")) {
+            List<Statement> parts = new ArrayList<>();
+            do {
+                expectSymbol("(");
+                if (peekWord("FUSE") || peekWord("EXPLAIN") || peekWord("AT") || peekWord("AS")) {
+                    throw HStoreException.invalid("FUSE parts are single retrieval statements");
+                }
+                Statement part = statement();
+                if (!fusable(part)) {
+                    throw HStoreException.invalid("FUSE takes MATCH, RANK, HYPERMATCH, REFINE, DIFFUSE, EXPAND FROM, SELECT EVIDENCE, MOTIF, "
+                            + "SIMILAR TO or TRANSITIONS");
+                }
+                expectSymbol(")");
+                parts.add(part);
+            } while (acceptSymbol(","));
+            if (parts.size() < 2 || parts.size() > 8) {
+                throw HStoreException.invalid("FUSE combines between 2 and 8 statements");
+            }
+            return new Statement.Fuse(List.copyOf(parts), limit());
         }
         if (accept("HYPERMATCH")) {
             return structuralMatch();
@@ -429,7 +472,7 @@ public final class Parser {
             if (accept("THROUGH")) {
                 do {
                     String type = identifier();
-                    through.add(new Ast.DiffuseType(type, accept("WEIGHT") ? number().doubleValue() : 1.0));
+                    through.add(new Ast.DiffuseType(type, accept("WEIGHT") || accept("FACTOR") ? number().doubleValue() : 1.0));
                 } while (acceptSymbol(","));
             }
             List<Ast.RoleFactor> exit = accept("EXIT") ? roleFactors() : List.of();
@@ -437,21 +480,32 @@ public final class Parser {
             Optional<Expr> validAt = validAt();
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
             double alpha = accept("ALPHA") ? number().doubleValue() : 0.2;
-            double epsilon = accept("EPSILON") ? number().doubleValue() : 1e-4;
+            double epsilon = 1e-4;
+            OptionalLong reads = OptionalLong.empty();
+            if (accept("EPSILON")) {
+                epsilon = number().doubleValue();
+            } else if (accept("READS")) {
+                long budget = longValue();
+                if (budget < 1 || !(alpha > 0 && alpha < 1)) {
+                    throw HStoreException.invalid("READS needs at least one read and ALPHA between 0 and 1");
+                }
+                epsilon = (2 - alpha) / (alpha * budget);
+                reads = OptionalLong.of(budget);
+            }
             expect("TOP");
             long top = longValue();
             long edges = accept("EDGES") ? longValue() : 0;
             if (top < 0 || top > 10_000 || edges < 0 || edges > 10_000) {
                 throw HStoreException.invalid("TOP and EDGES must be between 0 and 10000");
             }
-            return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, top, edges);
+            return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, reads, top, edges);
         }
         if (accept("REFINE")) {
             expect("FROM");
             List<Ref> roots = new ArrayList<>();
             Optional<String> rootType = Optional.empty();
             if (accept("TYPE")) {
-                rootType = Optional.of(identifier());
+                rootType = Optional.of(identifierOrString());
             } else {
                 do {
                     roots.add(ref());
@@ -459,14 +513,15 @@ public final class Parser {
             }
             List<Ast.RefineLevel> levels = new ArrayList<>();
             while (accept("THROUGH")) {
-                levels.add(new Ast.RefineLevel(identifier(), refineRoles()));
-                if (levels.size() > 16) {
-                    throw HStoreException.invalid("REFINE goes through at most 16 levels");
+                levels.add(new Ast.RefineLevel(identifierOrString(), refineRoles()));
+                if (levels.size() + 1 > io.hstore.db.hora.Budget.DEFAULT.maxDepth()) {
+                    throw HStoreException.invalid("REFINE goes through at most " + (io.hstore.db.hora.Budget.DEFAULT.maxDepth() - 1) + " levels");
                 }
             }
             expect("TO");
-            Optional<String> leafType = peek().kind() == Token.Kind.WORD && !peek().is("AS") && !peek().is("VALID") && !peek().is("WEIGHT")
-                    && !peek().is("DISTINCT") && !peek().is("TOP") ? Optional.of(identifier()) : Optional.empty();
+            Optional<String> leafType = peek().kind() == Token.Kind.STRING
+                    || peek().kind() == Token.Kind.WORD && !peek().is("AS") && !peek().is("VALID") && !peek().is("WEIGHT")
+                    && !peek().is("DISTINCT") && !peek().is("TOP") ? Optional.of(identifierOrString()) : Optional.empty();
             List<String> leafRoles = refineRoles();
             Optional<Ref> anchor = acceptSymbol("=") ? Optional.of(ref()) : Optional.empty();
             Optional<Expr> validAt = validAt();
@@ -1464,7 +1519,7 @@ public final class Parser {
         if (accept("THROUGH")) {
             do {
                 String type = identifier();
-                through.add(new Ast.DiffuseType(type, accept("FACTOR") ? number().doubleValue() : 1.0));
+                through.add(new Ast.DiffuseType(type, accept("FACTOR") || accept("WEIGHT") ? number().doubleValue() : 1.0));
             } while (acceptSymbol(","));
         }
         List<Ast.RoleFactor> exit = accept("EXIT") ? roleFactors() : List.of();
@@ -1587,6 +1642,22 @@ public final class Parser {
         return accept("GENERATION") ? new Ast.Instant.Generation(longValue()) : new Ast.Instant.Time(parseInstant(string()));
     }
 
+    private static boolean fusable(Statement statement) {
+        return switch (statement) {
+            case Statement.Query _, Statement.Rank _, Statement.StructuralMatch _, Statement.Refine _, Statement.Diffuse _, Statement.ExpandFrom _,
+                 Statement.SelectEvidence _, Statement.MotifMatch _, Statement.Similar _, Statement.Transitions _ -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean explainable(Statement statement) {
+        return fusable(statement) || switch (statement) {
+            case Statement.BranchDelta _, Statement.BranchSurvivors _, Statement.CompareBranches _, Statement.NearestBranch _,
+                 Statement.BranchAfter _, Statement.Motifs _, Statement.MotifProfile _, Statement.Fuse _ -> true;
+            default -> false;
+        };
+    }
+
     private Statement.Similar similar() {
         expect("TO");
         List<Ast.StructuralEdge> pattern = List.of();
@@ -1689,7 +1760,9 @@ public final class Parser {
             Optional<Ref> member = Optional.empty();
             Optional<String> memberType = Optional.empty();
             if (accept("ANY")) {
-                if (peek().kind() == Token.Kind.WORD && !peekWordAt(0, "ROLES", "REGION", "NESTED", "RANK", "LIMIT", "AROUND")) {
+                if (peek().kind() == Token.Kind.STRING) {
+                    memberType = Optional.of(string());
+                } else if (peek().kind() == Token.Kind.WORD && !peekWordAt(0, "ROLES", "REGION", "NESTED", "RANK", "LIMIT", "AROUND")) {
                     memberType = Optional.of(identifier());
                 }
             } else {

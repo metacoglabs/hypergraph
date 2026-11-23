@@ -373,6 +373,24 @@ class BranchRetrievalTest {
     }
 
     @Test
+    void aChangedAtomRecordIsAChangeOnBothRoutes() {
+        long atom = database.write(writer -> writer.node("Place", "before"));
+        int side = database.engine().createBranch("renamed", Branch.MAIN).id();
+        database.write(TxnOptions.defaults().onBranch(side), writer -> {
+            writer.transaction().updateAtom(atom, record -> {
+                AtomRecord.NodeRecord node = (AtomRecord.NodeRecord) record;
+                return new AtomRecord.NodeRecord(node.type(), "after", node.dataRef(), node.embeddingRef(), node.flags(), node.tenant(), node.isolation());
+            });
+            return null;
+        });
+        for (Route route : List.of(Route.SNAPSHOT, Route.FEED)) {
+            List<BranchRetrieval.Net> delta = retrieval().delta(side, OptionalLong.empty(), route);
+            assertEquals(List.of(new BranchRetrieval.Key.Atom(atom)), delta.stream().map(BranchRetrieval.Net::key).toList(), route.name());
+            assertEquals("after", ((BranchRetrieval.AtomValue) delta.getFirst().after().orElseThrow()).canonicalKey(), route.name());
+        }
+    }
+
+    @Test
     void movingAMemberOfAnOrderedEdgeIsNotAChangeOnEitherRoute() {
         long[] ids = database.write(writer -> {
             long route = writer.edge("Route");
