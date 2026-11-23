@@ -62,9 +62,12 @@ Every section is indexed for BM25 when it is written, in the same transaction, s
 committed data and can be read at any retained generation or branch. `Reader.searchText(query, options)` and
 `SEARCH TEXT` rank sections; the code is `memory/Tokenizer.java` and `memory/TextIndex.java`.
 
-Text is normalised with NFKD, accents are dropped and letters are lower-cased. A term is a run of letters and digits.
-Runs joined by `.`, `-` or `_` are indexed both separately and as one term, so `Reader.retrieve` gives `reader`,
-`retrieve` and `reader.retrieve`. Terms are cut at 64 characters. The heading line belongs to its section's text.
+Text is normalised with NFKD and lower-cased; accents are dropped from Latin and Greek letters only, so `naïve`
+matches `naive` while combining marks in other scripts stay part of their word. A term is a run of letters, digits
+and combining marks. Runs joined by `.`, `-` or `_` are indexed both separately and as one term, so `Reader.retrieve`
+gives `reader`, `retrieve` and `reader.retrieve`. Chinese, Japanese, Thai, Lao, Khmer and Burmese text has no spaces
+between words, so it is indexed as overlapping pairs of characters. Terms are cut at 64 characters. The heading line
+belongs to its section's text.
 
 The score of a section is the sum over the query's terms of
 `idf · tf · (k1 + 1) / (tf + k1 · (1 − b + b · length / average length))`, with `k1 = 1.2`, `b = 0.75` and
@@ -74,19 +77,31 @@ once per repetition. These statistics are kept per tenant, so one tenant's writi
 scores. Results the user may not read are removed after scoring, and ties go to the smaller section id.
 
 Postings are keyed by a 64-bit hash of tenant and term and carry a further 32-bit fingerprint of the term, which is
-checked on every posting.
+checked on every posting. Each term has two posting lists: one for every revision and one for the sections of latest
+revisions, which moves when a node gets a new revision. A search without `HISTORY` reads only the second list, so its
+cost does not grow with the number of old revisions. Each posting read counts against the statement's row budget.
+
+Because `N` and `df` count every section of the tenant, a user limited by type grants can, by watching the score of a
+section they may read, learn roughly how many sections they may not read contain a term.
 
 ## Vectors
 
 `Writer.vector(owner, view, model, version, vector)` and `EMBED … VIEW` store a vector record for any atom the user may
 change, or for a revision or section of such a node. An owner can hold several views (`people`, `decisions`,
-`content`, …) and several models; storing the same view and model again replaces the vector. Views are 1 to 64
+`content`, …) and several models. The record's id is derived from owner, view and model, so storing the same view
+and model again replaces the vector, and two transactions storing it at once conflict instead of leaving two. A
+replaced vector's bytes stay in the payload files, because older generations and branches may still read them, but
+they no longer count against the tenant's quota; deleting the owner gives them back too. Views are 1 to 64
 letters, digits or `_ . : / -`. Each model keeps one HNSW index of vector records, beside the per-atom index used by
 `SIMILAR TO`, persisted and caught up from the change feed in the same way. `Reader.nearestVectors` searches it and
-falls back to an exact scan inside a transaction or on a branch.
+falls back to an exact scan inside a transaction or on a branch. Vectors of revisions and sections are only returned
+for a node's latest revision unless `HISTORY` is given, so unchanged sections of old revisions do not crowd the
+results. Every vector examined counts against the statement's row budget.
 
 `REVISE … EMBED` encodes every section with the configured encoder and stores it as the section's `content` view.
-Deleting an atom drops its vectors; purging a node erases the vectors of the node, its revisions and its sections.
+Deleting an atom drops its vectors; purging a node erases the vectors of the node, its revisions and its sections,
+including versions still in the history window. `MERGE BRANCH` copies the vectors of the revisions and sections it
+copies, and drops the vectors of atoms the branch deleted.
 
 ## Fusion
 

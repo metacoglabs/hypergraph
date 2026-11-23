@@ -1721,7 +1721,7 @@ final class Executor {
             model = nearest.model().orElseThrow();
         }
         return table(List.of("owner", "view", "distance", "vector"), reader.nearestVectors(model, query, nearest.top(), nearest.view(),
-                SemanticPlane.Consistency.FRESH).stream().map(hit -> List.of(atomCell(reader, hit.owner()), QueryResult.text(hit.view()),
+                nearest.history(), SemanticPlane.Consistency.FRESH, budget().start()).stream().map(hit -> List.of(atomCell(reader, hit.owner()), QueryResult.text(hit.view()),
                 QueryResult.number(hit.distance()), QueryResult.number(hit.vector()))));
     }
 

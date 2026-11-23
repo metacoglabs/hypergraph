@@ -9,6 +9,7 @@ import io.hstore.db.memory.DocumentHead;
 import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.MemorySlots;
 import io.hstore.db.memory.Revision;
+import io.hstore.db.memory.VectorRecord;
 import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertySlots;
@@ -205,12 +206,19 @@ public final class BranchMerge {
             for (Revision revision : Documents.revisions(head, types, found.tenant(), document)) {
                 if (txn.get(MemorySlots.REVISIONS, revision.id()).isEmpty()) {
                     txn.put(MemorySlots.REVISIONS, revision.id(), revision);
-                    Documents.sections(head, types, found.tenant(), revision)
-                            .forEach(section -> txn.put(MemorySlots.SECTIONS, section.id(), section));
+                    copyVectors(txn, head, revision.id());
+                    Documents.sections(head, types, found.tenant(), revision).forEach(section -> {
+                        txn.put(MemorySlots.SECTIONS, section.id(), section);
+                        copyVectors(txn, head, section.id());
+                    });
                 }
             }
             txn.put(MemorySlots.DOCUMENTS, document, found);
         }));
+    }
+
+    private static void copyVectors(Transaction txn, View head, long owner) {
+        VectorRecord.ofOwner(head, owner).forEach(record -> txn.put(VectorRecord.VECTORS, record.id(), record));
     }
 
     private static int phase(Temporal.Delta delta) {
@@ -237,6 +245,7 @@ public final class BranchMerge {
                 }
                 case Temporal.Delta.AtomDeleted(long atom, var _) -> {
                     if (txn.exists(atom) && !skipped.contains(new Conflict("deleted-while-modified", atom, 0))) {
+                        VectorRecord.ofOwner(txn, atom).forEach(record -> txn.delete(VectorRecord.VECTORS, record.id()));
                         txn.delete(PropertySlots.PROPERTIES, atom);
                         txn.delete(atom);
                         deleted++;

@@ -3,6 +3,7 @@
 
 package io.hstore.db.semantic;
 
+import io.hstore.db.hora.Budget;
 import io.hstore.db.memory.VectorRecord;
 import io.hstore.db.payload.PayloadStore;
 import io.hstore.engine.Dictionary;
@@ -30,6 +31,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -40,6 +42,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 import java.util.function.LongPredicate;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -278,15 +281,22 @@ public final class SemanticPlane implements AutoCloseable {
     }
 
     public List<VectorRecord.Hit> nearestVectors(View view, int model, float[] query, int k, Consistency consistency,
-                                                 Predicate<VectorRecord> admit) {
+                                                 Predicate<VectorRecord> admit, Budget.Meter meter) {
         Comparator<VectorRecord.Hit> order = Comparator.comparingDouble(VectorRecord.Hit::distance).thenComparingLong(VectorRecord.Hit::vector);
+        Map<Long, Optional<VectorRecord.Hit>> seen = new HashMap<>();
+        Function<VectorRecord, Optional<VectorRecord.Hit>> score = record -> seen.computeIfAbsent(record.id(), _ -> {
+            meter.consume(1);
+            if (record.model() != model || record.dimensions() != query.length || !record.indexed() || !admit.test(record)) {
+                return Optional.empty();
+            }
+            try {
+                return Optional.of(new VectorRecord.Hit(record.id(), record.owner(), record.view(), distance(record.payload(), query)));
+            } catch (HStoreException unreadable) {
+                return Optional.empty();
+            }
+        });
         if (view instanceof Transaction || view.branch() != Branch.MAIN || !awaitIndexed(view.generation(), consistency)) {
-            return view.scan(VectorRecord.VECTORS).values()
-                    .filter(record -> record.model() == model && record.dimensions() == query.length && record.indexed() && admit.test(record))
-                    .map(record -> new VectorRecord.Hit(record.id(), record.owner(), record.view(), distance(record.payload(), query)))
-                    .sorted(order)
-                    .limit(k)
-                    .toList();
+            return view.scan(VectorRecord.VECTORS).values().map(score).flatMap(Optional::stream).sorted(order).limit(k).toList();
         }
         HnswIndex index = vectorIndexes.get(model);
         if (index == null) {
@@ -296,8 +306,8 @@ public final class SemanticPlane implements AutoCloseable {
         for (int candidates = Math.max(k * 4, 32); ; candidates *= 4) {
             List<VectorRecord.Hit> hits = index.nearest(query, candidates, candidates * 2).stream()
                     .flatMap(neighbor -> view.get(VectorRecord.VECTORS, neighbor.id()).stream())
-                    .filter(record -> record.model() == model && record.dimensions() == query.length && record.indexed() && admit.test(record))
-                    .map(record -> new VectorRecord.Hit(record.id(), record.owner(), record.view(), distance(record.payload(), query)))
+                    .map(score)
+                    .flatMap(Optional::stream)
                     .sorted(order)
                     .limit(k)
                     .toList();

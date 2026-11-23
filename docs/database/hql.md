@@ -793,7 +793,7 @@ search_text  = "SEARCH" "TEXT" string [ "IN" type_name { "," type_name } ] [ "HI
 embed_view   = "EMBED" ref "VIEW" string ( "TEXT" string | "VECTOR" "[" number { "," number } "]" "MODEL" ( identifier | string ) ) ;
 vectors_of   = "VECTORS" "OF" ref ;
 nearest      = "NEAREST" "VECTORS" "TO" ( string | "[" number { "," number } "]" "MODEL" ( identifier | string ) )
-               [ "VIEW" string ] [ "TOP" integer ] ;
+               [ "VIEW" string ] [ "HISTORY" ] [ "TOP" integer ] ;
 instant      = integer | string ;
 ```
 
@@ -821,7 +821,8 @@ parts, so they rank above texts that only contain the parts.
 `EMBED … VIEW` stores a vector under a named view of an atom, encoding `TEXT` with the configured encoder or taking
 the given `VECTOR`. An atom holds any number of views, one vector per view and model; storing a view again replaces
 it. `REVISE … EMBED` stores a `content` vector for every section. `VECTORS OF` lists an atom's vectors and
-`NEAREST VECTORS TO` searches them, optionally in one view, returning `owner, view, distance, vector`.
+`NEAREST VECTORS TO` searches them, optionally in one view, returning `owner, view, distance, vector`; vectors of
+older revisions' sections are left out unless `HISTORY` is given.
 See [memory](memory.md).
 
 ```sql

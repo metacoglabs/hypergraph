@@ -352,7 +352,7 @@ public final class Ast {
         record VectorsOf(Ref owner) implements Statement {
         }
 
-        record NearestVectors(Optional<String> text, Optional<float[]> vector, Optional<String> model, Optional<String> view, int top)
+        record NearestVectors(Optional<String> text, Optional<float[]> vector, Optional<String> model, Optional<String> view, boolean history, int top)
                 implements Statement {
         }
 

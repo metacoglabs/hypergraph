@@ -7,6 +7,8 @@ import io.hstore.db.hora.Budget;
 import io.hstore.db.payload.PayloadStore;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.catalog.SlotChange;
+import io.hstore.engine.index.IndexValues;
+import io.hstore.engine.index.IndexValues.Marker;
 import io.hstore.engine.index.PostingIndex;
 import io.hstore.engine.index.Postings;
 import io.hstore.engine.tree.EntryMeasure;
@@ -27,7 +29,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -102,7 +103,9 @@ public final class TextIndex {
     public static final Slot<Postings<Posting>> INDEX = Slot.derived(62, "text-index", POSTINGS.schema());
     public static final Slot<Stat> STATS = Slot.derived(63, "text-stats", new TreeSchema<>(119, "text-stats", FingerprintMode.SET, STAT_CODEC,
             EntryMeasure.keyed(stat -> Hashing.of(stat.sections(), stat.tokens(), stat.currentSections(), stat.currentTokens()))));
-    public static final List<Slot<?>> SLOTS = List.of(INDEX, STATS);
+    static final PostingIndex<Marker> REVISION_INDEX = PostingIndex.of(133, 134, "revision-sections", IndexValues.MARKER, _ -> 1, 16);
+    public static final Slot<Postings<Marker>> REVISION_SECTIONS = Slot.derived(71, "revision-sections", REVISION_INDEX.schema());
+    public static final List<Slot<?>> SLOTS = List.of(INDEX, STATS, REVISION_SECTIONS);
 
     private TextIndex() {
     }
@@ -123,26 +126,47 @@ public final class TextIndex {
         return view.get(STATS, totalKey(tenant)).orElse(Stat.ZERO);
     }
 
-    public static Derivation indexing(Supplier<PayloadStore> payloads) {
+    public static Indexing indexing(Supplier<PayloadStore> payloads) {
         return new Indexing(payloads);
     }
 
-    private static final class Indexing implements Derivation {
+    static long currentKey(long termKey) {
+        return Hashing.of(termKey, 0x43555252L);
+    }
+
+    public static final class Indexing implements Derivation {
 
         private static final long CACHE_BYTES = 32L << 20;
+        private static final int CACHE_TERMS = 8192;
+
+        private record Span(long payload, int start, int end) {
+        }
+
+        private record Terms(Map<String, Integer> counts, int length) {
+        }
 
         private final Supplier<PayloadStore> payloads;
-        private final Map<Long, byte[]> recent = new ConcurrentHashMap<>();
+        private final LinkedHashMap<Long, byte[]> bytes = new LinkedHashMap<>(16, 0.75f, true);
+        private final LinkedHashMap<Span, Terms> terms = new LinkedHashMap<>(16, 0.75f, true);
+        private long cachedBytes;
 
         Indexing(Supplier<PayloadStore> payloads) {
             this.payloads = payloads;
         }
 
+        public synchronized void forget(long payload) {
+            byte[] dropped = bytes.remove(payload);
+            if (dropped != null) {
+                cachedBytes -= dropped.length;
+            }
+            terms.keySet().removeIf(span -> span.payload() == payload);
+        }
+
         @Override
         public void onSlot(SlotChange<?> change, Workspace workspace) {
             if (change.slot() == MemorySlots.SECTIONS) {
-                change.before().map(Section.class::cast).ifPresent(section -> apply(workspace, section, -1));
-                change.after().map(Section.class::cast).ifPresent(section -> apply(workspace, section, 1));
+                change.before().map(Section.class::cast).ifPresent(section -> remove(workspace, section));
+                change.after().map(Section.class::cast).ifPresent(section -> add(workspace, section));
             } else if (change.slot() == MemorySlots.DOCUMENTS) {
                 Optional<DocumentHead> before = change.before().map(DocumentHead.class::cast);
                 Optional<DocumentHead> after = change.after().map(DocumentHead.class::cast);
@@ -152,31 +176,74 @@ public final class TextIndex {
                     return;
                 }
                 int tenant = after.or(() -> before).orElseThrow().tenant();
+                if (was != 0) {
+                    sectionsOf(workspace, was).forEach(section -> postCurrent(workspace, section, false));
+                }
+                if (now != 0) {
+                    sectionsOf(workspace, now).forEach(section -> postCurrent(workspace, section, true));
+                }
                 Stat leaving = was == 0 ? Stat.ZERO : workspace.get(STATS, was).orElse(Stat.ZERO);
                 Stat arriving = now == 0 ? Stat.ZERO : workspace.get(STATS, now).orElse(Stat.ZERO);
                 adjust(workspace, totalKey(tenant), stat -> stat.shift(arriving.sections() - leaving.sections(), arriving.tokens() - leaving.tokens()));
             }
         }
 
-        private void apply(Workspace workspace, Section section, int sign) {
-            Optional<List<String>> tokens = text(workspace, section).map(Tokenizer::tokens);
-            long length = sign > 0 ? tokens.map(List::size).orElse(0)
-                    : workspace.get(STATS, section.id()).map(Stat::tokens).orElse((long) tokens.map(List::size).orElse(0));
-            tokens.ifPresent(found -> {
-                Map<String, Integer> counts = new LinkedHashMap<>();
-                found.forEach(term -> counts.merge(term, 1, Integer::sum));
-                counts.forEach((term, tf) -> {
-                    long key = termKey(section.tenant(), term);
-                    workspace.replace(INDEX, sign > 0
-                            ? POSTINGS.add(workspace.tree(INDEX), workspace.scope(), key, section.id(), new Posting(tf, fingerprint(term)))
-                            : POSTINGS.remove(workspace.tree(INDEX), workspace.scope(), key, section.id()));
-                });
+        private static List<Section> sectionsOf(Workspace workspace, long revision) {
+            return REVISION_INDEX.stream(workspace.tree(REVISION_SECTIONS), revision)
+                    .flatMap(entry -> workspace.get(MemorySlots.SECTIONS, entry.key()).stream())
+                    .toList();
+        }
+
+        private static boolean current(Workspace workspace, Section section) {
+            return workspace.get(MemorySlots.DOCUMENTS, section.document()).map(head -> head.latest() == section.revision()).orElse(false);
+        }
+
+        private void add(Workspace workspace, Section section) {
+            Optional<Terms> found = terms(workspace, section);
+            long length = found.map(Terms::length).orElse(0);
+            found.ifPresent(counted -> post(workspace, section, counted, INDEX_ALL, true));
+            workspace.replace(REVISION_SECTIONS, REVISION_INDEX.add(workspace.tree(REVISION_SECTIONS), workspace.scope(), section.revision(), section.id(),
+                    Marker.PRESENT));
+            workspace.write(STATS, section.id(), _ -> Optional.of(new Stat(1, length, 0, 0)));
+            adjust(workspace, section.revision(), stat -> stat.plus(1, length, false));
+            boolean current = current(workspace, section);
+            if (current) {
+                found.ifPresent(counted -> post(workspace, section, counted, INDEX_CURRENT, true));
+            }
+            adjust(workspace, totalKey(section.tenant()), stat -> stat.plus(1, length, current));
+        }
+
+        private void remove(Workspace workspace, Section section) {
+            Optional<Terms> found = terms(workspace, section);
+            long length = workspace.get(STATS, section.id()).map(Stat::tokens).orElse((long) found.map(Terms::length).orElse(0));
+            boolean current = current(workspace, section);
+            found.ifPresent(counted -> {
+                post(workspace, section, counted, INDEX_ALL, false);
+                if (current) {
+                    post(workspace, section, counted, INDEX_CURRENT, false);
+                }
             });
-            workspace.write(STATS, section.id(), _ -> sign > 0 ? Optional.of(new Stat(1, length, 0, 0)) : Optional.empty());
-            adjust(workspace, section.revision(), stat -> stat.plus(sign, sign * length, false));
-            boolean current = workspace.get(MemorySlots.DOCUMENTS, section.document())
-                    .map(head -> head.latest() == section.revision()).orElse(false);
-            adjust(workspace, totalKey(section.tenant()), stat -> stat.plus(sign, sign * length, current));
+            workspace.replace(REVISION_SECTIONS, REVISION_INDEX.remove(workspace.tree(REVISION_SECTIONS), workspace.scope(), section.revision(), section.id()));
+            workspace.write(STATS, section.id(), _ -> Optional.empty());
+            adjust(workspace, section.revision(), stat -> stat.plus(-1, -length, false));
+            adjust(workspace, totalKey(section.tenant()), stat -> stat.plus(-1, -length, current));
+        }
+
+        private void postCurrent(Workspace workspace, Section section, boolean add) {
+            terms(workspace, section).ifPresent(counted -> post(workspace, section, counted, INDEX_CURRENT, add));
+        }
+
+        private static final boolean INDEX_ALL = false;
+        private static final boolean INDEX_CURRENT = true;
+
+        private static void post(Workspace workspace, Section section, Terms counted, boolean currentKeys, boolean add) {
+            counted.counts().forEach((term, tf) -> {
+                long key = termKey(section.tenant(), term);
+                long target = currentKeys ? currentKey(key) : key;
+                workspace.replace(INDEX, add
+                        ? POSTINGS.add(workspace.tree(INDEX), workspace.scope(), target, section.id(), new Posting(tf, fingerprint(term)))
+                        : POSTINGS.remove(workspace.tree(INDEX), workspace.scope(), target, section.id()));
+            });
         }
 
         private static void adjust(Workspace workspace, long key, UnaryOperator<Stat> change) {
@@ -186,24 +253,62 @@ public final class TextIndex {
             });
         }
 
-        private Optional<String> text(Workspace workspace, Section section) {
+        private Optional<Terms> terms(Workspace workspace, Section section) {
             Optional<Revision> revision = workspace.get(MemorySlots.REVISIONS, section.revision());
             if (revision.isEmpty()) {
                 return Optional.empty();
             }
-            try {
-                byte[] bytes = recent.get(revision.get().payload());
-                if (bytes == null) {
-                    bytes = payloads.get().read(revision.get().payload());
-                    if (recent.values().stream().mapToLong(found -> found.length).sum() + bytes.length > CACHE_BYTES) {
-                        recent.clear();
-                    }
-                    recent.put(revision.get().payload(), bytes);
+            Span span = new Span(revision.get().payload(), section.start(), section.end());
+            synchronized (this) {
+                Terms known = terms.get(span);
+                if (known != null) {
+                    return Optional.of(known);
                 }
-                return Optional.of(new String(bytes, section.start(), section.end() - section.start(), StandardCharsets.UTF_8));
-            } catch (RuntimeException unreadable) {
+            }
+            Optional<byte[]> content = content(span.payload());
+            if (content.isEmpty()) {
                 return Optional.empty();
             }
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            List<String> tokens = Tokenizer.tokens(new String(content.get(), span.start(), span.end() - span.start(), StandardCharsets.UTF_8));
+            tokens.forEach(term -> counts.merge(term, 1, Integer::sum));
+            Terms counted = new Terms(Map.copyOf(counts), tokens.size());
+            synchronized (this) {
+                terms.put(span, counted);
+                while (terms.size() > CACHE_TERMS) {
+                    terms.remove(terms.keySet().iterator().next());
+                }
+            }
+            return Optional.of(counted);
+        }
+
+        private Optional<byte[]> content(long payload) {
+            synchronized (this) {
+                byte[] known = bytes.get(payload);
+                if (known != null) {
+                    return Optional.of(known);
+                }
+            }
+            byte[] read;
+            try {
+                read = payloads.get().read(payload);
+            } catch (RuntimeException unreadable) {
+                if (payloads.get().erased(payload)) {
+                    return Optional.empty();
+                }
+                throw unreadable;
+            }
+            synchronized (this) {
+                if (bytes.putIfAbsent(payload, read) == null) {
+                    cachedBytes += read.length;
+                }
+                while (cachedBytes > CACHE_BYTES && bytes.size() > 1) {
+                    Map.Entry<Long, byte[]> eldest = bytes.entrySet().iterator().next();
+                    cachedBytes -= eldest.getValue().length;
+                    bytes.remove(eldest.getKey());
+                }
+            }
+            return Optional.of(read);
         }
     }
 
@@ -229,7 +334,8 @@ public final class TextIndex {
             int fingerprint = fingerprint(term.getKey());
             List<Section> found = new ArrayList<>();
             List<Integer> frequencies = new ArrayList<>();
-            POSTINGS.stream(view.scan(INDEX), termKey(tenant, term.getKey())).forEach(entry -> {
+            long key = termKey(tenant, term.getKey());
+            POSTINGS.stream(view.scan(INDEX), options.history() ? key : currentKey(key)).forEach(entry -> {
                 meter.consume(1);
                 if (entry.value().fingerprint() != fingerprint) {
                     return;

@@ -38,6 +38,14 @@ public record VectorRecord(long id, long owner, String view, int model, int vers
         return view;
     }
 
+    public static long key(long owner, String view, int model) {
+        return Hashing.of(owner, Hashing.of(view), model, 0x56454354L);
+    }
+
+    public static long bytes(VectorRecord record) {
+        return 4L * record.dimensions();
+    }
+
     long hash() {
         return Hashing.of(Hashing.of(id, owner, Hashing.of(view), model, version, dimensions), Hashing.of(payload, tenant, indexed ? 1 : 0));
     }

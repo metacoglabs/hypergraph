@@ -6,13 +6,16 @@ package io.hstore.db.memory;
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.Reader;
+import io.hstore.db.hora.Budget;
 import io.hstore.engine.EngineOptions;
+import io.hstore.engine.HStoreException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -23,6 +26,7 @@ import java.util.Random;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TextSearchTest {
@@ -103,6 +107,32 @@ class TextSearchTest {
         database.close();
         database = reopen();
         assertEquals(sections(note), ids(database.read(reader -> reader.searchText("budget", TextIndex.Options.top(5)))));
+    }
+
+    @Test
+    void latestSearchReadsOnlyCurrentPostingsAndARevisionCostsOneCommit() {
+        database.write(writer -> writer.appendRevision(writer.node("Note", "warm"), "# W\nw\n", RevisionSpec.DEFAULT.embedded()));
+        long before = database.engine().transactions().current().id();
+        database.write(writer -> writer.appendRevision(writer.node("Note", "embedded"), "# A\na\n# B\nb\n# C\nc\n# D\nd\n",
+                RevisionSpec.DEFAULT.embedded()));
+        assertEquals(before + 3, database.engine().transactions().current().id(), "one charge for the Markdown, one for all vectors, one commit");
+        revise("Note", "busy", "# Zebra\nzebra stripes\n");
+        for (int i = 0; i < 40; i++) {
+            revise("Note", "busy", "# Zebra\nzebra stripes " + i + "\n");
+        }
+        assertEquals(1, database.read(reader -> reader.searchText("zebra", TextIndex.Options.top(5), new Budget(5, 8, Duration.ofSeconds(5)).start())).size());
+        assertThrows(HStoreException.class, () -> database.read(reader -> reader.searchText("zebra", TextIndex.Options.top(5).withHistory(),
+                new Budget(5, 8, Duration.ofSeconds(5)).start())));
+    }
+
+    @Test
+    void scriptsKeepTheirWords() {
+        assertEquals(List.of("हिंदी", "किताब"), Tokenizer.tokens("हिंदी किताब"));
+        assertEquals(List.of("日本", "本語", "語の", "のテ", "テキ", "キス", "スト"), Tokenizer.tokens("日本語のテキスト"));
+        assertTrue(!Tokenizer.tokens("で").equals(Tokenizer.tokens("て")));
+        assertEquals(List.of("hstore", "日本"), Tokenizer.tokens("HStore日本"));
+        assertEquals(List.of("中"), Tokenizer.tokens("中"));
+        assertEquals(List.of("cafe", "δελτα", "ёж", "йод"), Tokenizer.tokens("Café δέλτα ёж йод"));
     }
 
     @Test

@@ -133,6 +133,22 @@ public final class PayloadStore implements AutoCloseable {
         }
     }
 
+    public boolean erased(long ref) {
+        FileChannel channel = segments.get((int) (ref >>> OFFSET_BITS));
+        long offset = ref & ((1L << OFFSET_BITS) - 1);
+        if (channel == null) {
+            return false;
+        }
+        try {
+            ByteBuffer header = ByteBuffer.allocate(HEADER);
+            readFully(channel, header, offset);
+            header.flip().getInt();
+            return header.getInt() == ERASED;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     public long erase(long ref) {
         FileChannel channel = segments.get((int) (ref >>> OFFSET_BITS));
         long offset = ref & ((1L << OFFSET_BITS) - 1);

@@ -973,7 +973,8 @@ public final class Parser {
             model = Optional.of(identifierOrString());
         }
         Optional<String> view = accept("VIEW") ? Optional.of(string()) : Optional.empty();
-        return new Statement.NearestVectors(text, values, model, view, top(10));
+        boolean history = accept("HISTORY");
+        return new Statement.NearestVectors(text, values, model, view, history, top(10));
     }
 
     private int top(int fallback) {

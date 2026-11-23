@@ -211,13 +211,27 @@ public sealed class Reader permits Writer {
         return visible(owner) ? VectorRecord.ofOwner(view, owner).stream().filter(record -> record.tenant() == tenant()).toList() : List.of();
     }
 
-    public List<VectorRecord.Hit> nearestVectors(String model, float[] query, int k, Optional<String> vectorView, SemanticPlane.Consistency consistency) {
+    public List<VectorRecord.Hit> nearestVectors(String model, float[] query, int k, Optional<String> vectorView, boolean history,
+                                                 SemanticPlane.Consistency consistency, Budget.Meter meter) {
         OptionalInt id = database.semantic().existingModel(model);
         if (id.isEmpty()) {
             return List.of();
         }
+        Documents.Types memory = database.memoryTypes();
+        Map<Long, Boolean> latest = new HashMap<>();
         return database.semantic().nearestVectors(view, id.getAsInt(), query, k, consistency, record -> record.tenant() == tenant()
-                && vectorView.map(record.view()::equals).orElse(true) && visible(record.owner()));
+                && vectorView.map(record.view()::equals).orElse(true) && visible(record.owner())
+                && (history || latest.computeIfAbsent(record.owner(), owner -> current(memory, owner))), meter);
+    }
+
+    private boolean current(Documents.Types memory, long owner) {
+        Optional<AtomRecord> record = view.atom(owner);
+        if (record.isEmpty() || !memory.contains(record.get().type())) {
+            return true;
+        }
+        long revision = view.get(MemorySlots.SECTIONS, owner).map(Section::revision).orElse(owner);
+        return Documents.owner(record.get()).stream()
+                .anyMatch(document -> Documents.head(view, tenant(), document).map(head -> head.latest() == revision).orElse(false));
     }
 
     public View engineView() {

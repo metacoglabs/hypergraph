@@ -104,7 +104,7 @@ class DocumentStatementTest {
                 USE BRANCH draft;
                 REVISE $doc MARKDOWN '# Plan
                 Use HStore everywhere.
-                ' AS $r3;
+                ' EMBED AS $r3;
                 """);
         assertEquals(List.of("1", "2", "3"), column(session.execute("REVISIONS OF $doc"), "number"));
         assertThrows(HStoreException.class, () -> session.execute("PURGE $doc"));
@@ -114,6 +114,8 @@ class DocumentStatementTest {
         assertEquals(List.of("1", "2", "3"), column(session.execute("REVISIONS OF $doc"), "number"));
         assertTrue(column(session.execute("REVISION OF $doc"), "markdown").getFirst().contains("everywhere"));
         assertEquals(List.of("plan"), column(session.execute("SECTIONS OF $r3"), "anchor"));
+        String merged = column(session.execute("SECTIONS OF $r3"), "section").getFirst().split(" ")[0];
+        assertEquals(List.of("content"), column(session.execute("VECTORS OF " + merged), "view"));
     }
 
     @Test
