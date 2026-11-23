@@ -288,7 +288,7 @@ class DocumentTest {
     }
 
     @Test
-    void failedRevisionsLeaveNoMarkdownOrChargeBehind() throws IOException {
+    void failedRevisionsLeaveNoMarkdownBehind() throws IOException {
         long doc = note("failing");
         long usage = database.read(reader -> Security.usage(reader.engineView(), 0).payloadBytes());
         assertThrows(HStoreException.class, () -> database.write(writer ->
@@ -300,7 +300,8 @@ class DocumentTest {
         assertThrows(HStoreException.class, () -> database.write(writer -> writer.appendRevision(doc, "bad \uD800 text", RevisionSpec.DEFAULT)));
         assertFalse(payloadsContain("LEAK-ONE-marker"));
         assertFalse(payloadsContain("LEAK-TWO-marker"));
-        assertEquals(usage, (long) database.read(reader -> Security.usage(reader.engineView(), 0).payloadBytes()));
+        assertEquals(usage + "# T\nLEAK-TWO-marker\n".length(), (long) database.read(reader -> Security.usage(reader.engineView(), 0).payloadBytes()),
+                "rolled-back Markdown still counts, as other rolled-back payloads do");
         assertEquals(List.of(), database.read(reader -> reader.revisions(doc)));
     }
 

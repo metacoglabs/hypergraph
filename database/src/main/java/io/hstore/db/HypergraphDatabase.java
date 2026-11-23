@@ -130,7 +130,6 @@ public final class HypergraphDatabase implements AutoCloseable {
         for (long[] payload : written) {
             try {
                 payloads.erase(payload[0]);
-                chargePayload((int) payload[1], -payload[2]);
             } catch (RuntimeException failure) {
                 LOG.log(System.Logger.Level.WARNING, "could not erase the Markdown of an abandoned revision", failure);
             }

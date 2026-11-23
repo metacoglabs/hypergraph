@@ -65,7 +65,8 @@ them needs write access to the node. `DELETE` refuses a node that has revisions.
 
 A revision is checked in full before its Markdown is written: valid Unicode, the section limit, the valid interval,
 and whether every record fits in a stored value at the database's page size. If the transaction then rolls back,
-fails or is retried, the Markdown it wrote is erased again and its payload bytes are given back to the tenant. A
+fails or is retried, the Markdown it wrote is erased again. Its bytes still count against the tenant's payload quota,
+as with every payload written by a transaction that rolls back, because the payload files never shrink. A
 crash in the middle of such a transaction can still leave unreferenced bytes in the payload files.
 
 A first revision written while another transaction deletes the node fails with a conflict, so revisions never outlive
