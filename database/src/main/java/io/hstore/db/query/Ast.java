@@ -309,6 +309,11 @@ public final class Ast {
                        Optional<EvidencePolicy> policy, OptionalLong limit) implements Statement {
         }
 
+        record ExpandFrom(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
+                          Optional<Expr> validAt, Optional<Rank> towards, double gate, double hubDamping, double edgeDamping, double minimum,
+                          long top) implements Statement {
+        }
+
         record Diffuse(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
                        Optional<Expr> validAt, Optional<EvidencePolicy> policy, double alpha, double epsilon, long top, long edges)
                 implements Statement {

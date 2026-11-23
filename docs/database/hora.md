@@ -199,7 +199,9 @@ memberships valid at that instant, and `POLICY` keeps only memberships whose evi
 nothing admitted sends its mass back to the seeds, so the walk stays a probability distribution.
 
 The estimate comes from local push (Andersen, Chung and Lang): residual mass is pushed from atoms and hyperedges until
-every remaining residual is below `EPSILON` (default `1e-4`) times its node's incidence count. The work is at most about
+every remaining residual is below `EPSILON` (default `1e-4`) times its node's incidence count. Every seed is pushed at
+least once, so a seed with many memberships still spreads its mass; if every seed is a hyperedge whose members are
+all filtered out, the statement fails rather than walk forever. The work is at most about
 `(2 - ALPHA) / (ALPHA · EPSILON)` incidence reads, independent of the size of the database. The result carries its own
 error: the residual left, which bounds the total error of the atom scores exactly, and each row's `upper` column, a
 guaranteed upper bound on its exact score. Pushes run in a fixed order, so a result is reproducible. `PROPAGATE`
@@ -208,6 +210,25 @@ keeps its own unnormalized semantics; `DIFFUSE` is the normalized walk.
 Each incidence read counts against the row budget; when it runs out the walk stops early and the message says so, and
 the residual still bounds the error. Hyperedges and atoms of another tenant are never entered, and a seed of another
 tenant is an error.
+
+## Expansion towards a query
+
+`EXPAND FROM` ([HQL](hql.md#expand-from)) builds a connected evidence tree around seed atoms
+(`hora/Expansion.java`). The value of a hyperedge is the value of its best chain from a seed: each step multiplies a
+factor in `[0, 1]`, so longer chains never score higher, and a best-first search (Dijkstra on `-log value`) returns
+hyperedges in exact order of value.
+
+From atom `v` into hyperedge `e` the factor is `exit(role of v) · factor(type of e) · deg(v)^-hub · gate(r(e))`; from `e`
+to member `u` it is `enter(role of u) · weight(u) / maxWeight(e) · |M(e)|^-edge`. `gate(r) = GATE + (1 - GATE) · r`,
+where `r(e)` is the score of `e` under the `TOWARDS (RANK …)` query, or 0 when `e` fails that query's hard
+constraints; a positive `GATE` lets a weakly relevant hyperedge still connect two relevant ones. `DAMPING hub edge`
+(default `0.5 0.5`) discounts hub atoms and huge hyperedges.
+
+Incident hyperedges are read 64 postings at a time and only when the frontier reaches them, so a hub atom whose
+damped value is small is read last. Each row names the atom it was entered through and the hyperedge that atom came
+from, so the rows form a tree rooted at the seeds. The message gives an upper bound on the value of every hyperedge
+not returned. Every frontier step and every incidence read counts against the row budget; when it runs out, the rows
+are still the exact best ones and the bound still holds.
 
 ## Pattern matching
 

@@ -15,6 +15,7 @@ import io.hstore.db.evidence.Provenance;
 import io.hstore.db.evidence.Qualifier;
 import io.hstore.db.hora.Budget;
 import io.hstore.db.hora.Diffusion;
+import io.hstore.db.hora.Expansion;
 import io.hstore.db.hora.Field;
 import io.hstore.db.hora.Hora;
 import io.hstore.db.hora.Pattern;
@@ -68,6 +69,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -320,6 +322,7 @@ final class Executor {
             case Statement.Rank rank -> read(reader -> rank(reader, rank));
             case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
             case Statement.Diffuse diffuse -> read(reader -> diffuse(reader, diffuse));
+            case Statement.ExpandFrom expansion -> read(reader -> expandFrom(reader, expansion));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -610,6 +613,57 @@ final class Executor {
                 rows.size(), trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
     }
 
+    private QueryResult expandFrom(Reader reader, Statement.ExpandFrom statement) {
+        Evaluator evaluator = evaluator(reader);
+        Map<Long, Double> seeds = new LinkedHashMap<>();
+        statement.seeds().forEach(seed -> seeds.merge(reader.require(session.resolve(reader, seed.atom())).id(), seed.weight(), Math::max));
+        Map<Integer, Double> factors = new HashMap<>();
+        statement.through().forEach(found -> {
+            TypeDef type = reader.requireReadableType(found.type());
+            if (!type.kind().isEdge()) {
+                throw HStoreException.invalid(found.type() + " is not a hyperedge type");
+            }
+            factors.put(type.id(), found.weight());
+        });
+        Map<String, Double> exit = new HashMap<>();
+        statement.exit().forEach(factor -> exit.put(factor.role(), factor.factor()));
+        Map<String, Double> entry = new HashMap<>();
+        statement.entry().forEach(factor -> entry.put(factor.role(), factor.factor()));
+        OptionalLong validAt = statement.validAt().map(expr -> OptionalLong.of((long) evaluator.value(expr, Map.of()).number()
+                .orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")))).orElse(OptionalLong.empty());
+        Expansion.Model model = new Expansion.Model(factors, exit, entry, validAt, statement.hubDamping(), statement.edgeDamping(), statement.gate());
+        Budget.Meter meter = Budget.DEFAULT.start();
+        Expansion.Relevance relevance = statement.towards().<Expansion.Relevance>map(rank -> {
+            RoleTimeScorer scorer = new RoleTimeScorer(reader, rankQuery(reader, rank), meter);
+            return new Expansion.Relevance() {
+                public double bound(long edge) {
+                    return scorer.bound(edge);
+                }
+
+                public OptionalDouble score(long edge) {
+                    return scorer.score(edge).map(found -> OptionalDouble.of(found.score())).orElse(OptionalDouble.empty());
+                }
+            };
+        }).orElse(Expansion.Relevance.NONE);
+        Expansion.Result result = Expansion.on(reader).run(seeds, model, relevance, (int) statement.top(), statement.minimum(), 100_000, meter);
+        QueryResult table = QueryResult.table(List.of("edge", "value", "relevance", "via", "parent"), result.edges().stream()
+                .map(found -> List.of(atomCell(reader, found.edge()), QueryResult.number(found.value()), QueryResult.number(found.relevance()),
+                        atomCell(reader, found.via()), found.parent() < 0 ? QueryResult.scalar(Value.NULL) : atomCell(reader, found.parent())))
+                .toList());
+        return new QueryResult(table.columns(), table.rows(), table.message() + "; stopped on " + result.stop().name().toLowerCase(java.util.Locale.ROOT)
+                + ", every other hyperedge has value at most " + result.bound(), table.trace());
+    }
+
+    private static Map<String, Double> factorMap(List<Ast.RoleFactor> factors, String clause) {
+        Map<String, Double> map = new HashMap<>();
+        for (Ast.RoleFactor factor : factors) {
+            if (map.put(factor.role(), factor.factor()) != null) {
+                throw HStoreException.invalid(clause + " names role " + factor.role() + " twice");
+            }
+        }
+        return map;
+    }
+
     private QueryResult diffuse(Reader reader, Statement.Diffuse statement) {
         Evaluator evaluator = evaluator(reader);
         Map<Long, Double> seeds = new LinkedHashMap<>();
@@ -621,17 +675,17 @@ final class Executor {
             if (!type.kind().isEdge()) {
                 throw HStoreException.invalid(found.type() + " is not a hyperedge type");
             }
-            types.add(type.id());
+            if (!types.add(type.id())) {
+                throw HStoreException.invalid("THROUGH names " + found.type() + " twice");
+            }
             typeWeights.put(type.id(), found.weight());
         });
-        Map<String, Double> exit = new HashMap<>();
-        statement.exit().forEach(factor -> exit.put(factor.role(), factor.factor()));
-        Map<String, Double> entry = new HashMap<>();
-        statement.entry().forEach(factor -> entry.put(factor.role(), factor.factor()));
+        Map<String, Double> exit = factorMap(statement.exit(), "EXIT");
+        Map<String, Double> entry = factorMap(statement.entry(), "ENTER");
         OptionalLong validAt = statement.validAt().map(expr -> OptionalLong.of((long) evaluator.value(expr, Map.of()).number()
                 .orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")))).orElse(OptionalLong.empty());
         Diffusion.Model model = new Diffusion.Model(types, typeWeights, new Diffusion.RoleFactors(exit, entry), validAt,
-                statement.policy().orElse(io.hstore.db.evidence.EvidencePolicy.ANY));
+                statement.policy().orElse(EvidencePolicy.ANY));
         Diffusion.Result result = Hora.on(reader).diffuse(seeds, model,
                 new Diffusion.Params(statement.alpha(), statement.epsilon(), (int) statement.top(), (int) statement.edges()), Budget.DEFAULT.start());
         List<List<Cell>> rows = new ArrayList<>();

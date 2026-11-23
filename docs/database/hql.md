@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `DIFFUSE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `DIFFUSE`, `EXPAND FROM`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -424,6 +424,19 @@ RANK EDGE e:Review
 -- | @16 Review    | 0.8083 | 0.6667  | 0.6667 | 1          | 1      | 0.75     |
 -- | @15 Review    | 0.7333 | 1       | 0.6667 | 0          | 1      | 1        |
 ```
+
+### EXPAND FROM
+
+```ebnf
+expand_from = "EXPAND" "FROM" ref [ "WEIGHT" number ] { "," ref [ "WEIGHT" number ] }
+              [ "THROUGH" identifier [ "FACTOR" number ] { "," identifier [ "FACTOR" number ] } ]
+              [ "EXIT" factors ] [ "ENTER" factors ] [ "VALID" "AT" additive ]
+              [ "TOWARDS" "(" rank ")" [ "GATE" number ] ] [ "DAMPING" number number ] [ "MIN" number ] "TOP" integer ;
+```
+
+The best-connected hyperedges around the seeds, in exact order of chain value, optionally steered by a `RANK` query.
+Seed weights and all factors lie in `[0, 1]`. Columns: `edge, value, relevance, via, parent`. See
+[expansion](hora.md#expansion-towards-a-query).
 
 ### DIFFUSE
 
