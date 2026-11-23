@@ -120,6 +120,17 @@ public final class Ast {
     public record RoleFactor(String role, double factor) {
     }
 
+    public sealed interface SimilarSpace {
+        record Children(String type) implements SimilarSpace {
+        }
+
+        record Around(Ref anchor, long size, List<String> through) implements SimilarSpace {
+        }
+
+        record Sets(List<List<Ref>> sets) implements SimilarSpace {
+        }
+    }
+
     public record MotifRegion(int region, Optional<Ref> member, Optional<String> memberType, List<List<String>> roles) {
     }
 
@@ -222,6 +233,10 @@ public final class Ast {
         }
 
         record MotifProfile(Ref edge, Optional<String> type) implements Statement {
+        }
+
+        record Similar(List<StructuralEdge> pattern, List<Ref> example, Optional<Ref> container, boolean identity, SimilarSpace space,
+                       OptionalDouble within, OptionalLong top) implements Statement {
         }
 
         record MotifMatch(int code, List<Optional<String>> types, Optional<Ref> around, List<MotifRegion> regions, boolean nested,

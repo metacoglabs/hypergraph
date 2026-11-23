@@ -362,6 +362,9 @@ public final class Parser {
         if (accept("MOTIF")) {
             return motif();
         }
+        if (accept("SIMILAR")) {
+            return similar();
+        }
         if (accept("MEMBERS")) {
             expect("OF");
             Ref edge = ref();
@@ -1531,6 +1534,11 @@ public final class Parser {
     }
 
     private Statement.StructuralMatch structuralMatch() {
+        List<Ast.StructuralEdge> edges = patternEdges();
+        return structuralRest(edges);
+    }
+
+    private List<Ast.StructuralEdge> patternEdges() {
         List<Ast.StructuralEdge> edges = new ArrayList<>();
         do {
             String name = identifier();
@@ -1548,6 +1556,10 @@ public final class Parser {
                 throw HStoreException.invalid("a structural match has at most 64 hyperedges");
             }
         } while (acceptSymbol(","));
+        return edges;
+    }
+
+    private Statement.StructuralMatch structuralRest(List<Ast.StructuralEdge> edges) {
         List<Ast.StructuralAnchor> anchors = new ArrayList<>();
         if (accept("WHERE")) {
             do {
@@ -1573,6 +1585,76 @@ public final class Parser {
 
     private Ast.Instant transitionInstant() {
         return accept("GENERATION") ? new Ast.Instant.Generation(longValue()) : new Ast.Instant.Time(parseInstant(string()));
+    }
+
+    private Statement.Similar similar() {
+        expect("TO");
+        List<Ast.StructuralEdge> pattern = List.of();
+        List<Ref> example = List.of();
+        Optional<Ref> container = Optional.empty();
+        if (accept("EDGES")) {
+            expectSymbol("(");
+            List<Ref> refs = new ArrayList<>();
+            do {
+                refs.add(ref());
+            } while (acceptSymbol(","));
+            expectSymbol(")");
+            example = List.copyOf(refs);
+        } else if (accept("CHILDREN")) {
+            expect("OF");
+            container = Optional.of(ref());
+        } else {
+            expectSymbol("(");
+            pattern = List.copyOf(patternEdges());
+            expectSymbol(")");
+        }
+        boolean identity = accept("IDENTITY");
+        if (identity && !pattern.isEmpty()) {
+            throw HStoreException.invalid("IDENTITY compares atoms, so it needs an example from the data: EDGES (...) or CHILDREN OF ...");
+        }
+        expect("IN");
+        Ast.SimilarSpace space;
+        if (accept("CHILDREN")) {
+            expect("OF");
+            space = new Ast.SimilarSpace.Children(identifier());
+        } else if (accept("AROUND")) {
+            Ref anchor = ref();
+            long size = accept("SIZE") ? longValue() : 3;
+            List<String> through = new ArrayList<>();
+            if (accept("THROUGH")) {
+                do {
+                    through.add(identifier());
+                } while (acceptSymbol(","));
+            }
+            space = new Ast.SimilarSpace.Around(anchor, size, List.copyOf(through));
+        } else {
+            expect("SETS");
+            expectSymbol("(");
+            List<List<Ref>> sets = new ArrayList<>();
+            do {
+                expectSymbol("(");
+                List<Ref> set = new ArrayList<>();
+                do {
+                    set.add(ref());
+                } while (acceptSymbol(","));
+                expectSymbol(")");
+                sets.add(List.copyOf(set));
+            } while (acceptSymbol(","));
+            expectSymbol(")");
+            space = new Ast.SimilarSpace.Sets(List.copyOf(sets));
+        }
+        OptionalDouble within = OptionalDouble.empty();
+        OptionalLong top = OptionalLong.empty();
+        if (accept("WITHIN")) {
+            within = OptionalDouble.of(number().doubleValue());
+        } else {
+            expect("TOP");
+            top = OptionalLong.of(longValue());
+            if (top.getAsLong() < 1 || top.getAsLong() > 10_000) {
+                throw HStoreException.invalid("TOP must be between 1 and 10000");
+            }
+        }
+        return new Statement.Similar(pattern, example, container, identity, space, within, top);
     }
 
     private Statement motif() {

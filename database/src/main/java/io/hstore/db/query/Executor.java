@@ -31,6 +31,8 @@ import io.hstore.db.retrieve.HyperQuery;
 import io.hstore.db.retrieve.RankQuery;
 import io.hstore.db.retrieve.Ranking;
 import io.hstore.db.retrieve.RoleTimeScorer;
+import io.hstore.db.retrieve.Similarity;
+import io.hstore.db.retrieve.EditDistance;
 import io.hstore.db.retrieve.MotifMatcher;
 import io.hstore.db.retrieve.MotifClasses;
 import io.hstore.db.retrieve.MotifCensus;
@@ -375,6 +377,7 @@ final class Executor {
             case Statement.Motifs motifs -> read(reader -> motifs(reader, motifs));
             case Statement.MotifProfile profile -> read(reader -> motifProfile(reader, profile));
             case Statement.MotifMatch match -> read(reader -> motifMatch(reader, match));
+            case Statement.Similar similar -> read(reader -> similar(reader, similar));
             case Statement.ExplainStructural(Statement.StructuralMatch match) -> read(reader ->
                     QueryResult.message(hyperMatch(reader, match).explain(hyperQuery(reader, match))));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
@@ -874,6 +877,93 @@ final class Executor {
         return new QueryResult(table.columns(), table.rows(), table.message() + (result.complete() ? ""
                 : "; the budget ran out, so more occurrences may exist" + (statement.rankBy().isPresent() ? " and these are the best found so far" : "")),
                 table.trace());
+    }
+
+    private EditDistance.Shape patternShape(Reader reader, List<Ast.StructuralEdge> pattern) {
+        Map<String, Integer> index = new LinkedHashMap<>();
+        List<Integer> nodeTypes = new ArrayList<>();
+        int[] edgeTypes = new int[pattern.size()];
+        int[][] members = new int[pattern.size()][];
+        for (int e = 0; e < pattern.size(); e++) {
+            Ast.StructuralEdge edge = pattern.get(e);
+            TypeDef type = reader.requireReadableType(edge.type());
+            if (!type.kind().isEdge()) {
+                throw HStoreException.invalid(edge.type() + " is not a hyperedge type");
+            }
+            edgeTypes[e] = type.id();
+            members[e] = edge.vertices().stream().mapToInt(vertex -> {
+                Integer known = index.get(vertex.name());
+                if (known != null) {
+                    if (vertex.type().isPresent() && reader.requireReadableType(vertex.type().get()).id() != nodeTypes.get(known)) {
+                        throw HStoreException.invalid("vertex " + vertex.name() + " is declared with two types");
+                    }
+                    return known;
+                }
+                String declared = vertex.type().orElseThrow(() -> HStoreException.invalid(
+                        "vertex " + vertex.name() + " needs a type the first time it is named, as " + vertex.name() + ":Type"));
+                nodeTypes.add(reader.requireReadableType(declared).id());
+                index.put(vertex.name(), nodeTypes.size() - 1);
+                return nodeTypes.size() - 1;
+            }).toArray();
+        }
+        return new EditDistance.Shape(nodeTypes.stream().mapToInt(Integer::intValue).toArray(), edgeTypes, members,
+                java.util.stream.LongStream.range(0, nodeTypes.size()).map(i -> -1 - i).toArray());
+    }
+
+    private QueryResult similar(Reader reader, Statement.Similar statement) {
+        EditDistance.Shape query;
+        if (!statement.pattern().isEmpty()) {
+            query = patternShape(reader, statement.pattern());
+        } else if (statement.container().isPresent()) {
+            long[] children = Similarity.children(reader, reader.require(session.resolve(reader, statement.container().get())).id());
+            if (children.length == 0) {
+                throw HStoreException.invalid("the example container has no child hyperedges to compare");
+            }
+            query = Similarity.shapeOf(reader, children);
+        } else {
+            long[] edges = statement.example().stream().mapToLong(ref -> {
+                long id = reader.require(session.resolve(reader, ref)).id();
+                if (!reader.isEdge(id)) {
+                    throw HStoreException.invalid("atom " + id + " is not a hyperedge");
+                }
+                return id;
+            }).toArray();
+            query = Similarity.shapeOf(reader, edges);
+        }
+        Similarity.Space space = switch (statement.space()) {
+            case Ast.SimilarSpace.Children(String type) -> {
+                TypeDef def = reader.requireReadableType(type);
+                if (!def.kind().isEdge()) {
+                    throw HStoreException.invalid(type + " is not a hyperedge type");
+                }
+                yield new Similarity.Space.Children(def.id());
+            }
+            case Ast.SimilarSpace.Around(Ast.Ref anchor, long size, List<String> through) -> {
+                Set<Integer> types = new HashSet<>();
+                through.forEach(name -> {
+                    TypeDef def = reader.requireReadableType(name);
+                    if (!def.kind().isEdge()) {
+                        throw HStoreException.invalid(name + " is not a hyperedge type");
+                    }
+                    types.add(def.id());
+                });
+                yield new Similarity.Space.Around(reader.require(session.resolve(reader, anchor)).id(), (int) Math.min(Integer.MAX_VALUE, size), types);
+            }
+            case Ast.SimilarSpace.Sets(List<List<Ast.Ref>> sets) -> new Similarity.Space.Given(sets.stream()
+                    .map(set -> set.stream().mapToLong(ref -> reader.require(session.resolve(reader, ref)).id()).toArray()).toList());
+        };
+        Similarity.Result result = statement.within().isPresent()
+                ? Similarity.within(reader, query, statement.identity(), space, statement.within().getAsDouble(), Budget.DEFAULT)
+                : Similarity.top(reader, query, statement.identity(), space, (int) statement.top().getAsLong(), Budget.DEFAULT);
+        QueryResult table = QueryResult.table(List.of("candidate", "edges", "lower", "upper"), result.hits().stream()
+                .map(hit -> List.<Cell>of(atomCell(reader, hit.key()), QueryResult.text(Arrays.stream(hit.edges()).mapToObj(edge -> "@" + edge)
+                        .collect(Collectors.joining(", "))), QueryResult.number(hit.lower()),
+                        Double.isFinite(hit.upper()) ? QueryResult.number(hit.upper()) : QueryResult.text("unknown")))
+                .toList());
+        String note = result.exact() ? "; distances are exact where lower equals upper"
+                : "; some candidates are too large to verify exactly, so they carry a distance interval";
+        return new QueryResult(table.columns(), table.rows(), table.message() + note
+                + (result.complete() ? "" : "; the budget ran out, so the list may be incomplete"), table.trace());
     }
 
     private QueryResult diffuse(Reader reader, Statement.Diffuse statement) {

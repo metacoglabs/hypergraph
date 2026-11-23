@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `MOTIFS`, `MOTIF`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `MOTIFS`, `MOTIF`, `SIMILAR TO`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -547,6 +547,27 @@ MOTIFS OF Meeting EXACT;
 -- | 94    | closed | 1     | 0              |
 
 MOTIF 94 REGION '111' HAS ANY Person ROLES (guest, host OR guest, ANY) LIMIT 10;
+```
+
+### SIMILAR TO
+
+```ebnf
+similar = "SIMILAR" "TO" ( "(" hyperedge { "," hyperedge } ")" | "EDGES" "(" ref { "," ref } ")" | "CHILDREN" "OF" ref ) [ "IDENTITY" ]
+          "IN" ( "CHILDREN" "OF" identifier
+               | "AROUND" ref [ "SIZE" integer ] [ "THROUGH" identifier { "," identifier } ]
+               | "SETS" "(" "(" ref { "," ref } ")" { "," "(" ref { "," ref } ")" } ")" )
+          ( "WITHIN" number | "TOP" integer ) ;
+```
+
+Finds groups of hyperedges close to the query by hypergraph edit distance. `hyperedge` is written as in
+[HYPERMATCH](#hypermatch). `IDENTITY` keeps the query's atoms fixed and needs a query taken from the data. `SIZE` is 1
+to 6 (default 3), `TOP` 1 to 10,000. Columns: `candidate, edges, lower, upper`; the distance is exact when `lower`
+equals `upper`. See [similarity search](similarity.md).
+
+```
+SIMILAR TO (q1:Meeting(a:Person, b:Person, d:Doc), q2:Meeting(b, c:Person)) IN CHILDREN OF Episode TOP 5;
+SIMILAR TO CHILDREN OF @Episode:'2024-03' IN CHILDREN OF Episode WITHIN 3;
+SIMILAR TO EDGES (@41, @42) IDENTITY IN AROUND @41 SIZE 3 TOP 10;
 ```
 
 ### TRANSITIONS
