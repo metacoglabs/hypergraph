@@ -31,6 +31,9 @@ import io.hstore.db.retrieve.HyperQuery;
 import io.hstore.db.retrieve.RankQuery;
 import io.hstore.db.retrieve.Ranking;
 import io.hstore.db.retrieve.RoleTimeScorer;
+import io.hstore.db.retrieve.MotifMatcher;
+import io.hstore.db.retrieve.MotifClasses;
+import io.hstore.db.retrieve.MotifCensus;
 import io.hstore.db.retrieve.Selection;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.security.Access;
@@ -127,6 +130,18 @@ final class Executor {
             case Statement.CreateView(String name, MaterializedViews.Kind kind, long parameter, boolean continuous) -> {
                 MaterializedViews.Descriptor descriptor = database().views().create(session.principal(), name, kind, continuous
                         ? MaterializedViews.Refresh.CONTINUOUS : MaterializedViews.Refresh.ON_DEMAND, parameter);
+                yield QueryResult.message("created view " + descriptor.name() + " at generation " + descriptor.lastGeneration());
+            }
+            case Statement.CreateMotifView(String name, Optional<String> type, boolean continuous) -> {
+                long parameter = type.map(found -> session.read(reader -> {
+                    TypeDef def = reader.requireReadableType(found);
+                    if (!def.kind().isEdge()) {
+                        throw HStoreException.invalid(found + " is not a hyperedge type");
+                    }
+                    return (long) def.id() + 1;
+                })).orElse(0L);
+                MaterializedViews.Descriptor descriptor = database().views().create(session.principal(), name, MaterializedViews.Kind.MOTIF_CENSUS,
+                        continuous ? MaterializedViews.Refresh.CONTINUOUS : MaterializedViews.Refresh.ON_DEMAND, parameter);
                 yield QueryResult.message("created view " + descriptor.name() + " at generation " + descriptor.lastGeneration());
             }
             case Statement.RefreshView(String name) -> QueryResult.message("view " + name + " refreshed to generation "
@@ -357,6 +372,9 @@ final class Executor {
                                     QueryResult.text(branchName(succession.branch())), QueryResult.text(key(reader, net.key())),
                                     QueryResult.text(value(net.before())), QueryResult.text(value(net.after()))))), after.limit()).toList()));
             case Statement.StructuralMatch match -> read(reader -> structural(reader, match));
+            case Statement.Motifs motifs -> read(reader -> motifs(reader, motifs));
+            case Statement.MotifProfile profile -> read(reader -> motifProfile(reader, profile));
+            case Statement.MotifMatch match -> read(reader -> motifMatch(reader, match));
             case Statement.ExplainStructural(Statement.StructuralMatch match) -> read(reader ->
                     QueryResult.message(hyperMatch(reader, match).explain(hyperQuery(reader, match))));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
@@ -446,7 +464,7 @@ final class Executor {
         return switch (statement) {
             case Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.ShowTenants _, Statement.ShowUsers _,
                  Statement.Grant _, Statement.Revoke _,
-                 Statement.CreateView _, Statement.RefreshView _, Statement.DropView _, Statement.ShowView _ -> true;
+                 Statement.CreateView _, Statement.CreateMotifView _, Statement.RefreshView _, Statement.DropView _, Statement.ShowView _ -> true;
             default -> false;
         };
     }
@@ -790,6 +808,71 @@ final class Executor {
 
     private static String format(double value) {
         return String.format(java.util.Locale.ROOT, "%.6g", value);
+    }
+
+    private OptionalInt motifScope(Reader reader, Optional<String> type) {
+        return type.map(name -> {
+            TypeDef def = reader.requireReadableType(name);
+            if (!def.kind().isEdge()) {
+                throw HStoreException.invalid(name + " is not a hyperedge type");
+            }
+            return OptionalInt.of(def.id());
+        }).orElse(OptionalInt.empty());
+    }
+
+    private QueryResult motifs(Reader reader, Statement.Motifs statement) {
+        MotifCensus census = MotifCensus.of(reader, motifScope(reader, statement.type()));
+        MotifCensus.Result result = switch (statement.mode()) {
+            case "EXACT" -> census.exact(Budget.DEFAULT.start());
+            case "SAMPLE" -> census.sample(statement.samples(), statement.seed(), Budget.DEFAULT.start());
+            default -> census.auto(statement.seed(), Budget.DEFAULT);
+        };
+        QueryResult table = QueryResult.table(List.of("class", "shape", "count", "standard_error"), result.counts().stream()
+                .map(count -> List.<Cell>of(QueryResult.number(count.code()), QueryResult.text(MotifClasses.shape(count.code())),
+                        result.exact() ? QueryResult.number(Math.round(count.estimate())) : QueryResult.number(count.estimate()),
+                        QueryResult.number(result.exact() ? 0 : count.standardError())))
+                .toList());
+        String how = result.exact()
+                ? "exact count over " + result.population() + " hyperedges"
+                : "estimated from " + result.samples() + " sampled hyperedges of " + result.population()
+                        + (result.samples() < result.requested() && result.requested() != Long.MAX_VALUE
+                        ? " (the budget allowed " + result.samples() + " of " + result.requested() + " draws)" : "");
+        return new QueryResult(table.columns(), table.rows(), table.message() + "; " + how, table.trace());
+    }
+
+    private QueryResult motifProfile(Reader reader, Statement.MotifProfile statement) {
+        long edge = reader.require(session.resolve(reader, statement.edge())).id();
+        List<MotifCensus.Count> counts = MotifCensus.of(reader, motifScope(reader, statement.type())).profile(edge, Budget.DEFAULT.start());
+        return QueryResult.table(List.of("class", "shape", "count"), counts.stream()
+                .map(count -> List.<Cell>of(QueryResult.number(count.code()), QueryResult.text(MotifClasses.shape(count.code())),
+                        QueryResult.number(Math.round(count.estimate()))))
+                .toList());
+    }
+
+    private QueryResult motifMatch(Reader reader, Statement.MotifMatch statement) {
+        List<OptionalInt> types = statement.types().stream().map(type -> motifScope(reader, type)).toList();
+        OptionalLong around = statement.around().map(ref -> OptionalLong.of(reader.require(session.resolve(reader, ref)).id())).orElse(OptionalLong.empty());
+        List<MotifMatcher.Region> regions = statement.regions().stream().map(region -> new MotifMatcher.Region(region.region(),
+                region.memberType().map(name -> OptionalInt.of(reader.requireReadableType(name).id())).orElse(OptionalInt.empty()),
+                region.member().map(ref -> OptionalLong.of(reader.require(session.resolve(reader, ref)).id())).orElse(OptionalLong.empty()),
+                region.roles().stream().map(Set::copyOf).toList())).toList();
+        long limit = statement.limit().orElse(1_000);
+        if (limit < 1 || limit > 100_000) {
+            throw HStoreException.invalid("LIMIT must be between 1 and 100000");
+        }
+        MotifMatcher.Query query = new MotifMatcher.Query(statement.code(), types, around, regions, statement.nested(),
+                statement.rankBy().map(MotifMatcher.Weight::valueOf), (int) limit);
+        MotifMatcher.Result result = MotifMatcher.find(reader, query, Budget.DEFAULT.start());
+        List<String> columns = new ArrayList<>(List.of("e1", "e2", "e3"));
+        statement.rankBy().ifPresent(_ -> columns.add("weight"));
+        QueryResult table = QueryResult.table(columns, result.occurrences().stream().map(found -> {
+            List<Cell> row = new ArrayList<>(List.of(atomCell(reader, found.first()), atomCell(reader, found.second()), atomCell(reader, found.third())));
+            statement.rankBy().ifPresent(_ -> row.add(QueryResult.number(found.weight())));
+            return row;
+        }).toList());
+        return new QueryResult(table.columns(), table.rows(), table.message() + (result.complete() ? ""
+                : "; the budget ran out, so more occurrences may exist" + (statement.rankBy().isPresent() ? " and these are the best found so far" : "")),
+                table.trace());
     }
 
     private QueryResult diffuse(Reader reader, Statement.Diffuse statement) {
@@ -1205,6 +1288,8 @@ final class Executor {
             case ViewCell.Activity(long added, long removed) -> "+" + added + " -" + removed;
             case ViewCell.Ranked(var neighbors) -> neighbors.stream()
                     .map(neighbor -> "@" + neighbor.edge() + "×" + neighbor.overlap()).collect(Collectors.joining(", "));
+            case ViewCell.Census(long estimate, long error, boolean exact) -> exact ? Long.toString(estimate)
+                    : estimate + " ± " + (error < 0 ? "?" : String.format(java.util.Locale.ROOT, "%.1f", error / 1_000_000.0));
         };
     }
 

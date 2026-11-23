@@ -120,6 +120,9 @@ public final class Ast {
     public record RoleFactor(String role, double factor) {
     }
 
+    public record MotifRegion(int region, Optional<Ref> member, Optional<String> memberType, List<List<String>> roles) {
+    }
+
     public record RefineLevel(String type, List<String> roles) {
     }
 
@@ -210,6 +213,19 @@ public final class Ast {
         }
 
         record CreateView(String name, MaterializedViews.Kind kind, long parameter, boolean continuous) implements Statement {
+        }
+
+        record CreateMotifView(String name, Optional<String> type, boolean continuous) implements Statement {
+        }
+
+        record Motifs(Optional<String> type, String mode, long samples, long seed) implements Statement {
+        }
+
+        record MotifProfile(Ref edge, Optional<String> type) implements Statement {
+        }
+
+        record MotifMatch(int code, List<Optional<String>> types, Optional<Ref> around, List<MotifRegion> regions, boolean nested,
+                          Optional<String> rankBy, OptionalLong limit) implements Statement {
         }
 
         record RefreshView(String name) implements Statement {

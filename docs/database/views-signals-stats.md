@@ -38,7 +38,8 @@ Cell keys are limited to 48 bits (`KEY_BITS`); `cellKey` rejects larger or negat
 range scan `[(id << 48), (id << 48) | (2^48 − 1)]` of `view-data`.
 
 `ViewCell` codec: `u8 tag` then `Count`: `svarlong value` (tag 0); `Activity`: `varlong added, varlong removed`
-(tag 1); `Ranked`: `varint n, n × (varlong edge, varlong overlap)` (tag 2).
+(tag 1); `Ranked`: `varint n, n × (varlong edge, varlong overlap)` (tag 2); `Census`: `varlong estimate,
+varlong standard error in millionths, u8 exact` (tag 3).
 
 ### Kinds
 
@@ -48,6 +49,7 @@ range scan `[(id << 48), (id << 48) | (2^48 − 1)]` of `view-data`.
 | `CARDINALITY` | `AS CARDINALITY` | edge id | `Count(cardinality)` | record cardinality of every edge | same deltas keyed by edge |
 | `ACTIVITY` | `AS ACTIVITY [BUCKET ms]` | `wallTime / bucket` | `Activity(added, removed)` | replay of the retained `main` events up to the creation generation, counting only changes that touch the view's tenant | add the event's added/removed counts for the tenant to its bucket |
 | `OVERLAP_TOP_K` | `AS OVERLAP TOP k` | edge id | `Ranked` top-`k` `(edge, overlap)` | for every edge, overlaps with all edges sharing a member | recompute every changed edge and every edge incident to a changed member; delete cells of deleted edges |
+| `MOTIF_CENSUS` | `AS MOTIFS [OF Type]` | class code | `Census(estimate, standard error, exact)` | the automatic [motif](motifs.md) count over the type, or all of the tenant's hyperedges | none: a refresh with new events rebuilds every cell |
 
 `OVERLAP_TOP_K` ranks by overlap descending, then edge id ascending, and omits zero overlaps. Only edges of the
 view's tenant are ranked, even if an old membership links a member to another tenant's edge. Only events of branch

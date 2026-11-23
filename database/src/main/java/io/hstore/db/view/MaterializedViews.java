@@ -3,6 +3,9 @@
 
 package io.hstore.db.view;
 
+import java.util.OptionalInt;
+import io.hstore.db.hora.Budget;
+import io.hstore.db.retrieve.MotifCensus;
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.Reader;
 import io.hstore.db.Writer;
@@ -41,7 +44,7 @@ import java.util.stream.Stream;
 
 public final class MaterializedViews implements AutoCloseable {
 
-    public enum Kind { DEGREE, CARDINALITY, ACTIVITY, OVERLAP_TOP_K }
+    public enum Kind { DEGREE, CARDINALITY, ACTIVITY, OVERLAP_TOP_K, MOTIF_CENSUS }
 
     public enum Refresh { ON_DEMAND, CONTINUOUS }
 
@@ -133,6 +136,11 @@ public final class MaterializedViews implements AutoCloseable {
             case ACTIVITY -> {
                 if (parameter < 1 || parameter > MAX_BUCKET_MILLIS) {
                     throw HStoreException.invalid("ACTIVITY BUCKET must be between 1 and " + MAX_BUCKET_MILLIS + " ms, got " + parameter);
+                }
+            }
+            case MOTIF_CENSUS -> {
+                if (parameter < 0 || parameter > Integer.MAX_VALUE) {
+                    throw HStoreException.invalid("a motif census view covers one hyperedge type or all of them");
                 }
             }
             case DEGREE, CARDINALITY -> {
@@ -263,6 +271,12 @@ public final class MaterializedViews implements AutoCloseable {
                     .map(Entry::key)
                     .toList()
                     .forEach(edge -> put(writer, descriptor, edge, topK(writer, descriptor, edge)));
+            case MOTIF_CENSUS -> {
+                OptionalInt type = descriptor.parameter() == 0 ? OptionalInt.empty() : OptionalInt.of((int) descriptor.parameter() - 1);
+                MotifCensus.Result census = MotifCensus.of(writer, type).auto(writer.generation(), Budget.DEFAULT);
+                census.counts().forEach(count -> put(writer, descriptor, count.code(), new ViewCell.Census(Math.round(count.estimate()),
+                        Double.isFinite(count.standardError()) ? Math.round(count.standardError() * 1_000_000) : -1, census.exact())));
+            }
         }
     }
 
@@ -291,6 +305,10 @@ public final class MaterializedViews implements AutoCloseable {
                     put(writer, descriptor, bucket, new ViewCell.Activity(current.added() + added, current.removed() + removed));
                 }
             });
+            case MOTIF_CENSUS -> {
+                clear(writer, descriptor);
+                build(writer, descriptor);
+            }
             case OVERLAP_TOP_K -> {
                 Set<Long> affected = new HashSet<>();
                 events.forEach(event -> event.members().forEach(change -> {
