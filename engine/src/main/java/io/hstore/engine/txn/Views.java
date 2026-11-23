@@ -32,6 +32,6 @@ final class Views {
 
     static Stream<IncidentEdge> incident(Tree<Postings<Incident>> reverse, long atom) {
         return EngineSlots.REVERSE_INDEX.stream(reverse, atom)
-                .map(entry -> new IncidentEdge(entry.key(), entry.value().roleSet(), entry.value().locator()));
+                .map(entry -> new IncidentEdge(entry.key(), entry.value().roleSet(), entry.value().locator(), entry.value().validFrom(), entry.value().validTo()));
     }
 }

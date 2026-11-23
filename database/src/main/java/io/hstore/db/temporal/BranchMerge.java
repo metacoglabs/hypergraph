@@ -21,6 +21,7 @@ import io.hstore.engine.txn.TxnOptions;
 import io.hstore.engine.txn.View;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -151,6 +152,9 @@ public final class BranchMerge {
                     if (localDeleted.contains(edge)) {
                         conflicts.add(new Conflict("modified-while-deleted", edge, 0));
                     }
+                    changes.stream()
+                            .filter(change -> !(change instanceof MemberChange.Removed) && localDeleted.contains(change.member()))
+                            .forEach(change -> conflicts.add(new Conflict("member-deleted", edge, change.member())));
                     Set<Long> touched = localMembers.getOrDefault(edge, Set.of());
                     changes.stream().filter(change -> touched.contains(change.member()))
                             .forEach(change -> conflicts.add(new Conflict("membership", edge, change.member())));
@@ -173,12 +177,21 @@ public final class BranchMerge {
         return conflicts;
     }
 
+    private static int phase(Temporal.Delta delta) {
+        return switch (delta) {
+            case Temporal.Delta.AtomCreated _ -> 0;
+            case Temporal.Delta.MembersChanged _ -> 1;
+            case Temporal.Delta.AtomDeleted _ -> 2;
+        };
+    }
+
     private static Outcome apply(Transaction txn, Reader source, Side incoming, Set<Conflict> skipped,
                                  int sourceId, int targetId, List<Conflict> conflicts) {
         long created = 0;
         long deleted = 0;
         long members = 0;
-        for (Temporal.Delta delta : incoming.topology()) {
+        List<Temporal.Delta> ordered = incoming.topology().stream().sorted(Comparator.comparingInt(BranchMerge::phase)).toList();
+        for (Temporal.Delta delta : ordered) {
             switch (delta) {
                 case Temporal.Delta.AtomCreated(long atom, var record) -> {
                     if (!txn.exists(atom)) {
@@ -200,13 +213,14 @@ public final class BranchMerge {
                     if (source.engineView().requireEdge(edge).kind() == EdgeKind.ORDERED) {
                         boolean contested = changes.stream().anyMatch(change -> skipped.contains(new Conflict("membership", edge, change.member())));
                         if (!contested) {
-                            txn.load(edge, source.engineView().requireEdge(edge).stream().toList());
+                            txn.load(edge, source.engineView().requireEdge(edge).stream().filter(incidence -> txn.exists(incidence.member())).toList());
                             members += changes.size();
                         }
                         continue;
                     }
                     for (MemberChange change : changes) {
-                        if (skipped.contains(new Conflict("membership", edge, change.member()))) {
+                        if (skipped.contains(new Conflict("membership", edge, change.member()))
+                                || (!(change instanceof MemberChange.Removed) && !txn.exists(change.member()))) {
                             continue;
                         }
                         switch (change) {

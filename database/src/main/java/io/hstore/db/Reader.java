@@ -16,6 +16,7 @@ import io.hstore.db.value.Json;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.db.value.Values;
+import io.hstore.db.temporal.ValidityIndex;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.AtomRecord;
 import io.hstore.engine.catalog.EngineSlots;
@@ -84,7 +85,7 @@ public sealed class Reader permits Writer {
         return view.atom(atom).map(this::admits).orElse(false);
     }
 
-    boolean admits(AtomRecord record) {
+    public boolean admits(AtomRecord record) {
         return record.tenant() == tenant() && readable(record.type());
     }
 
@@ -152,6 +153,32 @@ public sealed class Reader permits Writer {
             return Stream.empty();
         }
         return view.incident(atom).filter(incident -> owns(incident.edge()));
+    }
+
+    public LongStream incidentAt(long atom, long instant) {
+        if (!onlyDefaultTenant() && !visible(atom)) {
+            return LongStream.empty();
+        }
+        return view.incidentTree(atom).scan(summary -> summary.mayBeValidAt(instant))
+                .filter(entry -> entry.value().validAt(instant))
+                .mapToLong(Entry::key)
+                .filter(this::owns);
+    }
+
+    public OptionalInt typeOf(long atom) {
+        return view.atom(atom).filter(this::admits).map(record -> OptionalInt.of(record.type())).orElse(OptionalInt.empty());
+    }
+
+    public boolean edgeAtom(long atom) {
+        return view.atom(atom).filter(this::admits).map(record -> record instanceof AtomRecord.EdgeRecord).orElse(false);
+    }
+
+    public LongStream validityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
+        return ValidityIndex.edges(view, tenant(), edgeType, side, lowExclusive, highInclusive);
+    }
+
+    public long countValidityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
+        return ValidityIndex.count(view, tenant(), edgeType, side, lowExclusive, highInclusive);
     }
 
     public Tree<?> incidentTree(long atom) {

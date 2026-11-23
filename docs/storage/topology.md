@@ -154,10 +154,14 @@ The `reverse` slot (slot 2, derived) is a `PostingIndex<Incident>` (`EngineSlots
 
 ```text
 directory tree:  key = member atom id  →  Postings<Incident>
-postings:        key = edge atom id    →  Incident(roleSet, locator)
+postings:        key = edge atom id    →  Incident(roleSet, locator, validFrom, validTo)
 ```
 
-`locator` is the member's key inside the edge: the member id for set edges, the label for ordered edges. It lets readers jump straight to the incidence.
+`locator` is the member's key inside the edge: the member id for set edges, the label for ordered edges. It lets readers jump straight to the incidence. `validFrom` and `validTo` copy the membership's validity interval, so time filters run on the posting without reading the edge.
+
+A posting is encoded as `varint roleSet | svarlong locator | u8 flags | [svarlong validFrom] | [svarlong validTo]`. Flag bit 0 says `validFrom` is stored and bit 1 says `validTo` is; an unbounded end is left out, so a membership with the default interval `[*, *)` costs one byte more than the role set and locator alone.
+
+The postings tree's entry measure adds the interval and the role bit (`Incidence.roleBit(roleSet)`) to each entry, so the summaries of a promoted posting set carry `timeMin`, `timeMax` and `roleBits`. A scan of a hub atom's postings can skip whole subtrees with `Summary.mayBeValidAt(t)` or `Summary.mayHaveRoles(mask)`.
 
 `index/PostingIndex.java` stores each posting set in one of two forms:
 
@@ -170,9 +174,9 @@ The index is maintained by the `REVERSE_INCIDENCE` derivation (`txn/EngineDeriva
 
 | Change | Reverse-index effect |
 |---|---|
-| `Added(edge, incidence, locator)` | `add(member → edge, Incident(roleSet, locator))` |
-| `Updated(…)` with a changed role set or locator | overwrite the posting with the new `Incident` |
-| `Updated(…)` with only weight, validity or data changed | none |
+| `Added(edge, incidence, locator)` | `add(member → edge, Incident(roleSet, locator, validFrom, validTo))` |
+| `Updated(…)` with a changed role set, locator or validity | overwrite the posting with the new `Incident` |
+| `Updated(…)` with only weight or data changed | none |
 | `Removed(edge, incidence, _)` | `remove(member → edge)` |
 
 `View.incidentTree(atom)` exposes a member's posting set as a `Tree` (it builds an ephemeral tree for the inline form), so it can be passed directly to `TreeAlgebra.intersectKeys`. "Hyperedges containing all of a₁…a_k" is therefore a k-way leapfrog intersection of k incident trees:
@@ -231,7 +235,7 @@ try (StorageEngine engine = StorageEngine.open(dir, EngineOptions.defaults())) {
 }
 ```
 
-`cardinality` comes from the summary, `weightedBetween` returns alice's incidence, and `incident` lists `IncidentEdge(edge, roleSet, locator)` from the reverse index.
+`cardinality` comes from the summary, `weightedBetween` returns alice's incidence, and `incident` lists `IncidentEdge(edge, roleSet, locator, validFrom, validTo)` from the reverse index.
 
 The same in HQL, through the database layer:
 

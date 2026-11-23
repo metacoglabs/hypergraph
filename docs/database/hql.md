@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -423,6 +423,32 @@ RANK EDGE e:Review
 -- | @14 Review    | 0.9734 | 1       | 1      | 1          | 0.8668 | 1        |
 -- | @16 Review    | 0.8083 | 0.6667  | 0.6667 | 1          | 1      | 0.75     |
 -- | @15 Review    | 0.7333 | 1       | 0.6667 | 0          | 1      | 1        |
+```
+
+### TRANSITIONS
+
+```ebnf
+transitions = "TRANSITIONS" "EDGE" identifier [ ":" identifier ]
+              "FROM" instant "TO" instant ( "APPEARED" | "DISAPPEARED" ) [ "MEMBERS" ] [ "LIMIT" integer ] ;
+instant     = "GENERATION" integer | string ;     (* a string is an ISO-8601 time *)
+```
+
+Lists the hyperedges, or with `MEMBERS` the memberships, that were present at the first generation and absent at the
+second (`DISAPPEARED`), or the other way round (`APPEARED`), on the session's branch. This is generation time: a
+membership closed with `VALID [f, u)` is still present; one removed with `REMOVE` or by deleting its edge is not. For
+validity time use `MATCH … WHERE e VALID AT a AND NOT e VALID AT b` ([temporal](evidence-and-temporal.md#validity-time)).
+
+A string instant names the last commit stamped at or before it. Something that came and went inside the window, or
+went and came back, is not listed. Columns: `edge`, or `edge, member` with `MEMBERS`, ordered by edge id then member
+id. Only the reader's own tenant's edges and members are returned, so the statement is open to every role that can
+read; how it is answered is in [evidence and time](evidence-and-temporal.md#transitions-between-generations).
+
+```
+TRANSITIONS EDGE e:Collaboration FROM GENERATION 100 TO GENERATION 104 DISAPPEARED MEMBERS;
+-- | edge                | member        |
+-- | @32 Collaboration   | @3 Person:'c' |
+-- | @33 Collaboration   | @4 Person:'d' |
+-- | @33 Collaboration   | @5 Person:'f' |
 ```
 
 ### MEMBERS OF

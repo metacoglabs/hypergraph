@@ -44,12 +44,13 @@ drive an access path; a predicate inside `OR` or `NOT` is always evaluated as a 
 | `Members(edge)` | `members` | `x IN r` | keys of `r`'s membership tree | yes |
 | `IndexRange(type, p, lo, hi, …)` | `property-index` | `x.p op literal`, `literal op x.p`, `x.p BETWEEN a AND b` on an `INDEXED` declared property; the same forms with `json(x, '$.path')` in place of `x.p` when the type has a JSON index on exactly `'$.path'` (`Planner.indexed`) | `Reader.range` | yes |
 | `Semantic(text, k, consistency)` | `semantic` | `x SIMILAR TO 'text' TOP k` | `Reader.similar` | no |
+| `ValidityTransition(type, t1, t2, direction)` | `validity-transition` | a typed edge match with two top-level conjuncts `x VALID AT a` and `NOT x VALID AT b`, both literal instants and `a != b`; `a < b` means the edge disappeared in `(a, b]`, `a > b` that it appeared in `(b, a]` (`Planner.transition`) | `ValidityIndex.edges` over slot 53 | no |
 | `Fixed(atom)` | `fixed` | `x = r` | the single atom if visible | yes |
 
 `!=` on an indexed property maps to a `TypeScan` (`Planner.range`, case `NE`). A path is **exact** when every atom
 it yields satisfies the conjunct that produced it (`Planner.exact`); an exact conjunct is dropped from the residual
 filters. `HAS r AS role` is exact because every reverse-index posting carries the role set of its incidence
-(`IndexValues.Incident(roleSet, locator)`), kept in step with the membership by the derivation that maintains the
+(`IndexValues.Incident(roleSet, locator, validFrom, validTo)`), kept in step with the membership by the derivation that maintains the
 index, so the role check runs on the posting.
 
 Paths other than `TypeScan` may yield atoms of the wrong kind or type (an incidence set contains hyperedges of every
@@ -201,6 +202,7 @@ estimate always wins.
 | `Members(e)` | `cardinality(e)` — exact, from the edge's subtree count |
 | `Fixed` | 1 |
 | `Semantic` | `k` |
+| `ValidityTransition` | `ValidityIndex.count`: the number of `(instant, edge)` entries with an endpoint in the window, from subtree weights |
 | `IndexRange` | `PostingIndex.countRange` over the order-key window of the tree selected by `Reader.indexedTag` — exact count of postings in the window, assembled from subtree weights without visiting leaves |
 | `Incident(legs)` | `d1 × Π_{i≥2} min(1, d_i / N)`, with the legs' degrees `d` sorted ascending and `N` the catalog size (independence assumption); role filters are not counted |
 

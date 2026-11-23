@@ -5,6 +5,7 @@ package io.hstore.db;
 
 import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
+import io.hstore.db.temporal.Temporal;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Role;
 import io.hstore.db.security.Scram;
@@ -309,6 +310,78 @@ class SecurityTest {
                 assertEquals(reader.incident(acmePatient).map(Incident::edge).toList(), edges);
                 return null;
             });
+        }
+    }
+
+    @Test
+    void validAtScansNeverFollowMembershipsIntoAnotherTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient VALID [0, 10)) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmePatient = alice.variables().get("p");
+            long acmeEdge = alice.variables().get("e");
+            long globexEdge = bob.variables().get("e");
+            database.write(writer -> {
+                writer.transaction().upsert(globexEdge, acmePatient, _ -> Incidence.of(acmePatient).withValidity(new Validity(0, 10)));
+                return null;
+            });
+            database.read(Branch.MAIN, alice.principal(), reader -> {
+                assertEquals(List.of(acmeEdge), reader.incidentAt(acmePatient, 5).boxed().toList());
+                assertEquals(List.of(acmeEdge), Temporal.activeEdges(reader, acmePatient, 5).boxed().toList());
+                return null;
+            });
+            database.read(Branch.MAIN, bob.principal(), reader -> {
+                assertEquals(List.of(), reader.incidentAt(acmePatient, 5).boxed().toList());
+                return null;
+            });
+        }
+    }
+
+    @Test
+    void transitionsStayInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass");
+             Session auditor = login("auditor", "readonly")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmeEdge = alice.variables().get("e");
+            long globexPatient = bob.variables().get("p");
+            long globexEdge = bob.variables().get("e");
+            long g1 = database.engine().transactions().current().id();
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> Incidence.of(globexPatient));
+                return null;
+            });
+            bob.execute("DELETE $e");
+            alice.execute("REMOVE $p FROM $e");
+            long g2 = database.engine().transactions().current().id();
+            String gone = "TRANSITIONS EDGE x FROM GENERATION " + g1 + " TO GENERATION " + g2 + " DISAPPEARED";
+            String came = "TRANSITIONS EDGE x FROM GENERATION " + g1 + " TO GENERATION " + g2 + " APPEARED MEMBERS";
+            for (Session session : List.of(alice, auditor)) {
+                String rendered = session.execute(gone).rows().toString() + session.execute(gone + " MEMBERS").rows() + session.execute(came).rows();
+                assertFalse(rendered.contains("@" + globexEdge + " "), rendered);
+                assertFalse(rendered.contains("@" + globexPatient + " "), rendered);
+                assertEquals(1, session.execute(gone + " MEMBERS").rows().size(), rendered);
+                assertEquals(0, session.execute(came).rows().size(), rendered);
+            }
+            assertEquals(List.of("@" + globexEdge), bob.execute(gone).rows().stream().map(row -> row.getFirst().render().split(" ")[0]).toList());
+        }
+    }
+
+    @Test
+    void transitionsRespectTypeGrants() {
+        admin.executeAll("""
+                CREATE NODE TYPE Note;
+                CREATE USER nurse PASSWORD 'nurse-pass-1' TENANT acme ROLE none;
+                GRANT READ ON TYPE Patient TO nurse;
+                """);
+        try (Session alice = login("alice", "s3cret-pass"); Session nurse = login("nurse", "nurse-pass-1")) {
+            long g1 = database.engine().transactions().current().id();
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long g2 = database.engine().transactions().current().id();
+            String query = "TRANSITIONS EDGE x FROM GENERATION " + g1 + " TO GENERATION " + g2 + " APPEARED";
+            assertEquals(1, alice.execute(query).rows().size());
+            assertEquals(0, nurse.execute(query).rows().size());
+            assertEquals(0, nurse.execute(query + " MEMBERS").rows().size());
         }
     }
 

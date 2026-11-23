@@ -38,6 +38,8 @@ import io.hstore.db.stats.Statistics;
 import io.hstore.db.temporal.BranchMerge;
 import io.hstore.db.temporal.StateBindings;
 import io.hstore.db.temporal.Temporal;
+import io.hstore.db.temporal.Transitions;
+import io.hstore.db.temporal.FeedFold;
 import io.hstore.db.value.Json;
 import io.hstore.db.value.Value;
 import io.hstore.db.view.MaterializedViews;
@@ -65,6 +67,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicLong;
@@ -313,6 +316,7 @@ final class Executor {
             case Statement.Describe(Ast.Ref atom) -> read(reader -> describe(reader, session.resolve(reader, atom)));
             case Statement.SetAlgebra algebra -> algebra.into().isPresent() ? write(writer -> setAlgebra(writer, algebra)) : read(reader -> setAlgebra(reader, algebra));
             case Statement.Rank rank -> read(reader -> rank(reader, rank));
+            case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -601,6 +605,36 @@ final class Executor {
         QueryResult result = QueryResult.table(match.projections().stream().map(Ast.Projection::alias).toList(), rows);
         return result.withTrace(new QueryResult.Trace(0, reader.generation(), plan.chosen().path().describe(), plan.chosen().rows(),
                 rows.size(), trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
+    }
+
+    private QueryResult transitions(Reader reader, Statement.Transitions statement) {
+        OptionalInt type = statement.type().map(name -> {
+            TypeDef found = reader.requireReadableType(name);
+            if (!found.kind().isEdge()) {
+                throw HStoreException.invalid(name + " is not a hyperedge type");
+            }
+            return OptionalInt.of(found.id());
+        }).orElse(OptionalInt.empty());
+        long from = generation(reader, statement.from());
+        long to = generation(reader, statement.to());
+        if (from == to && statement.from() instanceof Ast.Instant.Time && statement.to() instanceof Ast.Instant.Time) {
+            return QueryResult.table(statement.members() ? List.of("edge", "member") : List.of("edge"), List.of());
+        }
+        List<FeedFold.Change> changes = Transitions.of(reader, type, from, to,
+                statement.appeared() ? Transitions.Direction.APPEARED : Transitions.Direction.DISAPPEARED, statement.members(),
+                Budget.DEFAULT.start());
+        return table(statement.members() ? List.of("edge", "member") : List.of("edge"), limited(changes.stream().map(change -> switch (change) {
+            case FeedFold.Change.Membership(long edge, long member) -> List.of(atomCell(reader, edge), atomCell(reader, member));
+            case FeedFold.Change.Edge(long edge) -> List.of(atomCell(reader, edge));
+        }), statement.limit()));
+    }
+
+    private static long generation(Reader reader, Ast.Instant instant) {
+        return switch (instant) {
+            case Ast.Instant.Generation(long id) -> id;
+            case Ast.Instant.Time(long millis) -> Transitions.generationAt(reader, millis)
+                    .orElseThrow(() -> HStoreException.invalid("no commit at or before " + java.time.Instant.ofEpochMilli(millis)));
+        };
     }
 
     private QueryResult rank(Reader reader, Statement.Rank statement) {

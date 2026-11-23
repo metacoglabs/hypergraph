@@ -10,6 +10,7 @@ import io.hstore.db.query.Ast.Comparison;
 import io.hstore.db.query.Ast.Expr;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.stats.Statistics;
+import io.hstore.db.temporal.ValiditySlots;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.engine.HStoreException;
@@ -19,10 +20,13 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.function.ToLongFunction;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.LongStream;
 
 final class Planner {
 
@@ -111,6 +115,8 @@ final class Planner {
             candidates.add(incident);
             exactParts.add(incident);
         }
+        type.filter(_ -> match.edges()).flatMap(found -> transition(match.variable(), found, conjuncts))
+                .ifPresent(path -> candidates.add(candidate(path, List.of(), estimate(path, catalogSize), conjuncts)));
         exactParts.sort(Comparator.comparingDouble(Candidate::rows));
         for (int size = 2; size <= Math.min(MAX_INTERSECTED, exactParts.size()); size++) {
             candidates.add(intersection(exactParts.subList(0, size), population, conjuncts));
@@ -193,6 +199,8 @@ final class Planner {
             }
             case AccessPath.Members(long edge) -> reader.cardinality(edge);
             case AccessPath.Fixed _ -> 1;
+            case AccessPath.ValidityTransition(TypeDef type, long t1, long t2, var direction) -> reader.countValidityEndpoints(
+                    type.id(), direction == AccessPath.ValidityTransition.Direction.DISAPPEARED ? ValiditySlots.VALID_TO : ValiditySlots.VALID_FROM, t1, t2);
             case AccessPath.Semantic(String _, int k, var _) -> k;
             case AccessPath.IndexRange range -> indexEstimate(range);
             case AccessPath.TypeScan(TypeDef type) -> reader.countOfType(type.id());
@@ -218,6 +226,32 @@ final class Planner {
         }
         return PropertyIndex.estimate(reader.engineView().scan(PropertySlots.PROPERTY_INDEX), reader.tenant(), key.getAsInt(), tag,
                 PropertyIndex.lowerKey(tag, range.low()), PropertyIndex.upperKey(tag, range.high()));
+    }
+
+    private static Optional<AccessPath> transition(String variable, TypeDef type, List<Expr> conjuncts) {
+        OptionalLong valid = conjuncts.stream().flatMapToLong(conjunct -> instant(conjunct, variable).stream()).findFirst();
+        OptionalLong invalid = conjuncts.stream()
+                .flatMapToLong(conjunct -> conjunct instanceof Expr.Not(Expr term) ? instant(term, variable).stream() : LongStream.empty())
+                .findFirst();
+        if (valid.isEmpty() || invalid.isEmpty() || valid.getAsLong() == invalid.getAsLong()) {
+            return Optional.empty();
+        }
+        long present = valid.getAsLong();
+        long absent = invalid.getAsLong();
+        return Optional.of(present < absent
+                ? new AccessPath.ValidityTransition(type, present, absent, AccessPath.ValidityTransition.Direction.DISAPPEARED)
+                : new AccessPath.ValidityTransition(type, absent, present, AccessPath.ValidityTransition.Direction.APPEARED));
+    }
+
+    private static OptionalLong instant(Expr expr, String variable) {
+        if (expr instanceof Expr.ValidAt(String target, Expr.Literal(Value value)) && target.equals(variable)) {
+            OptionalDouble number = value.number();
+            if (number.isPresent() && number.getAsDouble() == Math.rint(number.getAsDouble())
+                    && Math.abs(number.getAsDouble()) < 0x1p62) {
+                return OptionalLong.of((long) number.getAsDouble());
+            }
+        }
+        return OptionalLong.empty();
     }
 
     private Optional<AccessPath> accessPath(Ast.Match match, Optional<TypeDef> type, Expr conjunct) {
@@ -281,7 +315,7 @@ final class Planner {
 
     private static boolean exact(AccessPath path, Expr conjunct) {
         return switch (path) {
-            case AccessPath.Semantic _, AccessPath.TypeScan _, AccessPath.AllAtoms _ -> false;
+            case AccessPath.Semantic _, AccessPath.TypeScan _, AccessPath.AllAtoms _, AccessPath.ValidityTransition _ -> false;
             case AccessPath.Incident _, AccessPath.Members _, AccessPath.IndexRange _, AccessPath.Fixed _ -> true;
             case AccessPath.Union(List<AccessPath> parts) -> conjunct instanceof Expr.Or(List<Expr> terms) && terms.size() == parts.size()
                     && IntStream.range(0, parts.size()).allMatch(i -> exact(parts.get(i), terms.get(i)));

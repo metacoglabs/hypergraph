@@ -107,12 +107,45 @@ session's branch; `AS OF t` resolves `TransactionManager.generationAsOf(t)` — 
 holds the last `history_limit` generations (engine option, default 64). It is kept in memory only, so after a restart
 it starts from the last checkpointed generation and the generations recovered from the write-ahead log. Historical snapshots are read-only.
 
+### Transitions between generations
+
+`TRANSITIONS` ([HQL](hql.md#transitions)) answers what appeared or disappeared between two generations
+(`temporal/Transitions.java`). When both generations are retained it diffs their catalogs (`Temporal.diff`), which
+costs the number of changed entries whatever the number of commits in between. Otherwise it folds the change feed
+over the window (`FeedFold`), which works as long as the feed still holds the first generation
+(`feed_retention_generations`) and costs one pass over every event in the window; an older window fails with
+`generation g precedes the change feed (first retained f)`.
+
+The fold keeps, per membership `(edge, member)` and per atom, whether it was present before its first change in the
+window and after its last one. An `Added` is only emitted when the member was absent and a `Removed` or `Updated` only
+when it was present, so the first and last change decide both. Events of other branches are skipped with the branch's
+lineage (its own events after its fork, its parent's before it). The feed is appended just after a generation is
+published, so the fold first waits until every commit up to the reader's generation is published.
+
+Results are tenant-scoped: an edge or member is returned only when its stamped tenant, read from the window's records
+or the reader's snapshot, is the reader's. Each decoded event or delta counts as one row against the statement budget,
+and a window over budget fails as a whole rather than returning a partial answer.
+
 ### Validity time
 
 Membership validity is indexed: every membership-tree summary carries the minimum `validFrom` and maximum
 `validTo` of its subtree, so `Hyperedge.validAt(t)` and `overlapping(from, to)` prune whole subtrees
 (`Summary.mayBeValidAt`, `mayOverlapInterval`). `Temporal.activeEdges(reader, atom, t)` returns the hyperedges
-whose incidence for `atom` is valid at `t`.
+whose incidence for `atom` is valid at `t`. It reads only `atom`'s reverse-index postings, which carry each
+membership's interval, and skips postings subtrees whose summary rules out `t` (`Reader.incidentAt`).
+
+Slot 53 (`validity-endpoints`) indexes, per tenant and edge type, the instants at which non-default membership
+intervals start (`validFrom`) or end (`validTo`). It answers which edges appeared or disappeared between two instants:
+
+```sql
+MATCH EDGE c:Collaboration WHERE c VALID AT 4 AND NOT c VALID AT 6 RETURN c;   -- disappeared in (4, 6]
+MATCH EDGE c:Collaboration WHERE NOT c VALID AT 4 AND c VALID AT 6 RETURN c;   -- appeared in (4, 6]
+```
+
+An edge active at 4 and not at 6 has a membership present at 4 whose interval ends in `(4, 6]`, so the edges with a
+`validTo` in that window are a complete candidate set; each is then checked with both conjuncts. Appearance is the
+same argument on `validFrom`. A membership with the default interval `[*, *)` never ends, is never indexed, and keeps
+its edge active at every instant. `EXPLAIN` shows the plan as `ValidityTransition(Collaboration disappeared in (4, 6])`.
 
 Property validity is a filter on a single stored value: a property bag holds one value per key, and `SET … VALID`
 replaces it ([data model](data-model.md#validity-intervals)). To keep the history of a value in validity time,
@@ -226,7 +259,7 @@ conflict.
 
 ### Applying
 
-In one transaction on the target (`BranchMerge.apply`):
+In one transaction on the target (`BranchMerge.apply`), created atoms first, then membership changes, then deletions, so a membership never names an atom the merge has not adopted yet:
 
 | Incoming delta | Action |
 |---|---|

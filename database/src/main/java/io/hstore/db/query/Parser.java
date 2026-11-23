@@ -343,6 +343,21 @@ public final class Parser {
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
             return new Statement.Members(edge, role, weight, validAt, policy, limit());
         }
+        if (accept("TRANSITIONS")) {
+            expect("EDGE");
+            String variable = identifier();
+            Optional<String> type = acceptSymbol(":") ? Optional.of(identifier()) : Optional.empty();
+            expect("FROM");
+            Ast.Instant from = transitionInstant();
+            expect("TO");
+            Ast.Instant to = transitionInstant();
+            boolean appeared = accept("APPEARED");
+            if (!appeared) {
+                expect("DISAPPEARED");
+            }
+            boolean members = accept("MEMBERS");
+            return new Statement.Transitions(variable, type, from, to, appeared, members, limit());
+        }
         if (accept("INCIDENT")) {
             expect("TO");
             return new Statement.IncidentTo(ref(), validAt());
@@ -1231,6 +1246,10 @@ public final class Parser {
             throw error("expected a $variable but found " + token);
         }
         return token.text();
+    }
+
+    private Ast.Instant transitionInstant() {
+        return accept("GENERATION") ? new Ast.Instant.Generation(longValue()) : new Ast.Instant.Time(parseInstant(string()));
     }
 
     private OptionalLong limit() {

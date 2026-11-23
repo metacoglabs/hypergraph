@@ -111,6 +111,14 @@ public final class Ast {
                         List<Projection> projections, Optional<Expr> orderBy, boolean descending, OptionalLong limit) {
     }
 
+    public sealed interface Instant {
+        record Generation(long id) implements Instant {
+        }
+
+        record Time(long millis) implements Instant {
+        }
+    }
+
     public sealed interface RankTarget {
         record Atom(Ref ref) implements RankTarget {
         }
@@ -290,6 +298,10 @@ public final class Ast {
 
         record Members(Ref edge, Optional<String> role, Optional<WeightRange> weight, Optional<Expr> validAt,
                        Optional<EvidencePolicy> policy, OptionalLong limit) implements Statement {
+        }
+
+        record Transitions(String variable, Optional<String> type, Instant from, Instant to, boolean appeared, boolean members,
+                           OptionalLong limit) implements Statement {
         }
 
         record IncidentTo(Ref atom, Optional<Expr> validAt) implements Statement {

@@ -14,7 +14,6 @@ import io.hstore.engine.topology.MemberChange;
 import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeDiff;
-import io.hstore.engine.txn.IncidentEdge;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -45,12 +44,7 @@ public final class Temporal {
     }
 
     public static LongStream activeEdges(Reader reader, long atom, long instant) {
-        if (!reader.visible(atom)) {
-            return LongStream.empty();
-        }
-        return reader.incidentEdges(atom)
-                .filter(incident -> reader.incidence(incident.edge(), atom).map(found -> found.validAt(instant)).orElse(false))
-                .mapToLong(IncidentEdge::edge);
+        return reader.visible(atom) ? reader.incidentAt(atom, instant) : LongStream.empty();
     }
 
     public static Stream<Delta> diff(Reader before, Reader after) {

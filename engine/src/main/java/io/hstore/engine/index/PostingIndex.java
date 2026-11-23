@@ -40,7 +40,18 @@ public final class PostingIndex<P> {
 
     public static <P> PostingIndex<P> of(int directoryId, int postingsId, String name, ValueCodec<P> codec,
                                          ToLongFunction<P> hash, int inlineLimit) {
-        TreeSchema<P> inner = new TreeSchema<>(postingsId, name + "-postings", FingerprintMode.SET, codec, EntryMeasure.keyed(hash));
+        return of(directoryId, postingsId, name, codec, hash, inlineLimit, (_, _, _) -> {
+        });
+    }
+
+    public static <P> PostingIndex<P> of(int directoryId, int postingsId, String name, ValueCodec<P> codec,
+                                         ToLongFunction<P> hash, int inlineLimit, EntryMeasure<P> postingMeasure) {
+        EntryMeasure<P> keyed = EntryMeasure.keyed(hash);
+        EntryMeasure<P> measure = (key, value, into) -> {
+            keyed.measure(key, value, into);
+            postingMeasure.measure(key, value, into);
+        };
+        TreeSchema<P> inner = new TreeSchema<>(postingsId, name + "-postings", FingerprintMode.SET, codec, measure);
         EntryMeasure<Postings<P>> outerMeasure = (key, value, into) ->
                 into.entry(key, Hashing.combine(Hashing.mix(key), fingerprint(value))).weight(value.size());
         PostingsCodec<P> postingsCodec = new PostingsCodec<>(inner, hash);

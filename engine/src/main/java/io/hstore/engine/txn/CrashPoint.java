@@ -10,6 +10,7 @@ public enum CrashPoint {
     COMMIT_APPEND,
     DATA_SYNC,
     WAL_SYNC,
+    FEED_APPEND,
     CATALOG_PUBLISH,
     COMPACTION_MOVE,
     COMPACTION_RETIRE,

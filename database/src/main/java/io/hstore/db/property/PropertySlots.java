@@ -31,47 +31,7 @@ public final class PropertySlots {
     public static final TreeSchema<PropertyBag> BAG_SCHEMA =
             new TreeSchema<>(66, "properties", FingerprintMode.SET, PropertyBag.CODEC, EntryMeasure.keyed(PropertyBag::hash));
 
-    public static final TreeSchema<IndexRoot> DIRECTORY_SCHEMA = new TreeSchema<>(69, "property-index", FingerprintMode.SET,
-            new ValueCodec<>() {
-                @Override
-                public int maxSize(IndexRoot value) {
-                    return Ref.encodedSize(value.root());
-                }
-
-                @Override
-                public void encode(ByteCursor out, long[] keys, List<IndexRoot> values) {
-                    values.forEach(value -> Ref.write(out, value.root()));
-                }
-
-                @Override
-                public void decode(ByteCursor in, long[] keys, Object[] into) {
-                    for (int i = 0; i < into.length; i++) {
-                        into[i] = new IndexRoot(Ref.read(in));
-                    }
-                }
-
-                @Override
-                public boolean holdsRefs() {
-                    return true;
-                }
-
-                @Override
-                public boolean refersToPages(IndexRoot value) {
-                    return value.root() instanceof Ref.Stored;
-                }
-
-                @Override
-                public IndexRoot mapRefs(IndexRoot value, RefMapper mapper) {
-                    Ref mapped = mapper.map(value.root(), VALUE_POSTINGS.schema());
-                    return mapped == value.root() ? value : new IndexRoot(mapped);
-                }
-
-                @Override
-                public void forEachRef(IndexRoot value, RefVisitor visitor) {
-                    visitor.visit(value.root(), VALUE_POSTINGS.schema());
-                }
-            },
-            EntryMeasure.keyed(root -> root.root().summary().fingerprint()));
+    public static final TreeSchema<IndexRoot> DIRECTORY_SCHEMA = directorySchema(69, "property-index", VALUE_POSTINGS.schema());
 
     public static final Slot<PropertyBag> PROPERTIES = Slot.primary(34, "properties", BAG_SCHEMA);
     public static final Slot<IndexRoot> PROPERTY_INDEX = Slot.derived(35, "property-index", DIRECTORY_SCHEMA);
@@ -79,6 +39,50 @@ public final class PropertySlots {
     public static final List<Slot<?>> ALL = List.of(PROPERTIES, PROPERTY_INDEX);
 
     private PropertySlots() {
+    }
+
+    public static TreeSchema<IndexRoot> directorySchema(int id, String name, TreeSchema<?> inner) {
+        return new TreeSchema<>(id, name, FingerprintMode.SET,
+                new ValueCodec<>() {
+                    @Override
+                    public int maxSize(IndexRoot value) {
+                        return Ref.encodedSize(value.root());
+                    }
+
+                    @Override
+                    public void encode(ByteCursor out, long[] keys, List<IndexRoot> values) {
+                        values.forEach(value -> Ref.write(out, value.root()));
+                    }
+
+                    @Override
+                    public void decode(ByteCursor in, long[] keys, Object[] into) {
+                        for (int i = 0; i < into.length; i++) {
+                            into[i] = new IndexRoot(Ref.read(in));
+                        }
+                    }
+
+                    @Override
+                    public boolean holdsRefs() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean refersToPages(IndexRoot value) {
+                        return value.root() instanceof Ref.Stored;
+                    }
+
+                    @Override
+                    public IndexRoot mapRefs(IndexRoot value, RefMapper mapper) {
+                        Ref mapped = mapper.map(value.root(), inner);
+                        return mapped == value.root() ? value : new IndexRoot(mapped);
+                    }
+
+                    @Override
+                    public void forEachRef(IndexRoot value, RefVisitor visitor) {
+                        visitor.visit(value.root(), inner);
+                    }
+                },
+                EntryMeasure.keyed(root -> root.root().summary().fingerprint()));
     }
 
     public static long directoryKey(int tenant, int propertyKey, TypeTag tag) {
