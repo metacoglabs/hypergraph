@@ -142,7 +142,7 @@ public abstract sealed class View permits Snapshot, Transaction {
         return EngineSlots.REVERSE_INDEX.cursor(lazyTree(EngineSlots.REVERSE), atom, accept);
     }
 
-    public Tree<?> incidentTree(long atom) {
+    public Tree<IndexValues.Incident> incidentTree(long atom) {
         observeKey(EngineSlots.REVERSE, atom);
         return EngineSlots.REVERSE_INDEX.tree(lazyTree(EngineSlots.REVERSE), atom);
     }

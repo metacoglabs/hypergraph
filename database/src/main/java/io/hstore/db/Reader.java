@@ -154,6 +154,16 @@ public sealed class Reader permits Writer {
         return view.incident(atom).filter(incident -> owns(incident.edge()));
     }
 
+    public LongStream incidentAt(long atom, long instant) {
+        if (!onlyDefaultTenant() && !visible(atom)) {
+            return LongStream.empty();
+        }
+        return view.incidentTree(atom).scan(summary -> summary.mayBeValidAt(instant))
+                .filter(entry -> entry.value().validAt(instant))
+                .mapToLong(Entry::key)
+                .filter(this::owns);
+    }
+
     public Tree<?> incidentTree(long atom) {
         return onlyDefaultTenant() || visible(atom)
                 ? view.incidentTree(atom)

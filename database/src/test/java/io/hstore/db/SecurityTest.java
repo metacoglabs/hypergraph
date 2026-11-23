@@ -5,6 +5,7 @@ package io.hstore.db;
 
 import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
+import io.hstore.db.temporal.Temporal;
 import io.hstore.db.security.Principal;
 import io.hstore.db.security.Role;
 import io.hstore.db.security.Scram;
@@ -307,6 +308,30 @@ class SecurityTest {
                 reader.forEachIncidentEdge(acmePatient, edges::add);
                 assertEquals(List.of(acmeEdge), edges);
                 assertEquals(reader.incident(acmePatient).map(Incident::edge).toList(), edges);
+                return null;
+            });
+        }
+    }
+
+    @Test
+    void validAtScansNeverFollowMembershipsIntoAnotherTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient VALID [0, 10)) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmePatient = alice.variables().get("p");
+            long acmeEdge = alice.variables().get("e");
+            long globexEdge = bob.variables().get("e");
+            database.write(writer -> {
+                writer.transaction().upsert(globexEdge, acmePatient, _ -> Incidence.of(acmePatient).withValidity(new Validity(0, 10)));
+                return null;
+            });
+            database.read(Branch.MAIN, alice.principal(), reader -> {
+                assertEquals(List.of(acmeEdge), reader.incidentAt(acmePatient, 5).boxed().toList());
+                assertEquals(List.of(acmeEdge), Temporal.activeEdges(reader, acmePatient, 5).boxed().toList());
+                return null;
+            });
+            database.read(Branch.MAIN, bob.principal(), reader -> {
+                assertEquals(List.of(), reader.incidentAt(acmePatient, 5).boxed().toList());
                 return null;
             });
         }
