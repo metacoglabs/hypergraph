@@ -472,6 +472,44 @@ class SecurityTest {
     }
 
     @Test
+    void motifsStayInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e1;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e2;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e3;
+                    """);
+            bob.executeAll("""
+                    INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $f1;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $f2;
+                    """);
+            long acmePatient = alice.variables().get("p");
+            long acmeEdge = alice.variables().get("e1");
+            long globexPatient = bob.variables().get("p");
+            long globexEdge = bob.variables().get("f1");
+            long otherGlobexEdge = bob.variables().get("f2");
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> Incidence.of(globexPatient));
+                writer.transaction().upsert(globexEdge, acmePatient, _ -> Incidence.of(acmePatient));
+                writer.transaction().upsert(otherGlobexEdge, acmePatient, _ -> Incidence.of(acmePatient));
+                return null;
+            });
+            var census = alice.execute("MOTIFS EXACT");
+            assertEquals(List.of(List.of("64", "duplicate", "1", "0")), census.rows().stream()
+                    .map(row -> row.stream().map(cell -> cell.render()).toList()).toList());
+            assertEquals(1, alice.execute("MOTIF 64 AROUND @" + acmeEdge).rows().size());
+            String rendered = alice.execute("MOTIF 64 REGION '111' HAS @" + acmePatient).rows().toString();
+            assertFalse(rendered.contains("@" + globexEdge + " ") || rendered.contains("@" + otherGlobexEdge + " "), rendered);
+            assertThrows(HStoreException.class, () -> alice.execute("MOTIF PROFILE @" + globexEdge));
+            assertThrows(HStoreException.class, () -> alice.execute("MOTIF 64 AROUND @" + globexEdge));
+            assertThrows(HStoreException.class, () -> alice.execute("MOTIF 64 REGION '111' HAS @" + globexPatient));
+            assertEquals(Map.of("64", "1"), Map.of(census.rows().getFirst().get(0).render(), census.rows().getFirst().get(2).render()));
+        }
+    }
+
+    @Test
     void roleFilteredMatchesStayInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");

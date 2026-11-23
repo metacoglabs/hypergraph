@@ -296,6 +296,17 @@ public sealed class Reader permits Writer {
         return readable(typeId) ? view.countOfType(tenant(), typeId) : 0;
     }
 
+    public long atomOfTypeAt(int typeId, long rank) {
+        if (!readable(typeId) || rank < 0 || rank >= view.countOfType(tenant(), typeId)) {
+            throw HStoreException.invalid("no atom of type " + typeId + " at rank " + rank);
+        }
+        return view.typeTree(tenant(), typeId).at(rank).key();
+    }
+
+    public List<Integer> readableEdgeTypes() {
+        return schema().types(view).stream().filter(type -> type.kind().isEdge() && readable(type.id())).map(TypeDef::id).toList();
+    }
+
     public long population(boolean edges) {
         return schema().types(view).stream()
                 .filter(type -> type.kind().isEdge() == edges)

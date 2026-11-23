@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `MOTIFS`, `MOTIF`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -516,6 +516,39 @@ HYPERMATCH q0:R(u2:A, u4:B), q1:R(u0:A, u1:C, u2), q2:R(u0, u1, u3:A, u4);
 -- | @9  | @11 | @13 |
 ```
 
+### MOTIFS
+
+```ebnf
+motifs        = "MOTIFS" [ "OF" identifier ] [ "EXACT" | "SAMPLE" integer | "AUTO" ] [ "SEED" integer ] ;
+motif_profile = "MOTIF" "PROFILE" ref [ "OF" identifier ] ;
+motif         = "MOTIF" integer [ "TYPES" "(" slot_type "," slot_type "," slot_type ")" ] [ "AROUND" ref ]
+                { "REGION" string "HAS" ( ref | "ANY" [ identifier ] ) [ "ROLES" "(" roles { "," roles } ")" ] }
+                [ "NESTED" ] [ "RANK" "BY" ( "COMMON" | "DISJOINT" | "INDEPENDENT" ) ] [ "LIMIT" integer ] ;
+slot_type     = identifier | "ANY" ;
+roles         = "ANY" | identifier { "OR" identifier } ;
+```
+
+`MOTIFS` counts the triples of overlapping hyperedges by class, over one hyperedge type or all of them. Columns:
+`class, shape, count, standard_error`. `EXACT` counts every triple, `SAMPLE n` estimates from `n` random hyperedges
+(1 to 1,000,000), and the default tries an exact count first and samples if the budget runs out. `MOTIF PROFILE @e`
+counts the triples containing one hyperedge, with columns `class, shape, count`.
+
+`MOTIF <code>` lists triples whose regions match the code with `e1`, `e2` and `e3` in that order. Columns:
+`e1, e2, e3`, plus `weight` with `RANK BY`. A region is three bits for `e3`, `e2` and `e1`, such as `'011'`, and must be
+non-empty in the code; `ROLES` has one entry per hyperedge of the region, in the order `e1`, `e2`, `e3` (the reverse of
+the bits). `SEED` applies to sampled counts only. `LIMIT` defaults to 1000 and takes up to
+100,000. The classes, regions and weights are explained in [motifs](motifs.md).
+
+```
+MOTIFS OF Meeting EXACT;
+-- | class | shape  | count | standard_error |
+-- | 30    | open   | 1     | 0              |
+-- | 31    | open   | 1     | 0              |
+-- | 94    | closed | 1     | 0              |
+
+MOTIF 94 REGION '111' HAS ANY Person ROLES (guest, host OR guest, ANY) LIMIT 10;
+```
+
 ### TRANSITIONS
 
 ```ebnf
@@ -835,7 +868,8 @@ CREATE BRANCH b1; CREATE BRANCH b2 FROM b1; DROP BRANCH b2; DROP BRANCH b1;
 
 ```ebnf
 create_view  = "CREATE" "VIEW" identifier "AS"
-               ( "DEGREE" | "CARDINALITY" | "ACTIVITY" [ "BUCKET" integer ] | "OVERLAP" "TOP" integer )
+               ( "DEGREE" | "CARDINALITY" | "ACTIVITY" [ "BUCKET" integer ] | "OVERLAP" "TOP" integer
+               | "MOTIFS" [ "OF" identifier ] )
                [ "CONTINUOUS" ] ;                                        (* ADMIN; BUCKET default 60000 ms *)
 refresh_view = "REFRESH" "VIEW" identifier ;                              (* ADMIN *)
 drop_view    = "DROP" "VIEW" identifier ;                                 (* ADMIN *)

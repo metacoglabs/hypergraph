@@ -335,6 +335,33 @@ public final class Parser {
         if (accept("HYPERMATCH")) {
             return structuralMatch();
         }
+        if (accept("MOTIFS")) {
+            Optional<String> type = accept("OF") ? Optional.of(identifier()) : Optional.empty();
+            String mode = "AUTO";
+            long samples = 0;
+            if (accept("EXACT")) {
+                mode = "EXACT";
+            } else if (accept("SAMPLE")) {
+                mode = "SAMPLE";
+                samples = longValue();
+                if (samples < 1 || samples > 1_000_000) {
+                    throw HStoreException.invalid("SAMPLE must be between 1 and 1000000 draws");
+                }
+            } else {
+                accept("AUTO");
+            }
+            long seed = 0;
+            if (accept("SEED")) {
+                if (mode.equals("EXACT")) {
+                    throw HStoreException.invalid("SEED only applies to sampled counts");
+                }
+                seed = longValue();
+            }
+            return new Statement.Motifs(type, mode, samples, seed);
+        }
+        if (accept("MOTIF")) {
+            return motif();
+        }
         if (accept("MEMBERS")) {
             expect("OF");
             Ref edge = ref();
@@ -706,6 +733,9 @@ public final class Parser {
             } else if (accept("ACTIVITY")) {
                 kind = MaterializedViews.Kind.ACTIVITY;
                 parameter = accept("BUCKET") ? longValue() : 60_000;
+            } else if (accept("MOTIFS")) {
+                Optional<String> type = accept("OF") ? Optional.of(identifier()) : Optional.empty();
+                return new Statement.CreateMotifView(name, type, accept("CONTINUOUS"));
             } else {
                 expect("OVERLAP");
                 expect("TOP");
@@ -1543,6 +1573,73 @@ public final class Parser {
 
     private Ast.Instant transitionInstant() {
         return accept("GENERATION") ? new Ast.Instant.Generation(longValue()) : new Ast.Instant.Time(parseInstant(string()));
+    }
+
+    private Statement motif() {
+        if (accept("PROFILE")) {
+            Ref edge = ref();
+            return new Statement.MotifProfile(edge, accept("OF") ? Optional.of(identifier()) : Optional.empty());
+        }
+        long code = longValue();
+        if (code < 1 || code > 127) {
+            throw HStoreException.invalid("a motif is a code between 1 and 127, got " + code);
+        }
+        List<Optional<String>> types = new ArrayList<>(List.of(Optional.empty(), Optional.empty(), Optional.empty()));
+        if (accept("TYPES")) {
+            expectSymbol("(");
+            for (int i = 0; i < 3; i++) {
+                if (i > 0) {
+                    expectSymbol(",");
+                }
+                types.set(i, accept("ANY") ? Optional.empty() : Optional.of(identifier()));
+            }
+            expectSymbol(")");
+        }
+        Optional<Ref> around = accept("AROUND") ? Optional.of(ref()) : Optional.empty();
+        List<Ast.MotifRegion> regions = new ArrayList<>();
+        while (accept("REGION")) {
+            String bits = string();
+            if (!bits.matches("[01]{3}") || bits.equals("000")) {
+                throw HStoreException.invalid("a region is written as three bits for e3, e2 and e1, such as '011'; got '" + bits + "'");
+            }
+            int region = Integer.parseInt(bits, 2);
+            expect("HAS");
+            Optional<Ref> member = Optional.empty();
+            Optional<String> memberType = Optional.empty();
+            if (accept("ANY")) {
+                if (peek().kind() == Token.Kind.WORD && !peekWordAt(0, "ROLES", "REGION", "NESTED", "RANK", "LIMIT", "AROUND")) {
+                    memberType = Optional.of(identifier());
+                }
+            } else {
+                member = Optional.of(ref());
+            }
+            List<List<String>> roles = new ArrayList<>();
+            if (accept("ROLES")) {
+                expectSymbol("(");
+                do {
+                    List<String> alternatives = new ArrayList<>();
+                    if (!accept("ANY")) {
+                        do {
+                            alternatives.add(identifier());
+                        } while (accept("OR"));
+                    }
+                    roles.add(List.copyOf(alternatives));
+                } while (acceptSymbol(","));
+                expectSymbol(")");
+            }
+            regions.add(new Ast.MotifRegion(region, member, memberType, List.copyOf(roles)));
+        }
+        boolean nested = accept("NESTED");
+        Optional<String> rankBy = Optional.empty();
+        if (accept("RANK")) {
+            expect("BY");
+            String weight = identifier().toUpperCase(java.util.Locale.ROOT);
+            if (!List.of("COMMON", "DISJOINT", "INDEPENDENT").contains(weight)) {
+                throw HStoreException.invalid("RANK BY takes COMMON, DISJOINT or INDEPENDENT");
+            }
+            rankBy = Optional.of(weight);
+        }
+        return new Statement.MotifMatch((int) code, List.copyOf(types), around, List.copyOf(regions), nested, rankBy, limit());
     }
 
     private OptionalLong limit() {

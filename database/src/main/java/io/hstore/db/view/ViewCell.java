@@ -42,11 +42,19 @@ public sealed interface ViewCell {
     record Neighbor(long edge, long overlap) {
     }
 
+    record Census(long estimate, long standardErrorMicros, boolean exact) implements ViewCell {
+        @Override
+        public long hash() {
+            return Hashing.of(4, estimate, standardErrorMicros, exact ? 1 : 0);
+        }
+    }
+
     ValueCodec<ViewCell> CODEC = ValueCodec.rows(
             cell -> switch (cell) {
                 case Count _ -> 11;
                 case Activity _ -> 21;
                 case Ranked(List<Neighbor> neighbors) -> 6 + 20 * neighbors.size();
+                case Census _ -> 22;
             },
             (out, cell) -> {
                 switch (cell) {
@@ -56,6 +64,7 @@ public sealed interface ViewCell {
                         out.putByte(2).putVarInt(neighbors.size());
                         neighbors.forEach(neighbor -> out.putVarLong(neighbor.edge()).putVarLong(neighbor.overlap()));
                     }
+                    case Census(long estimate, long error, boolean exact) -> out.putByte(3).putVarLong(estimate).putVarLong(error).putByte(exact ? 1 : 0);
                 }
             },
             ViewCell::read);
@@ -64,6 +73,7 @@ public sealed interface ViewCell {
         return switch (in.getUnsignedByte()) {
             case 0 -> new Count(in.getSignedVarLong());
             case 1 -> new Activity(in.getVarLong(), in.getVarLong());
+            case 3 -> new Census(in.getVarLong(), in.getVarLong(), in.getUnsignedByte() == 1);
             default -> {
                 int count = in.getVarInt();
                 List<Neighbor> neighbors = new ArrayList<>(count);
