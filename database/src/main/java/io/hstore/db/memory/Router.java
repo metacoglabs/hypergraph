@@ -34,7 +34,8 @@ public final class Router {
     public record Policy(double mass, int minChildren, int maxChildren, int maxDepth, int maxRegions, double temperature,
                          double fallbackEntropy, int top, boolean recall) {
 
-        public static final Policy DEFAULT = new Policy(0.9, 1, 32, 16, 256, Double.NaN, 0.95, 10, false);
+        public static final Policy DEFAULT = new Policy(0.9, 1, 32, 64, 256, Double.NaN, 0.95, 10, false);
+        public static final double MIN_TEMPERATURE = 0.001;
 
         public Policy {
             if (!(mass > 0 && mass <= 1)) {
@@ -43,8 +44,8 @@ public final class Router {
             if (minChildren < 1 || maxChildren < minChildren || maxDepth < 1 || maxRegions < 1 || top < 1 || top > 1000) {
                 throw new IllegalArgumentException("routing limits must be positive, MIN at most MAX, and TOP at most 1000");
             }
-            if (!Double.isNaN(temperature) && !(temperature > 0)) {
-                throw new IllegalArgumentException("the routing temperature must be positive");
+            if (!Double.isNaN(temperature) && !(temperature >= MIN_TEMPERATURE && temperature <= 100)) {
+                throw new IllegalArgumentException("the routing temperature must be between " + MIN_TEMPERATURE + " and 100");
             }
         }
 

@@ -25,15 +25,15 @@ public record Region(long id, long hierarchy, long parent, int level, long count
                     .putVarLong(region.count()).putVarInt(region.tenant()),
             in -> new Region(in.getVarLong(), in.getVarLong(), in.getVarLong(), in.getVarInt(), in.getVarLong(), in.getVarInt()));
 
-    public record Leaf(long hierarchy, long section, long document, long region, long vector) {
+    public record Leaf(long hierarchy, long section, long document, long region, long vector, long payload) {
 
         long hash() {
-            return Hashing.of(hierarchy, section, document, region, vector);
+            return Hashing.of(hierarchy, section, document, region, vector, payload);
         }
 
-        static final ValueCodec<Leaf> CODEC = ValueCodec.rows(_ -> 50,
+        static final ValueCodec<Leaf> CODEC = ValueCodec.rows(_ -> 60,
                 (out, leaf) -> out.putVarLong(leaf.hierarchy()).putVarLong(leaf.section()).putVarLong(leaf.document()).putVarLong(leaf.region())
-                        .putVarLong(leaf.vector()),
-                in -> new Leaf(in.getVarLong(), in.getVarLong(), in.getVarLong(), in.getVarLong(), in.getVarLong()));
+                        .putVarLong(leaf.vector()).putVarLong(leaf.payload()),
+                in -> new Leaf(in.getVarLong(), in.getVarLong(), in.getVarLong(), in.getVarLong(), in.getVarLong(), in.getVarLong()));
     }
 }

@@ -268,6 +268,92 @@ class HierarchyTest {
     }
 
     @Test
+    void centroidsStayOutOfThePayloadStore() {
+        for (int i = 0; i < 20; i++) {
+            note("Note", "n" + i);
+        }
+        database.write(writer -> Hierarchies.create(writer, spec("memory", false)));
+        database.read(reader -> {
+            Set<Long> regions = new HashSet<>(Hierarchies.regions(reader, Hierarchies.find(reader, "memory").orElseThrow()).stream().map(Region::id).toList());
+            assertTrue(reader.engineView().scan(VectorRecord.VECTORS).values().noneMatch(record -> regions.contains(record.owner())));
+            return null;
+        });
+    }
+
+    @Test
+    void replacingASectionVectorMovesItsLeaf() {
+        for (int i = 0; i < 20; i++) {
+            note("Note", "n" + i);
+        }
+        database.write(writer -> Hierarchies.create(writer, spec("memory", false)));
+        long section = database.read(reader -> Hierarchies.leaves(reader, Hierarchies.find(reader, "memory").orElseThrow()).keySet().iterator().next());
+        float[] flipped = database.read(reader -> database.semantic().vectorOf(reader.vectors(section).getFirst())).clone();
+        for (int i = 0; i < flipped.length; i++) {
+            flipped[i] = -flipped[i];
+        }
+        database.write(writer -> writer.vector(section, "content", model, 2, flipped));
+        database.write(writer -> Hierarchies.refresh(writer, "memory"));
+        assertSound("memory", Optional.empty());
+    }
+
+    @Test
+    void quietHierarchiesNeitherCommitNorHoldTheFeed() throws InterruptedException {
+        database.close();
+        directory = directory.resolve("feed");
+        database = HypergraphDatabase.open(directory, DatabaseOptions.defaults()
+                .withEngine(EngineOptions.defaults().withPageSize(4096).withFeedRetention(1)));
+        database.write(writer -> {
+            writer.defineNode("Note", List.of());
+            writer.defineNode("Log", List.of());
+            return null;
+        });
+        note("Note", "seed");
+        for (int i = 0; i < 5; i++) {
+            int index = i;
+            database.write(writer -> Hierarchies.create(writer, new Hierarchies.Spec("quiet" + index, model, "elsewhere", Optional.empty(), 4, 5, true)));
+        }
+        database.write(writer -> Hierarchies.create(writer, spec("live", true)));
+        long before = database.engine().transactions().current().id();
+        note("Note", "one");
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (database.read(reader -> Hierarchies.find(reader, "live").orElseThrow().leaves()) < 2 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        Thread.sleep(200);
+        long commits = database.engine().transactions().current().id() - before;
+        assertTrue(commits <= 5, commits + " commits for one revision and six hierarchies");
+        for (int i = 0; i < 300; i++) {
+            int index = i;
+            database.write(writer -> writer.node("Log", "plain" + index));
+        }
+        database.engine().checkpoint();
+        long current = database.engine().transactions().current().id();
+        long held = database.engine().feed().heldFrom();
+        assertTrue(held > current - 50, "the feed is held from " + held + " of " + current);
+    }
+
+    @Test
+    void namesAreUniqueEvenUnderConcurrentCreates() {
+        note("Note", "a");
+        io.hstore.engine.txn.Transaction first = database.engine().begin(database.options().transaction());
+        io.hstore.engine.txn.Transaction second = database.engine().begin(database.options().transaction());
+        try {
+            Hierarchies.create(database.writer(first), spec("dup", false));
+            Hierarchies.create(database.writer(second), spec("dup", false));
+            database.commit(first);
+            assertThrows(HStoreException.Conflict.class, () -> database.commit(second));
+        } finally {
+            first.close();
+            second.close();
+        }
+        assertEquals(1, database.read(reader -> Hierarchies.list(reader)).size());
+        assertThrows(HStoreException.class, () -> database.write(writer -> Hierarchies.calibrate(writer, "dup", java.util.OptionalDouble.empty(),
+                Map.of(0, new double[]{1e308, 0}))));
+        assertThrows(HStoreException.class, () -> database.write(writer -> Hierarchies.calibrate(writer, "dup", java.util.OptionalDouble.of(1e-300),
+                Map.of())));
+    }
+
+    @Test
     void droppingRemovesEveryRegionAndCentroid() {
         for (int i = 0; i < 12; i++) {
             note("Note", "n" + i);
@@ -282,7 +368,8 @@ class HierarchyTest {
         });
         database.read(reader -> {
             assertTrue(Hierarchies.find(reader, "memory").isEmpty());
-            assertEquals(vectorsBefore - regions.size(), reader.engineView().scan(VectorRecord.VECTORS).size());
+            assertEquals(vectorsBefore, reader.engineView().scan(VectorRecord.VECTORS).size());
+            assertEquals(0, reader.engineView().scan(HierarchySlots.REGION_VECTORS).size());
             assertEquals(0, reader.engineView().scan(HierarchySlots.REGIONS).size());
             assertEquals(0, reader.engineView().scan(HierarchySlots.LEAVES).size());
             return null;

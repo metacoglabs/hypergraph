@@ -1037,7 +1037,7 @@ public final class Parser {
         double mass = 0.9;
         int min = 1;
         int max = 32;
-        int depth = 16;
+        int depth = 64;
         int regions = 256;
         OptionalDouble temperature = OptionalDouble.empty();
         double fallback = 0.95;
@@ -1059,8 +1059,8 @@ public final class Parser {
                 regions = (int) bounded(longValue(), 1, 1_000_000, "REGIONS");
             } else if (accept("TEMPERATURE")) {
                 double value = number().doubleValue();
-                if (!(value > 0 && value <= 100)) {
-                    throw error("TEMPERATURE must be greater than 0 and at most 100");
+                if (!(value >= 0.001 && value <= 100)) {
+                    throw error("TEMPERATURE must be between 0.001 and 100");
                 }
                 temperature = OptionalDouble.of(value);
             } else if (accept("FALLBACK")) {

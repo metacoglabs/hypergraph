@@ -548,7 +548,7 @@ final class Executor {
                  Statement.Grant _, Statement.Revoke _,
                  Statement.CreateView _, Statement.CreateMotifView _, Statement.RefreshView _, Statement.DropView _, Statement.ShowView _,
                  Statement.CreateHierarchy _, Statement.RebuildHierarchy _, Statement.DropHierarchy _, Statement.CalibrateHierarchy _,
-                 Statement.ReferenceRegion _ -> true;
+                 Statement.ReferenceRegion _, Statement.RegionsOf _ -> true;
             default -> false;
         };
     }
@@ -1731,10 +1731,13 @@ final class Executor {
 
     private QueryResult showHierarchies(Reader reader) {
         long current = database().engine().transactions().current().id();
+        boolean counts = reader.principal().role().readsEveryType();
         return table(List.of("name", "model", "view", "type", "leaves", "regions", "fanout", "leaves_per_region", "continuous", "generation", "behind"),
                 Hierarchies.list(reader).stream().map(hierarchy -> List.of(QueryResult.text(hierarchy.name()), QueryResult.text(modelName(hierarchy.model())),
-                        QueryResult.text(hierarchy.view()), QueryResult.text(hierarchy.type() == 0 ? "" : reader.schema().require(reader.engineView(),
-                                hierarchy.type()).name()), QueryResult.number(hierarchy.leaves()), QueryResult.number(Hierarchies.regions(reader, hierarchy).size()),
+                        QueryResult.text(hierarchy.view()), QueryResult.text(hierarchy.type() == 0 || !reader.readable(hierarchy.type()) ? ""
+                                : reader.schema().require(reader.engineView(), hierarchy.type()).name()),
+                        counts ? QueryResult.number(hierarchy.leaves()) : QueryResult.text(""),
+                        counts ? QueryResult.number(Hierarchies.regions(reader, hierarchy).size()) : QueryResult.text(""),
                         QueryResult.number(hierarchy.fanout()), QueryResult.number(hierarchy.capacity()), QueryResult.text(hierarchy.continuous() ? "yes" : "no"),
                         QueryResult.number(hierarchy.generation()), QueryResult.number(Math.max(0, current - hierarchy.generation())))));
     }

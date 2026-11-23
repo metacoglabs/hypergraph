@@ -17,6 +17,7 @@ import io.hstore.engine.feed.CommitEvent;
 import io.hstore.engine.index.IndexValues.Marker;
 import io.hstore.engine.index.PostingIndex;
 import io.hstore.engine.index.Postings;
+import io.hstore.engine.tree.Hashing;
 import io.hstore.engine.txn.Transaction;
 import io.hstore.engine.txn.TxnOptions;
 import io.hstore.engine.txn.View;
@@ -24,6 +25,7 @@ import io.hstore.engine.txn.View;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -33,6 +35,8 @@ import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 
 public final class Hierarchies {
@@ -41,8 +45,6 @@ public final class Hierarchies {
     public static final int MAX_FANOUT = 64;
     public static final int MAX_CAPACITY = 1024;
     public static final int MAX_LEVELS = 8;
-    public static final String CENTROID = "centroid";
-    public static final String REFERENCE = "reference:";
     private static final System.Logger LOG = System.getLogger("hstore.memory");
     private static final Pattern NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,63}");
 
@@ -102,16 +104,26 @@ public final class Hierarchies {
     }
 
     public static float[] centroid(Reader reader, Hierarchy hierarchy, long region) {
-        return vectorsOf(reader.engineView(), reader, region, CENTROID).stream().findFirst()
+        requireRegion(reader.engineView(), reader.tenant(), hierarchy, region);
+        return HierarchySlots.readVector(reader.engineView(), region, HierarchySlots.CENTROID)
                 .orElseThrow(() -> HStoreException.invalid("region " + region + " has no centroid"));
     }
 
-    private static List<float[]> vectorsOf(View view, Reader reader, long owner, String prefix) {
-        return VectorRecord.ofOwner(view, owner).stream()
-                .filter(record -> record.tenant() == reader.tenant() && (prefix.endsWith(":") ? record.view().startsWith(prefix) : record.view().equals(prefix)))
-                .sorted(Comparator.comparing(VectorRecord::view))
-                .map(record -> reader.database().semantic().vectorOf(record))
-                .toList();
+    private static List<float[]> references(View view, long region) {
+        List<float[]> found = new ArrayList<>();
+        for (int slot = 1; slot <= HierarchySlots.MAX_REFERENCES; slot++) {
+            HierarchySlots.readVector(view, region, slot).ifPresent(found::add);
+        }
+        return found;
+    }
+
+    private static Region requireRegion(View view, int tenant, Hierarchy hierarchy, long region) {
+        return view.get(HierarchySlots.REGIONS, region).filter(found -> found.hierarchy() == hierarchy.id() && found.tenant() == tenant)
+                .orElseThrow(() -> HStoreException.invalid("region " + region + " is not part of hierarchy '" + hierarchy.name() + "'"));
+    }
+
+    public static long id(int tenant, String name) {
+        return Hashing.of(tenant, Hashing.of(name), 0x48494552L);
     }
 
     private static List<Long> postings(View view, Slot<Postings<Marker>> slot, PostingIndex<Marker> index, long key) {
@@ -130,7 +142,10 @@ public final class Hierarchies {
         int model = writer.database().semantic().existingModel(spec.model())
                 .orElseThrow(() -> HStoreException.invalid("no vectors use model '" + spec.model() + "'"));
         int type = spec.type().map(name -> writer.requireReadableType(name).id()).orElse(0);
-        long id = writer.database().engine().transactions().allocateAtom();
+        long id = id(writer.tenant(), spec.name());
+        if (writer.transaction().get(HierarchySlots.HIERARCHIES, id).isPresent()) {
+            throw HStoreException.invalid("hierarchy '" + spec.name() + "' already exists");
+        }
         Hierarchy hierarchy = new Hierarchy(id, spec.name(), writer.tenant(), model, spec.view(), type, spec.fanout(), spec.capacity(),
                 spec.continuous(), 0, writer.generation(), 0, Router.Calibration.TEMPERATURE, List.of(), 1);
         return new Work(writer, hierarchy).build();
@@ -139,47 +154,40 @@ public final class Hierarchies {
     public static Hierarchy refresh(Writer writer, String name) {
         writer.principal().requireWrite();
         requireMain(writer);
-        return refreshed(writer, require(writer, name));
+        return refreshed(writer, require(writer, name), true).hierarchy();
     }
 
-    static Hierarchy refreshed(Writer writer, Hierarchy hierarchy) {
+    record Refresh(Hierarchy hierarchy, long target) {
+    }
+
+    static Refresh refreshed(Writer writer, Hierarchy hierarchy, boolean recordQuiet) {
         ChangeFeed feed = writer.database().engine().feed();
         long target = Math.min(feed.lastGeneration(), writer.generation());
         if (target <= hierarchy.generation()) {
-            return hierarchy;
+            return new Refresh(hierarchy, target);
         }
         List<CommitEvent> events = feed.replay(hierarchy.generation()).takeWhile(event -> event.generation() <= target)
                 .filter(event -> event.branch() == Branch.MAIN).toList();
         if (!feed.covers(hierarchy.generation())) {
-            return new Work(writer, hierarchy).rebuild();
+            return new Refresh(new Work(writer, hierarchy).rebuild(), target);
         }
         Work work = new Work(writer, hierarchy);
         Set<Long> documents = new TreeSet<>();
         for (CommitEvent event : events) {
             documents.addAll(touched(writer, hierarchy, event));
         }
-        if (documents.isEmpty()) {
-            Hierarchy advanced = hierarchy.with(hierarchy.root(), target, hierarchy.leaves());
-            writer.transaction().put(HierarchySlots.HIERARCHIES, hierarchy.id(), advanced);
-            return advanced;
-        }
         Map<Long, Map<Long, VectorRecord>> wanted = new LinkedHashMap<>();
         documents.forEach(document -> wanted.put(document, work.prune(document)));
         wanted.forEach(work::grow);
-        return work.finish(target);
-    }
-
-    static boolean relevant(CommitEvent event) {
-        for (SlotChange<?> change : event.slots()) {
-            if (change.slot() == MemorySlots.SECTIONS || change.slot() == MemorySlots.DOCUMENTS) {
-                return true;
+        if (!work.changed()) {
+            if (recordQuiet) {
+                Hierarchy advanced = hierarchy.with(hierarchy.root(), target, hierarchy.leaves());
+                writer.transaction().put(HierarchySlots.HIERARCHIES, hierarchy.id(), advanced);
+                return new Refresh(advanced, target);
             }
-            if (change.slot() == VectorRecord.VECTORS && (Optional.ofNullable(value(change, true)).map(VectorRecord.class::cast)
-                    .map(VectorRecord::indexed).orElse(false))) {
-                return true;
-            }
+            return new Refresh(hierarchy, target);
         }
-        return false;
+        return new Refresh(work.finish(target), target);
     }
 
     private static Object value(SlotChange<?> change, boolean afterFirst) {
@@ -228,16 +236,16 @@ public final class Hierarchies {
         writer.principal().requireAdmin();
         requireMain(writer);
         Hierarchy hierarchy = require(writer, name);
-        if (temperature.isPresent() && !(temperature.getAsDouble() > 0 && temperature.getAsDouble() <= 100)) {
-            throw HStoreException.invalid("the routing temperature must be in (0, 100]");
+        if (temperature.isPresent() && !(temperature.getAsDouble() >= Router.Policy.MIN_TEMPERATURE && temperature.getAsDouble() <= 100)) {
+            throw HStoreException.invalid("the routing temperature must be between " + Router.Policy.MIN_TEMPERATURE + " and 100");
         }
         List<double[]> lines = new ArrayList<>(hierarchy.calibration());
         for (Map.Entry<Integer, double[]> level : new TreeMap<>(levels).entrySet()) {
             if (level.getKey() < 0 || level.getKey() >= MAX_LEVELS) {
                 throw HStoreException.invalid("calibrated levels run from 0 to " + (MAX_LEVELS - 1));
             }
-            if (!Double.isFinite(level.getValue()[0]) || !Double.isFinite(level.getValue()[1])) {
-                throw HStoreException.invalid("calibration scale and shift must be finite");
+            if (!(Math.abs(level.getValue()[0]) <= 1000) || !(Math.abs(level.getValue()[1]) <= 1000)) {
+                throw HStoreException.invalid("calibration scale and shift must be between -1000 and 1000");
             }
             while (lines.size() <= level.getKey()) {
                 lines.add(new double[]{1, 0});
@@ -253,17 +261,23 @@ public final class Hierarchies {
         writer.principal().requireAdmin();
         requireMain(writer);
         Hierarchy hierarchy = require(writer, name);
-        Region found = writer.engineView().get(HierarchySlots.REGIONS, region)
-                .filter(candidate -> candidate.hierarchy() == hierarchy.id() && candidate.tenant() == writer.tenant())
-                .orElseThrow(() -> HStoreException.invalid("region " + region + " is not part of hierarchy '" + name + "'"));
-        if (vectors.size() > 16) {
-            throw HStoreException.invalid("a region keeps at most 16 reference vectors");
+        Region found = requireRegion(writer.engineView(), writer.tenant(), hierarchy, region);
+        if (vectors.size() > HierarchySlots.MAX_REFERENCES) {
+            throw HStoreException.invalid("a region keeps at most " + HierarchySlots.MAX_REFERENCES + " reference vectors");
         }
-        vectors.forEach(vector -> requireDimensions(writer.engineView(), hierarchy, vector.length));
-        VectorRecord.ofOwner(writer.engineView(), found.id()).stream().filter(record -> record.view().startsWith(REFERENCE))
-                .forEach(record -> writer.dropRegionVector(found.id(), record.view()));
+        for (float[] vector : vectors) {
+            requireDimensions(writer.engineView(), hierarchy, vector.length);
+            for (float component : vector) {
+                if (!Float.isFinite(component)) {
+                    throw HStoreException.invalid("reference vectors must be finite");
+                }
+            }
+        }
+        for (int slot = 1; slot <= HierarchySlots.MAX_REFERENCES; slot++) {
+            HierarchySlots.clearVector(writer.transaction(), found.id(), slot);
+        }
         for (int i = 0; i < vectors.size(); i++) {
-            writer.regionVector(found.id(), REFERENCE + i, hierarchy.model(), vectors.get(i));
+            HierarchySlots.writeVector(writer.transaction(), found.id(), i + 1, vectors.get(i));
         }
     }
 
@@ -306,8 +320,8 @@ public final class Hierarchies {
 
             @Override
             public List<float[]> keys(long id) {
-                List<float[]> references = vectorsOf(view, reader, id, REFERENCE);
-                return references.isEmpty() ? vectorsOf(view, reader, id, CENTROID) : references;
+                List<float[]> references = references(view, id);
+                return references.isEmpty() ? HierarchySlots.readVector(view, id, HierarchySlots.CENTROID).map(List::of).orElse(List.of()) : references;
             }
 
             @Override
@@ -318,52 +332,125 @@ public final class Hierarchies {
                         .orElseThrow(() -> HStoreException.invalid("section " + key + " has no vector in hierarchy '" + name + "'")));
             }
         };
+        if (policy.recall()) {
+            meter.consume(Math.max(1, hierarchy.leaves()));
+        }
         List<Long> all = policy.recall() ? leaves(reader, hierarchy).keySet().stream().filter(reader::visible).toList() : List.of();
         return Router.route(tree, query, policy, hierarchy.router(), meter, all);
     }
 
     public static AutoCloseable maintain(HypergraphDatabase database) {
-        ChangeFeed feed = database.engine().feed();
-        ChangeFeed.Subscription subscription = feed.subscribe(database.engine().transactions().current().id(), event -> {
-            if (event.branch() == Branch.MAIN && relevant(event)) {
-                refreshContinuous(database);
-            }
-        });
-        ChangeFeed.Hold hold = feed.hold(() -> database.read(reader -> reader.engineView().scan(HierarchySlots.HIERARCHIES).values()
-                .filter(Hierarchy::continuous).mapToLong(Hierarchy::generation).min().orElse(Long.MAX_VALUE)));
-        refreshContinuous(database);
-        return () -> {
-            subscription.close();
-            hold.close();
-        };
+        return new Maintainer(database);
     }
 
-    private static void refreshContinuous(HypergraphDatabase database) {
-        List<Hierarchy> continuous;
-        try {
-            continuous = database.read(reader -> reader.engineView().scan(HierarchySlots.HIERARCHIES).values().filter(Hierarchy::continuous).toList());
-        } catch (RuntimeException failure) {
-            LOG.log(System.Logger.Level.WARNING, "could not list continuous hierarchies", failure);
-            return;
+    private static final class Maintainer implements AutoCloseable {
+
+        private final HypergraphDatabase database;
+        private final Map<Integer, Long> relevantUpTo = new ConcurrentHashMap<>();
+        private final Map<Long, Long> scannedUpTo = new ConcurrentHashMap<>();
+        private final ReentrantLock running = new ReentrantLock();
+        private final ChangeFeed.Subscription subscription;
+        private final ChangeFeed.Hold hold;
+        private volatile boolean closed;
+
+        Maintainer(HypergraphDatabase database) {
+            this.database = database;
+            ChangeFeed feed = database.engine().feed();
+            long start = database.engine().transactions().current().id();
+            continuous().forEach(hierarchy -> relevantUpTo.merge(hierarchy.tenant(), start, Math::max));
+            this.subscription = feed.subscribe(start, this::onCommit);
+            this.hold = feed.hold(this::retainFrom);
+            refresh(continuous().stream().map(Hierarchy::tenant).collect(java.util.stream.Collectors.toSet()));
         }
-        for (Hierarchy hierarchy : continuous) {
+
+        private List<Hierarchy> continuous() {
+            return database.read(reader -> reader.engineView().scan(HierarchySlots.HIERARCHIES).values().filter(Hierarchy::continuous).toList());
+        }
+
+        private long retainFrom() {
+            long from = Long.MAX_VALUE;
+            for (Hierarchy hierarchy : continuous()) {
+                long seen = Math.max(hierarchy.generation(), scannedUpTo.getOrDefault(hierarchy.id(), 0L));
+                if (relevantUpTo.getOrDefault(hierarchy.tenant(), 0L) > seen) {
+                    from = Math.min(from, seen);
+                }
+            }
+            return from;
+        }
+
+        private void onCommit(CommitEvent event) {
+            if (event.branch() != Branch.MAIN) {
+                return;
+            }
+            Set<Integer> tenants = tenants(event);
+            if (tenants.isEmpty()) {
+                return;
+            }
+            tenants.forEach(tenant -> relevantUpTo.merge(tenant, event.generation(), Math::max));
+            refresh(tenants);
+        }
+
+        private void refresh(Set<Integer> tenants) {
+            if (closed || tenants.isEmpty()) {
+                return;
+            }
+            running.lock();
             try {
-                database.write(TxnOptions.defaults(), Principal.SYSTEM.inTenant(hierarchy.tenant()), writer ->
-                        writer.engineView().get(HierarchySlots.HIERARCHIES, hierarchy.id()).map(current -> refreshed(writer, current)));
+                if (closed) {
+                    return;
+                }
+                for (Hierarchy hierarchy : continuous()) {
+                    if (!tenants.contains(hierarchy.tenant())) {
+                        continue;
+                    }
+                    try {
+                        database.write(TxnOptions.defaults(), Principal.SYSTEM.inTenant(hierarchy.tenant()), writer ->
+                                writer.engineView().get(HierarchySlots.HIERARCHIES, hierarchy.id()).map(current -> refreshed(writer, current, false)))
+                                .ifPresent(done -> scannedUpTo.merge(hierarchy.id(), done.target(), Math::max));
+                    } catch (RuntimeException failure) {
+                        LOG.log(System.Logger.Level.WARNING, "continuous refresh of hierarchy " + hierarchy.name() + " failed", failure);
+                    }
+                }
             } catch (RuntimeException failure) {
-                LOG.log(System.Logger.Level.WARNING, "continuous refresh of hierarchy " + hierarchy.name() + " failed", failure);
+                LOG.log(System.Logger.Level.WARNING, "could not refresh continuous hierarchies", failure);
+            } finally {
+                running.unlock();
             }
         }
+
+        @Override
+        public void close() {
+            closed = true;
+            subscription.close();
+            running.lock();
+            running.unlock();
+            hold.close();
+        }
+    }
+
+    private static Set<Integer> tenants(CommitEvent event) {
+        Set<Integer> tenants = new HashSet<>();
+        for (SlotChange<?> change : event.slots()) {
+            Object value = value(change, true);
+            if (change.slot() == MemorySlots.SECTIONS && value instanceof Section section) {
+                tenants.add(section.tenant());
+            } else if (change.slot() == MemorySlots.DOCUMENTS && value instanceof DocumentHead head) {
+                tenants.add(head.tenant());
+            } else if (change.slot() == VectorRecord.VECTORS && value instanceof VectorRecord record && record.indexed()) {
+                tenants.add(record.tenant());
+            }
+        }
+        return tenants;
     }
 
     private static void requireDimensions(View view, Hierarchy hierarchy, int length) {
         if (hierarchy.root() == 0) {
             return;
         }
-        VectorRecord.ofOwner(view, hierarchy.root()).stream().filter(record -> record.view().equals(CENTROID)).findFirst()
-                .filter(record -> record.dimensions() != length)
-                .ifPresent(record -> {
-                    throw HStoreException.invalid("hierarchy " + hierarchy.name() + " holds " + record.dimensions() + "-dimensional vectors, not " + length);
+        view.get(HierarchySlots.REGION_VECTORS, HierarchySlots.vectorKey(hierarchy.root(), HierarchySlots.CENTROID, 0))
+                .filter(chunk -> chunk.dimensions() != length)
+                .ifPresent(chunk -> {
+                    throw HStoreException.invalid("hierarchy " + hierarchy.name() + " holds " + chunk.dimensions() + "-dimensional vectors, not " + length);
                 });
     }
 
@@ -421,7 +508,7 @@ public final class Hierarchies {
             if (ids.size() <= hierarchy.capacity()) {
                 long region = create(parent, 0);
                 for (long section : ids) {
-                    attach(region, section, documents.get(section), records.get(section).id());
+                    attach(region, section, documents.get(section), records.get(section));
                 }
                 setCount(region, ids.size());
                 return region;
@@ -447,7 +534,7 @@ public final class Hierarchies {
             long key = HierarchySlots.documentKey(hierarchy.id(), document);
             for (long section : postings(txn, HierarchySlots.DOCUMENT_LEAVES, HierarchySlots.DOCUMENT_INDEX, key)) {
                 Optional<Region.Leaf> leaf = txn.get(HierarchySlots.LEAVES, HierarchySlots.leafKey(hierarchy.id(), section));
-                if (!wanted.containsKey(section) || leaf.map(found -> found.vector() != wanted.get(section).id()).orElse(true)) {
+                if (!wanted.containsKey(section) || leaf.map(found -> found.payload() != wanted.get(section).payload()).orElse(true)) {
                     remove(section);
                 }
             }
@@ -517,7 +604,7 @@ public final class Hierarchies {
                 region = best;
                 path.add(region);
             }
-            attach(region, section, document, record.id());
+            attach(region, section, document, record);
             for (long step : path) {
                 setCount(step, region(step).count() + 1);
             }
@@ -573,7 +660,7 @@ public final class Hierarchies {
                 if (found.level() == 0) {
                     Region.Leaf leaf = txn.get(HierarchySlots.LEAVES, HierarchySlots.leafKey(hierarchy.id(), item)).orElseThrow();
                     txn.put(HierarchySlots.LEAVES, HierarchySlots.leafKey(hierarchy.id(), item),
-                            new Region.Leaf(hierarchy.id(), item, leaf.document(), sibling, leaf.vector()));
+                            new Region.Leaf(hierarchy.id(), item, leaf.document(), sibling, leaf.vector(), leaf.payload()));
                     movedCount++;
                 } else {
                     setParent(item, sibling);
@@ -612,9 +699,8 @@ public final class Hierarchies {
             if (cached != null) {
                 return cached;
             }
-            float[] stored = dirty.contains(region) ? recompute(region) : VectorRecord.ofOwner(txn, region).stream()
-                    .filter(record -> record.view().equals(CENTROID)).findFirst()
-                    .map(record -> writer.database().semantic().vectorOf(record)).orElseGet(() -> recompute(region));
+            float[] stored = dirty.contains(region) ? recompute(region)
+                    : HierarchySlots.readVector(txn, region, HierarchySlots.CENTROID).orElseGet(() -> recompute(region));
             centroids.put(region, stored);
             return stored;
         }
@@ -652,16 +738,21 @@ public final class Hierarchies {
             return id;
         }
 
+        boolean changed() {
+            return !dirty.isEmpty() || leaves != hierarchy.leaves() || root != hierarchy.root();
+        }
+
         private void delete(long region) {
-            writer.dropRegionVector(region, null);
+            HierarchySlots.clearVectors(txn, region);
             txn.delete(HierarchySlots.REGIONS, region);
             regions.remove(region);
             centroids.remove(region);
             dirty.remove(region);
         }
 
-        private void attach(long region, long section, long document, long vector) {
-            txn.put(HierarchySlots.LEAVES, HierarchySlots.leafKey(hierarchy.id(), section), new Region.Leaf(hierarchy.id(), section, document, region, vector));
+        private void attach(long region, long section, long document, VectorRecord record) {
+            txn.put(HierarchySlots.LEAVES, HierarchySlots.leafKey(hierarchy.id(), section),
+                    new Region.Leaf(hierarchy.id(), section, document, region, record.id(), record.payload()));
             markDirty(region);
         }
 
@@ -696,7 +787,7 @@ public final class Hierarchies {
                     }
                 }
                 if (found.isPresent()) {
-                    writer.dropRegionVector(region, null);
+                    HierarchySlots.clearVectors(txn, region);
                     txn.delete(HierarchySlots.REGIONS, region);
                 }
             }
@@ -711,16 +802,12 @@ public final class Hierarchies {
             for (long region : order) {
                 centroids.remove(region);
             }
-            Map<Long, float[]> changed = new LinkedHashMap<>();
             for (long region : order) {
                 float[] centroid = recompute(region);
                 centroids.put(region, centroid);
                 if (centroid.length > 0) {
-                    changed.put(region, centroid);
+                    HierarchySlots.writeVector(txn, region, HierarchySlots.CENTROID, centroid);
                 }
-            }
-            if (!changed.isEmpty()) {
-                writer.regionVectors(CENTROID, hierarchy.model(), changed);
             }
             hierarchy = hierarchy.with(root, generation, leaves);
             txn.put(HierarchySlots.HIERARCHIES, hierarchy.id(), hierarchy);
