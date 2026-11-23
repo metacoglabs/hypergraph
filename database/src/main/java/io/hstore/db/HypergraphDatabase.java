@@ -21,6 +21,8 @@ import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.signal.Signals;
 import io.hstore.db.stats.Statistics;
 import io.hstore.db.temporal.StateBindings;
+import io.hstore.db.temporal.ValidityIndexing;
+import io.hstore.db.temporal.ValiditySlots;
 import io.hstore.db.view.MaterializedViews;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.StorageEngine;
@@ -70,7 +72,8 @@ public final class HypergraphDatabase implements AutoCloseable {
         this.options = options;
         this.payloads = PayloadStore.open(directory.resolve("payload"));
         AtomicReference<Schema> schemaHolder = new AtomicReference<>();
-        List<Derivation> derivations = List.of(new PropertyIndexing(schemaHolder::get, () -> payloads), Signals.INDEXING);
+        List<Derivation> derivations = List.of(new PropertyIndexing(schemaHolder::get, () -> payloads), Signals.INDEXING,
+                ValidityIndexing.INSTANCE);
         this.engine = StorageEngine.open(directory, options.engine().withExtensions(extensionSlots(), derivations));
         this.schema = new Schema(engine.dictionary());
         schemaHolder.set(schema);
@@ -201,7 +204,8 @@ public final class HypergraphDatabase implements AutoCloseable {
 
     public static List<Slot<?>> extensionSlots() {
         return Stream.of(SchemaSlots.ALL, PropertySlots.ALL, List.<Slot<?>>of(Embedding.EMBEDDINGS),
-                        Provenance.SLOTS, StateBindings.SLOTS, Signals.SLOTS, MaterializedViews.SLOTS, Security.SLOTS)
+                        Provenance.SLOTS, StateBindings.SLOTS, Signals.SLOTS, MaterializedViews.SLOTS, Security.SLOTS,
+                        ValiditySlots.SLOTS)
                 .flatMap(List::stream)
                 .toList();
     }
