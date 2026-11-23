@@ -325,8 +325,14 @@ public final class Parser {
             return new Statement.Query(match());
         }
         if (accept("EXPLAIN")) {
+            if (accept("HYPERMATCH")) {
+                return new Statement.ExplainStructural(structuralMatch());
+            }
             expect("MATCH");
             return new Statement.Explain(match());
+        }
+        if (accept("HYPERMATCH")) {
+            return structuralMatch();
         }
         if (accept("MEMBERS")) {
             expect("OF");
@@ -1246,6 +1252,47 @@ public final class Parser {
             throw error("expected a $variable but found " + token);
         }
         return token.text();
+    }
+
+    private Statement.StructuralMatch structuralMatch() {
+        List<Ast.StructuralEdge> edges = new ArrayList<>();
+        do {
+            String name = identifier();
+            expectSymbol(":");
+            String type = identifier();
+            expectSymbol("(");
+            List<Ast.StructuralVertex> vertices = new ArrayList<>();
+            do {
+                String vertex = identifier();
+                vertices.add(new Ast.StructuralVertex(vertex, acceptSymbol(":") ? Optional.of(identifier()) : Optional.empty()));
+            } while (acceptSymbol(","));
+            expectSymbol(")");
+            edges.add(new Ast.StructuralEdge(name, type, List.copyOf(vertices)));
+            if (edges.size() > 64) {
+                throw HStoreException.invalid("a structural match has at most 64 hyperedges");
+            }
+        } while (acceptSymbol(","));
+        List<Ast.StructuralAnchor> anchors = new ArrayList<>();
+        if (accept("WHERE")) {
+            do {
+                String vertex = identifier();
+                expectSymbol("=");
+                anchors.add(new Ast.StructuralAnchor(vertex, ref()));
+            } while (accept("AND"));
+        }
+        Optional<String> mode = Optional.empty();
+        if (accept("MODE")) {
+            String found = identifier().toUpperCase(java.util.Locale.ROOT);
+            if (!List.of("AUTO", "HGMATCH", "MACH").contains(found)) {
+                throw HStoreException.invalid("MODE must be AUTO, HGMATCH or MACH");
+            }
+            mode = Optional.of(found);
+        }
+        if (accept("COUNT")) {
+            return new Statement.StructuralMatch(List.copyOf(edges), List.copyOf(anchors), mode, true, false, OptionalLong.empty());
+        }
+        boolean bindings = accept("BINDINGS");
+        return new Statement.StructuralMatch(List.copyOf(edges), List.copyOf(anchors), mode, false, bindings, limit());
     }
 
     private Ast.Instant transitionInstant() {
