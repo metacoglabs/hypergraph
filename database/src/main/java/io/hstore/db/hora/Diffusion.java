@@ -13,6 +13,7 @@ import io.hstore.engine.txn.IncidentEdge;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -97,8 +98,8 @@ public final class Diffusion {
     private final Map<Long, OptionalInt> edgeTypes = new HashMap<>();
     private final Map<Long, Long> atomCosts = new HashMap<>();
     private final Map<Long, Long> edgeCosts = new HashMap<>();
-    private final java.util.Set<Long> forced = new java.util.HashSet<>();
-    private final java.util.Set<Long> danglingEdges = new java.util.HashSet<>();
+    private final Set<Long> forced = new HashSet<>();
+    private final Set<Long> danglingEdges = new HashSet<>();
     private final PriorityQueue<Due> due = new PriorityQueue<>(ORDER);
     private Map<Long, Double> atomSeeds = Map.of();
     private Map<Long, Double> edgeSeeds = Map.of();
@@ -197,7 +198,7 @@ public final class Diffusion {
     }
 
     private long atomCost(long atom) {
-        return atomCosts.computeIfAbsent(atom, id -> owns(id) ? Math.max(1, reader.postingCount(id)) : 1);
+        return atomCosts.computeIfAbsent(atom, id -> owns(id) ? Math.max(1, reader.degree(id)) : 1);
     }
 
     private long edgeCost(long edge) {

@@ -435,7 +435,7 @@ expand_from = "EXPAND" "FROM" ref [ "WEIGHT" number ] { "," ref [ "WEIGHT" numbe
 ```
 
 The best-connected hyperedges around the seeds, in exact order of chain value, optionally steered by a `RANK` query.
-Seed weights and all factors lie in `[0, 1]`. Columns: `edge, value, relevance, via, parent`. See
+Seed weights lie in `(0, 1]`, factors and `MIN` in `[0, 1]`. Columns: `edge, value, relevance, via, parent`. See
 [expansion](hora.md#expansion-towards-a-query).
 
 ### DIFFUSE

@@ -25,7 +25,7 @@ import java.util.TreeMap;
 
 public final class Expansion {
 
-    public enum Stop { RESULT_SIZE, NO_USEFUL_CANDIDATE, BUDGET, FRONTIER_EXHAUSTED }
+    public enum Stop { RESULT_SIZE, NO_USEFUL_CANDIDATE, BUDGET, FRONTIER_EXHAUSTED, FRONTIER_TRUNCATED }
 
     public interface Relevance {
         double bound(long edge);
@@ -107,7 +107,7 @@ public final class Expansion {
         }
     }
 
-    private record Incidents(long atom, double value, double key, int offset) implements Entry {
+    private record Incidents(long atom, double value, double hub, double key, long next) implements Entry {
         public int rank() {
             return 2;
         }
@@ -134,7 +134,6 @@ public final class Expansion {
     static final int CHUNK = 64;
 
     private final Reader reader;
-    private final Map<Long, List<IncidentEdge>> postings = new HashMap<>();
     private final Map<Long, OptionalInt> types = new HashMap<>();
     private final Map<Long, Double> relevance = new HashMap<>();
     private final Map<Long, Long> parents = new HashMap<>();
@@ -162,10 +161,6 @@ public final class Expansion {
         return types.computeIfAbsent(edge, id -> reader.edgeAtom(id) ? reader.typeOf(id) : OptionalInt.empty());
     }
 
-    private List<IncidentEdge> postingsOf(long atom) {
-        return postings.computeIfAbsent(atom, id -> reader.incidentEdges(id).toList());
-    }
-
     private static double gate(Model model, double relevance) {
         return model.gate() + (1 - model.gate()) * relevance;
     }
@@ -183,6 +178,9 @@ public final class Expansion {
                 throw HStoreException.invalid("seed weights must lie in (0, 1]");
             }
             reader.require(seed.getKey());
+            if (reader.edgeAtom(seed.getKey())) {
+                frontier.add(new EdgeExact(seed.getKey(), seed.getValue(), 1.0, -1));
+            }
             frontier.add(new AtomReached(seed.getKey(), seed.getValue(), -1));
         }
         if (frontier.isEmpty()) {
@@ -218,20 +216,27 @@ public final class Expansion {
                     }
                     parents.put(atom, parent);
                     connectors.add(atom);
+                    if (!meter.tryConsume(Math.max(1, reader.postingCount(atom)))) {
+                        stop = Stop.BUDGET;
+                        pending = value;
+                        break;
+                    }
                     double hub = Math.pow(Math.max(1, reader.degree(atom)), -model.hubDamping());
-                    frontier.add(new Incidents(atom, value, value * hub, 0));
+                    frontier.add(new Incidents(atom, value, hub, value * hub, Long.MIN_VALUE));
                 }
-                case Incidents(long atom, double value, double key, int offset) -> {
-                    List<IncidentEdge> all = postingsOf(atom);
-                    int end = Math.min(all.size(), offset + CHUNK);
-                    if (!meter.tryConsume(end - offset)) {
+                case Incidents(long atom, double value, double hub, double key, long next) -> {
+                    List<io.hstore.engine.tree.Entry<io.hstore.engine.index.IndexValues.Incident>> chunk =
+                            reader.incidentPostings(atom).range(next, Long.MAX_VALUE).limit(CHUNK + 1).toList();
+                    int taken = Math.min(CHUNK, chunk.size());
+                    if (!meter.tryConsume(taken)) {
                         frontier.add(top);
                         stop = Stop.BUDGET;
                         break;
                     }
-                    double hub = Math.pow(Math.max(1, reader.degree(atom)), -model.hubDamping());
-                    for (IncidentEdge posting : all.subList(offset, end)) {
-                        long edge = posting.edge();
+                    boolean refused = false;
+                    for (int i = 0; i < taken && !refused; i++) {
+                        long edge = chunk.get(i).key();
+                        var posting = chunk.get(i).value();
                         if (acceptedEdges.contains(edge)) {
                             continue;
                         }
@@ -239,33 +244,51 @@ public final class Expansion {
                         if (type.isEmpty() || (!model.typeFactors().isEmpty() && !model.typeFactors().containsKey(type.getAsInt()))) {
                             continue;
                         }
-                        if (model.validAt().isPresent() && !(posting.validFrom() <= model.validAt().getAsLong()
-                                && model.validAt().getAsLong() < posting.validTo())) {
+                        if (model.validAt().isPresent() && !posting.validAt(model.validAt().getAsLong())) {
                             continue;
                         }
                         double base = value * hub * roleFactor(model.exit(), posting.roleSet()) * model.typeFactors().getOrDefault(type.getAsInt(), 1.0);
                         if (base <= 0) {
                             continue;
                         }
-                        double bound = base * gate(model, Math.max(0, Math.min(1, query.bound(edge))));
+                        double relevanceBound;
+                        try {
+                            relevanceBound = Math.max(0, Math.min(1, query.bound(edge)));
+                        } catch (HStoreException.ResourceLimit exhausted) {
+                            frontier.add(new Incidents(atom, value, hub, key, edge));
+                            refused = true;
+                            continue;
+                        }
+                        double bound = base * gate(model, relevanceBound);
                         if (bound <= bestBound.getOrDefault(edge, -1.0)) {
                             continue;
                         }
                         bestBound.put(edge, bound);
                         frontier.add(new EdgeBound(edge, bound, base, atom));
                     }
-                    if (end < all.size()) {
-                        frontier.add(new Incidents(atom, value, key, end));
+                    if (refused) {
+                        stop = Stop.BUDGET;
+                        break;
+                    }
+                    if (chunk.size() > CHUNK) {
+                        frontier.add(new Incidents(atom, value, hub, key, chunk.get(CHUNK).key()));
                     }
                 }
                 case EdgeBound(long edge, double bound, double base, long via) -> {
                     if (acceptedEdges.contains(edge)) {
                         continue;
                     }
-                    double r = relevance.computeIfAbsent(edge, id -> {
-                        OptionalDouble found = query.score(id);
-                        return found.isPresent() ? Math.max(0, Math.min(1, found.getAsDouble())) : 0.0;
-                    });
+                    double r;
+                    try {
+                        r = relevance.computeIfAbsent(edge, id -> {
+                            OptionalDouble found = query.score(id);
+                            return found.isPresent() ? Math.max(0, Math.min(1, found.getAsDouble())) : 0.0;
+                        });
+                    } catch (HStoreException.ResourceLimit exhausted) {
+                        frontier.add(top);
+                        stop = Stop.BUDGET;
+                        break;
+                    }
                     if (base * gate(model, r) > 0) {
                         frontier.add(new EdgeExact(edge, base * gate(model, r), r, via));
                     }
@@ -274,7 +297,11 @@ public final class Expansion {
                     if (!acceptedEdges.add(edge)) {
                         continue;
                     }
-                    accepted.add(new Accepted(edge, value, r, via, parents.getOrDefault(via, -1L)));
+                    accepted.add(new Accepted(edge, value, r, via, via < 0 ? -1L : parents.getOrDefault(via, -1L)));
+                    if (accepted.size() >= k) {
+                        pending = Math.max(pending, value);
+                        continue;
+                    }
                     Hyperedge hyperedge = reader.edge(edge);
                     double weightMax = hyperedge.summary().isEmpty() ? 0 : Weight.toDouble(hyperedge.summary().weightMax());
                     if (weightMax <= 0) {
@@ -304,8 +331,9 @@ public final class Expansion {
                 break;
             }
             if (frontier.size() > frontierCap) {
-                List<Entry> kept = new ArrayList<>(frontierCap);
-                for (int i = 0; i < frontierCap; i++) {
+                int keep = Math.max(1, frontierCap / 2);
+                List<Entry> kept = new ArrayList<>(keep);
+                for (int i = 0; i < keep; i++) {
                     kept.add(frontier.poll());
                 }
                 dropped = Math.max(dropped, frontier.peek().key());
@@ -314,6 +342,9 @@ public final class Expansion {
             }
         }
         double bound = frontier.isEmpty() ? 0 : frontier.peek().key();
+        if (stop == Stop.FRONTIER_EXHAUSTED && dropped > 0) {
+            stop = Stop.FRONTIER_TRUNCATED;
+        }
         return new Result(accepted, connectors, Math.max(Math.max(bound, dropped), pending), dropped, stop);
     }
 }

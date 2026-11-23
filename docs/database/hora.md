@@ -226,8 +226,10 @@ constraints; a positive `GATE` lets a weakly relevant hyperedge still connect tw
 
 Incident hyperedges are read 64 postings at a time and only when the frontier reaches them, so a hub atom whose
 damped value is small is read last. Each row names the atom it was entered through and the hyperedge that atom came
-from, so the rows form a tree rooted at the seeds. The message gives an upper bound on the value of every hyperedge
-not returned. Every frontier step and every incidence read counts against the row budget; when it runs out, the rows
+from, so the rows form a tree rooted at the seeds. A seed that is itself a hyperedge is returned first and its members
+are expanded. The message gives an upper bound on the value of every hyperedge not returned. When the frontier grows
+past its cap of 100,000 entries, its lower half is dropped and the message says below which value rows may be missing;
+the rows above that value are still exact. Every frontier step and every incidence read counts against the row budget; when it runs out, the rows
 are still the exact best ones and the bound still holds.
 
 ## Pattern matching
