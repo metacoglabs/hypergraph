@@ -116,5 +116,7 @@ class MotifStatementTest {
         assertThrows(HStoreException.class, () -> session.execute("MOTIFS OF Person"));
         assertThrows(HStoreException.class, () -> session.execute("MOTIF PROFILE $a"));
         assertThrows(HStoreException.class, () -> session.execute("MOTIF 94 RANK BY LOUDEST"));
+        assertThrows(HStoreException.class, () -> session.execute("CREATE VIEW busy AS MOTIFS CONTINUOUS"));
+        assertThrows(HStoreException.class, () -> session.execute("MOTIFS EXACT SEED 3"));
     }
 }

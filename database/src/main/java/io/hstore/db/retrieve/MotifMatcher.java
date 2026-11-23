@@ -147,6 +147,7 @@ public final class MotifMatcher {
             long member = fixed.getAsLong();
             List<Long> holders = new ArrayList<>();
             reader.forEachIncidentEdge(member, edge -> {
+                meter.consume(1);
                 if (projection.inScope(edge)) {
                     holders.add(edge);
                 }
@@ -245,6 +246,10 @@ public final class MotifMatcher {
     }
 
     private boolean holds(Region region, long[] positions) {
+        if (region.member().isPresent()) {
+            long member = region.member().getAsLong();
+            return inRegion(region.region(), positions, member) && satisfies(region, positions, member);
+        }
         long[] smallest = null;
         for (int i = 0; i < 3; i++) {
             if ((region.region() >> i & 1) != 0) {

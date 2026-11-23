@@ -16,6 +16,8 @@ import java.util.TreeMap;
 final class Projection {
 
     private static final long MEMO_LONGS = 8_000_000;
+    private static final int SCOPE_ENTRIES = 1_000_000;
+    private static final int CHARGE_EVERY = 1_024;
 
     record Neighbourhood(long[] edges, long[] overlaps) {
         long overlap(long edge) {
@@ -57,7 +59,7 @@ final class Projection {
         }
         OptionalInt type = reader.isEdge(edge) ? reader.typeOf(edge) : OptionalInt.empty();
         boolean inside = type.isPresent() && types.contains(type.getAsInt());
-        if (scope.size() < MEMO_LONGS) {
+        if (scope.size() < SCOPE_ENTRIES) {
             scope.put(edge, inside);
         }
         return inside;
@@ -94,7 +96,10 @@ final class Projection {
         long[] postings = {0};
         for (long member : members(edge)) {
             reader.forEachIncidentEdge(member, other -> {
-                postings[0]++;
+                if (++postings[0] == CHARGE_EVERY) {
+                    meter.consume(CHARGE_EVERY);
+                    postings[0] = 0;
+                }
                 if (other != edge && inScope(other)) {
                     overlap.merge(other, 1L, Long::sum);
                 }

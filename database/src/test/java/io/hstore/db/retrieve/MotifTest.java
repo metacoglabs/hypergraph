@@ -230,6 +230,41 @@ class MotifTest {
     }
 
     @Test
+    void aHubIsChargedWhileItsPostingsAreRead() {
+        database.write(writer -> {
+            long hub = writer.node("Person", "hub");
+            for (int e = 0; e < 6000; e++) {
+                long edge = writer.edge("Meeting");
+                writer.add(edge, hub, MemberSpec.PLAIN);
+                edges.add(edge);
+            }
+            return null;
+        });
+        database.read(reader -> {
+            Budget.Meter meter = Budget.DEFAULT.withRows(500).start();
+            assertThrows(HStoreException.ResourceLimit.class, () -> MotifCensus.of(reader, OptionalInt.empty()).profile(edges.getFirst(), meter));
+            assertTrue(meter.consumed() < 500 + 2_048, "consumed " + meter.consumed());
+            return null;
+        });
+    }
+
+    @Test
+    void autoDecidesByRowsAndRepeats() {
+        randomGraph(RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(82L), 60, 10);
+        database.read(reader -> {
+            MotifCensus census = MotifCensus.of(reader, OptionalInt.empty());
+            Budget.Meter full = Budget.UNBOUNDED.start();
+            census.exact(full);
+            long rows = full.consumed();
+            MotifCensus.Result first = census.auto(5, rows);
+            assertTrue(!first.exact() && first.samples() >= 1, first.toString());
+            assertEquals(first, census.auto(5, rows));
+            assertTrue(census.auto(5, 2 * rows + 2).exact());
+            return null;
+        });
+    }
+
+    @Test
     void sampledCensusIsUnbiased() {
         randomGraph(RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(77L), 40, 14);
         database.read(reader -> {
@@ -263,9 +298,9 @@ class MotifTest {
             census.exact(full);
             long cost = full.consumed();
             assertThrows(HStoreException.ResourceLimit.class, () -> census.exact(Budget.DEFAULT.withRows(cost - 1).start()));
-            MotifCensus.Result auto = census.auto(3, Budget.DEFAULT.withRows(cost));
+            MotifCensus.Result auto = census.auto(3, cost);
             assertTrue(!auto.exact() && auto.samples() >= 1, auto.toString());
-            MotifCensus.Result roomy = census.auto(3, Budget.UNBOUNDED);
+            MotifCensus.Result roomy = census.auto(3, Long.MAX_VALUE / 4);
             assertTrue(roomy.exact());
             return null;
         });

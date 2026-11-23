@@ -825,12 +825,13 @@ final class Executor {
         MotifCensus.Result result = switch (statement.mode()) {
             case "EXACT" -> census.exact(Budget.DEFAULT.start());
             case "SAMPLE" -> census.sample(statement.samples(), statement.seed(), Budget.DEFAULT.start());
-            default -> census.auto(statement.seed(), Budget.DEFAULT);
+            default -> census.auto(statement.seed(), Budget.DEFAULT.maxRows());
         };
         QueryResult table = QueryResult.table(List.of("class", "shape", "count", "standard_error"), result.counts().stream()
                 .map(count -> List.<Cell>of(QueryResult.number(count.code()), QueryResult.text(MotifClasses.shape(count.code())),
                         result.exact() ? QueryResult.number(Math.round(count.estimate())) : QueryResult.number(count.estimate()),
-                        QueryResult.number(result.exact() ? 0 : count.standardError())))
+                        result.exact() ? QueryResult.number(0) : Double.isFinite(count.standardError())
+                                ? QueryResult.number(count.standardError()) : QueryResult.text("unknown")))
                 .toList());
         String how = result.exact()
                 ? "exact count over " + result.population() + " hyperedges"

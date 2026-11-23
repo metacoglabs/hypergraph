@@ -73,7 +73,8 @@ public final class MotifCensus {
         if (samples < 1) {
             throw HStoreException.invalid("SAMPLE needs at least one draw");
         }
-        long population = population();
+        long[] sizes = types.stream().mapToLong(reader::countOfType).toArray();
+        long population = java.util.Arrays.stream(sizes).sum();
         if (population == 0) {
             return new Result(List.of(), false, 0, samples, 0);
         }
@@ -86,7 +87,7 @@ public final class MotifCensus {
         long[] counts = new long[128];
         try {
             for (; done < samples; done++) {
-                long centre = draw(random.nextLong(population));
+                long centre = draw(sizes, random.nextLong(population));
                 java.util.Arrays.fill(counts, 0);
                 projection.containing(centre, (a, b, c, ab, bc, ca) -> {
                     meter.consume(1);
@@ -114,14 +115,28 @@ public final class MotifCensus {
         return new Result(result, false, done, samples, population);
     }
 
-    public Result auto(long seed, Budget budget) {
-        Budget half = new Budget(Math.max(1, budget.maxRows() / 2), budget.maxDepth(), budget.maxTime().dividedBy(2));
+    public Result auto(long seed, long rows) {
+        long quarter = Math.max(1, rows / 4);
         try {
-            return exact(half.start());
+            return exact(rowsOnly(2 * quarter).start());
         } catch (HStoreException.ResourceLimit tooLarge) {
-            return sample(Long.MAX_VALUE, seed, half.start());
+            long draws;
+            try {
+                draws = sample(Long.MAX_VALUE, seed ^ PILOT, rowsOnly(quarter / 2).start()).samples();
+            } catch (HStoreException.ResourceLimit tooSmall) {
+                throw HStoreException.limit("the budget does not cover even one sampled hyperedge; use MOTIFS SAMPLE with a narrower type");
+            }
+            return sample(draws, seed, rowsOnly(quarter + quarter / 2).start());
         }
     }
+
+    private static final long PILOT = 0x9E3779B97F4A7C15L;
+
+    private static Budget rowsOnly(long rows) {
+        return new Budget(rows, Budget.DEFAULT.maxDepth(), SAFETY);
+    }
+
+    private static final java.time.Duration SAFETY = java.time.Duration.ofMinutes(5);
 
     public List<Count> profile(long edge, Budget.Meter meter) {
         reader.require(edge);
@@ -143,14 +158,13 @@ public final class MotifCensus {
         return result;
     }
 
-    private long draw(long rank) {
+    private long draw(long[] sizes, long rank) {
         long remaining = rank;
-        for (int type : types) {
-            long count = reader.countOfType(type);
-            if (remaining < count) {
-                return reader.atomOfTypeAt(type, remaining);
+        for (int i = 0; i < sizes.length; i++) {
+            if (remaining < sizes[i]) {
+                return reader.atomOfTypeAt(types.get(i), remaining);
             }
-            remaining -= count;
+            remaining -= sizes[i];
         }
         throw new IllegalStateException("rank " + rank + " beyond the population");
     }

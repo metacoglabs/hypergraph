@@ -350,7 +350,14 @@ public final class Parser {
             } else {
                 accept("AUTO");
             }
-            return new Statement.Motifs(type, mode, samples, accept("SEED") ? longValue() : 0);
+            long seed = 0;
+            if (accept("SEED")) {
+                if (mode.equals("EXACT")) {
+                    throw HStoreException.invalid("SEED only applies to sampled counts");
+                }
+                seed = longValue();
+            }
+            return new Statement.Motifs(type, mode, samples, seed);
         }
         if (accept("MOTIF")) {
             return motif();
@@ -1600,7 +1607,7 @@ public final class Parser {
             Optional<Ref> member = Optional.empty();
             Optional<String> memberType = Optional.empty();
             if (accept("ANY")) {
-                if (peek().kind() == Token.Kind.WORD && !peekWordAt(0, "ROLES", "REGION", "NESTED", "RANK", "LIMIT")) {
+                if (peek().kind() == Token.Kind.WORD && !peekWordAt(0, "ROLES", "REGION", "NESTED", "RANK", "LIMIT", "AROUND")) {
                     memberType = Optional.of(identifier());
                 }
             } else {

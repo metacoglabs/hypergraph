@@ -535,7 +535,8 @@ counts the triples containing one hyperedge, with columns `class, shape, count`.
 
 `MOTIF <code>` lists triples whose regions match the code with `e1`, `e2` and `e3` in that order. Columns:
 `e1, e2, e3`, plus `weight` with `RANK BY`. A region is three bits for `e3`, `e2` and `e1`, such as `'011'`, and must be
-non-empty in the code; `ROLES` has one entry per hyperedge of the region. `LIMIT` defaults to 1000 and takes up to
+non-empty in the code; `ROLES` has one entry per hyperedge of the region, in the order `e1`, `e2`, `e3` (the reverse of
+the bits). `SEED` applies to sampled counts only. `LIMIT` defaults to 1000 and takes up to
 100,000. The classes, regions and weights are explained in [motifs](motifs.md).
 
 ```

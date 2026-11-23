@@ -111,6 +111,9 @@ public final class MaterializedViews implements AutoCloseable {
         return database.write(database.transactionOptions(principal), principal, writer -> {
             writer.principal().requireAdmin();
             validate(kind, parameter);
+            if (kind == Kind.MOTIF_CENSUS && refresh == Refresh.CONTINUOUS) {
+                throw HStoreException.invalid("a motif census is rebuilt in full on refresh, so it cannot be CONTINUOUS; refresh it on demand");
+            }
             List<Descriptor> existing = list(writer);
             if (existing.stream().anyMatch(descriptor -> descriptor.name().equals(name))) {
                 throw HStoreException.invalid("view '" + name + "' already exists");
@@ -273,7 +276,7 @@ public final class MaterializedViews implements AutoCloseable {
                     .forEach(edge -> put(writer, descriptor, edge, topK(writer, descriptor, edge)));
             case MOTIF_CENSUS -> {
                 OptionalInt type = descriptor.parameter() == 0 ? OptionalInt.empty() : OptionalInt.of((int) descriptor.parameter() - 1);
-                MotifCensus.Result census = MotifCensus.of(writer, type).auto(writer.generation(), Budget.DEFAULT);
+                MotifCensus.Result census = MotifCensus.of(writer, type).auto(writer.generation(), Budget.DEFAULT.maxRows());
                 census.counts().forEach(count -> put(writer, descriptor, count.code(), new ViewCell.Census(Math.round(count.estimate()),
                         Double.isFinite(count.standardError()) ? Math.round(count.standardError() * 1_000_000) : -1, census.exact())));
             }
@@ -306,8 +309,10 @@ public final class MaterializedViews implements AutoCloseable {
                 }
             });
             case MOTIF_CENSUS -> {
-                clear(writer, descriptor);
-                build(writer, descriptor);
+                if (events.stream().anyMatch(event -> event.members().stream().anyMatch(change -> touches(writer, descriptor, change)))) {
+                    clear(writer, descriptor);
+                    build(writer, descriptor);
+                }
             }
             case OVERLAP_TOP_K -> {
                 Set<Long> affected = new HashSet<>();

@@ -53,8 +53,11 @@ the centre that overlaps both others; a closed triple is counted only from its s
 MoCHy-E. `MOTIFS SAMPLE n` draws `n` hyperedges uniformly with replacement, counts every triple containing each draw
 and scales by `population / (3n)`. That is MoCHy-A, and its estimate is unbiased. The standard error column is the
 sample standard error of the `n` scaled counts. Draws are repeatable: the same `SEED` on the same data gives the same
-estimate. `MOTIFS` without a mode tries the exact count with half the statement's budget and, if that runs out,
-spends the other half on sampling.
+estimate as long as the row budget, not the time limit, is what ends the draws. `MOTIFS` without a mode tries the
+exact count with half of the statement's row budget. If that runs out, a short pilot run with a different seed fixes
+the number of draws, and the sample then makes exactly that many, so the choice between exact and sampled and the
+number of draws depend on the data and the seed but not on how busy the machine is. Each part also has a five minute
+safety limit.
 
 The paper's more accurate estimator, MoCHy-A+, samples overlapping pairs uniformly. HStore has no structure that
 lists them, so it is not offered.
@@ -71,8 +74,9 @@ centres as the exact count; with `AROUND @e`, only triples containing `e` are vi
 fixed member only visits triples whose hyperedges contain that member.
 
 `REGION 'bits' HAS …` asks for a member in that region. The member can be a fixed atom, any atom, or any atom of a
-type. `ROLES (…)` lists one entry per hyperedge of the region, in position order; an entry is a role, several roles
-joined with `OR`, or `ANY`. The roles come from the member's incidence in each hyperedge. `NESTED` keeps triples in
+type. `ROLES (…)` lists one entry per hyperedge of the region in the order `e1`, `e2`, `e3`, which is the reverse of
+the bit string: in `REGION '011' HAS ANY ROLES (host, guest)` the member is `host` in `e1` and `guest` in `e2`. An entry
+is a role, several roles joined with `OR`, or `ANY`. The roles come from the member's incidence in each hyperedge. `NESTED` keeps triples in
 which one hyperedge is a member of another.
 
 `RANK BY` orders triples by a weight from Niu, Amburg, Aksoy and Sarıyüce (*Retrieving Top-k Hyperedge Triplets*,
@@ -84,8 +88,9 @@ members. A triple whose smallest pairwise overlap is below the current `k`-th we
 ## Census view
 
 `CREATE VIEW v AS MOTIFS [OF Type]` keeps one cell per class, keyed by the class code. It is built with the same
-automatic count as `MOTIFS` and rebuilt in full on refresh; an exact cell shows the count, a sampled one
-`estimate ± standard error`. See [views](views-signals-stats.md#materialized-views).
+automatic count as `MOTIFS` and rebuilt in full when a refresh finds changes to the tenant's memberships; an exact cell
+shows the count, a sampled one `estimate ± standard error`. Because every refresh is a rebuild, the view is refreshed
+on demand only and cannot be `CONTINUOUS`. See [views](views-signals-stats.md#materialized-views).
 
 ## Tenants and budget
 
