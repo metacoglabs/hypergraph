@@ -66,6 +66,15 @@ final class GroupCommitter implements AutoCloseable {
         }
     }
 
+    void ensureRunning() {
+        lock.lock();
+        try {
+            failIfBroken();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     Generation await(Pending pending) {
         lock.lock();
         try {
@@ -73,6 +82,18 @@ final class GroupCommitter implements AutoCloseable {
                 advance();
             }
             return pending.generation;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void awaitPublished(long generation) {
+        lock.lock();
+        try {
+            while (queue.stream().anyMatch(pending -> pending.generation.id() <= generation)) {
+                advance();
+            }
+            failIfFailed();
         } finally {
             lock.unlock();
         }

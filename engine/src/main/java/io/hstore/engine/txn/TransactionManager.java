@@ -210,6 +210,14 @@ public final class TransactionManager {
     }
 
     CommitResult commit(Transaction txn) {
+        CommitResult result = commitOnce(txn);
+        if (result.outcome() == CommitResult.Outcome.DUPLICATE && current().id() < result.generation()) {
+            committer.awaitPublished(result.generation());
+        }
+        return result;
+    }
+
+    private CommitResult commitOnce(Transaction txn) {
         if (txn.readOnly()) {
             readOnly.increment();
             return new CommitResult(txn.id(), txn.generation(), CommitResult.Outcome.READ_ONLY, 0, 0, 0, 0);
@@ -410,6 +418,7 @@ public final class TransactionManager {
 
     private Appended append(Generation latest, Branch changed, long txnId, List<MemberChange> members,
                             List<SlotChange<?>> slotChanges, List<WalRecord> meta, long pageBudget, long[] spilled, WriteScope scope) {
+        committer.ensureRunning();
         long unwrittenNodes = 0;
         long unwrittenHeap = 0;
         if (scope != null) {
