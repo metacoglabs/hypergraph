@@ -95,6 +95,10 @@ public final class Diffusion {
     private final Map<Long, Double> arrived = new TreeMap<>();
     private final Map<Long, Boolean> owned = new HashMap<>();
     private final Map<Long, OptionalInt> edgeTypes = new HashMap<>();
+    private final Map<Long, Long> atomCosts = new HashMap<>();
+    private final Map<Long, Long> edgeCosts = new HashMap<>();
+    private final java.util.Set<Long> forced = new java.util.HashSet<>();
+    private final java.util.Set<Long> danglingEdges = new java.util.HashSet<>();
     private final PriorityQueue<Due> due = new PriorityQueue<>(ORDER);
     private Map<Long, Double> atomSeeds = Map.of();
     private Map<Long, Double> edgeSeeds = Map.of();
@@ -127,19 +131,31 @@ public final class Diffusion {
         if (total == 0) {
             throw HStoreException.invalid("diffusion needs at least one seed");
         }
+        if (!Double.isFinite(total)) {
+            throw HStoreException.invalid("seed weights add up to more than a double can hold");
+        }
         double sum = total;
         atoms.replaceAll((_, weight) -> weight / sum);
         edges.replaceAll((_, weight) -> weight / sum);
         atomSeeds = atoms;
         edgeSeeds = edges;
-        atoms.forEach((atom, weight) -> addAtom(atom, weight));
-        edges.forEach((edge, weight) -> addEdge(edge, weight));
+        atoms.forEach((atom, weight) -> {
+            forced.add(atom);
+            atomResidual.merge(atom, weight, Double::sum);
+            due.add(new Due(false, atom, Double.MAX_VALUE));
+        });
+        edges.forEach((edge, weight) -> {
+            forced.add(-1 - edge);
+            edgeResidual.merge(edge, weight, Double::sum);
+            due.add(new Due(true, edge, Double.MAX_VALUE));
+        });
         boolean exhausted = false;
         while (!due.isEmpty()) {
             Due next = due.poll();
             double mass = next.edge() ? edgeResidual.getOrDefault(next.id(), 0.0) : atomResidual.getOrDefault(next.id(), 0.0);
             long cost = next.edge() ? edgeCost(next.id()) : atomCost(next.id());
-            if (mass <= 0 || mass < params.epsilon() * cost) {
+            boolean first = forced.remove(next.edge() ? -1 - next.id() : next.id());
+            if (mass <= 0 || (!first && mass < params.epsilon() * cost)) {
                 continue;
             }
             if (!meter.tryConsume(cost)) {
@@ -181,11 +197,11 @@ public final class Diffusion {
     }
 
     private long atomCost(long atom) {
-        return owns(atom) ? Math.max(1, reader.degree(atom)) : 1;
+        return atomCosts.computeIfAbsent(atom, id -> owns(id) ? Math.max(1, reader.postingCount(id)) : 1);
     }
 
     private long edgeCost(long edge) {
-        return Math.max(1, reader.cardinality(edge));
+        return edgeCosts.computeIfAbsent(edge, id -> Math.max(1, reader.cardinality(id)));
     }
 
     private void addAtom(long atom, double mass) {
@@ -232,6 +248,7 @@ public final class Diffusion {
         if (model.policy().equals(EvidencePolicy.ANY)) {
             return true;
         }
+        reads++;
         return reader.incidence(edge, member).map(incidence -> model.policy().admits(Provenance.qualifier(reader, incidence.qualifier())))
                 .orElse(false);
     }
@@ -295,6 +312,10 @@ public final class Diffusion {
             total += weight;
         }
         if (total <= 0) {
+            danglingEdges.add(edge);
+            if (atomSeeds.isEmpty() && danglingEdges.containsAll(edgeSeeds.keySet())) {
+                throw HStoreException.invalid("the seeds reach no atom under these filters");
+            }
             restart(mass);
             return;
         }

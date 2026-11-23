@@ -173,6 +173,10 @@ public sealed class Reader permits Writer {
         return view.atom(atom).filter(this::admits).map(record -> record instanceof AtomRecord.EdgeRecord).orElse(false);
     }
 
+    public long postingCount(long atom) {
+        return onlyDefaultTenant() || visible(atom) ? view.degree(atom) : 0;
+    }
+
     public LongStream validityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
         return ValidityIndex.edges(view, tenant(), edgeType, side, lowExclusive, highInclusive);
     }

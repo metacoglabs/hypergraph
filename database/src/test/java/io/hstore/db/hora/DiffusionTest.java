@@ -277,6 +277,55 @@ class DiffusionTest {
     }
 
     @Test
+    void hyperedgeSeedsThatReachNoAtomAreRefused() {
+        long meeting = database.write(writer -> {
+            long edge = writer.edge("Meeting");
+            writer.add(edge, writer.node("Person", "late"), MemberSpec.PLAIN.withValidity(new Validity(10, 20)));
+            return edge;
+        });
+        Model early = new Model(Set.of(), Map.of(), RoleFactors.NONE, OptionalLong.of(5), EvidencePolicy.ANY);
+        database.read(reader -> {
+            var refused = assertThrows(io.hstore.engine.HStoreException.class,
+                    () -> Diffusion.on(reader).run(Map.of(meeting, 1.0), early, new Params(0.2, 1e-4, 10, 10), Budget.UNBOUNDED.start()));
+            assertTrue(refused.getMessage().contains("reach no atom"), refused.getMessage());
+            return null;
+        });
+    }
+
+    @Test
+    void aHubSeedIsPushedEvenBelowItsThreshold() {
+        long hub = database.write(writer -> {
+            long person = writer.node("Person", "hub");
+            for (int i = 0; i < 300; i++) {
+                long edge = writer.edge("Meeting");
+                writer.add(edge, person, MemberSpec.PLAIN);
+                writer.add(edge, writer.node("Person", "q" + i), MemberSpec.PLAIN);
+            }
+            return person;
+        });
+        Result result = database.read(reader -> Diffusion.on(reader).run(Map.of(hub, 1.0), Model.plain(), new Params(0.2, 0.01, 50, 50),
+                Budget.UNBOUNDED.start()));
+        assertEquals(0.2, result.atoms().getFirst().estimate(), 1e-12, result.toString());
+        assertEquals(50, result.edges().size());
+        assertEquals(0.8, result.residual(), 1e-12);
+    }
+
+    @Test
+    void seedWeightsThatOverflowAreRefused() {
+        long a = database.write(writer -> writer.node("Person", "a"));
+        long b = database.write(writer -> writer.node("Person", "b"));
+        database.read(reader -> {
+            assertThrows(io.hstore.engine.HStoreException.class, () -> Diffusion.on(reader).run(Map.of(a, 1e308, b, 1e308), Model.plain(),
+                    new Params(0.2, 1e-4, 5, 5), Budget.DEFAULT.start()));
+            return null;
+        });
+        try (Session session = new Session(database)) {
+            assertThrows(io.hstore.engine.HStoreException.class, () -> session.execute("DIFFUSE FROM @" + a + " THROUGH Meeting, Meeting TOP 3"));
+            assertThrows(io.hstore.engine.HStoreException.class, () -> session.execute("DIFFUSE FROM @" + a + " EXIT (actor 1, actor 2) TOP 3"));
+        }
+    }
+
+    @Test
     void invalidParametersAreRefused() {
         assertThrows(io.hstore.engine.HStoreException.class, () -> new Params(0, 1e-4, 1, 1));
         assertThrows(io.hstore.engine.HStoreException.class, () -> new Params(0.2, 0, 1, 1));
