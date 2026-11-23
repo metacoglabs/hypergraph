@@ -107,6 +107,25 @@ session's branch; `AS OF t` resolves `TransactionManager.generationAsOf(t)` — 
 holds the last `history_limit` generations (engine option, default 64). It is kept in memory only, so after a restart
 it starts from the last checkpointed generation and the generations recovered from the write-ahead log. Historical snapshots are read-only.
 
+### Transitions between generations
+
+`TRANSITIONS` ([HQL](hql.md#transitions)) answers what appeared or disappeared between two generations
+(`temporal/Transitions.java`). When both generations are retained it diffs their catalogs (`Temporal.diff`), which
+costs the number of changed entries whatever the number of commits in between. Otherwise it folds the change feed
+over the window (`FeedFold`), which works as long as the feed still holds the first generation
+(`feed_retention_generations`) and costs one pass over every event in the window; an older window fails with
+`generation g precedes the change feed (first retained f)`.
+
+The fold keeps, per membership `(edge, member)` and per atom, whether it was present before its first change in the
+window and after its last one. An `Added` is only emitted when the member was absent and a `Removed` or `Updated` only
+when it was present, so the first and last change decide both. Events of other branches are skipped with the branch's
+lineage (its own events after its fork, its parent's before it). The feed is appended just after a generation is
+published, so the fold first waits until every commit up to the reader's generation is published.
+
+Results are tenant-scoped: an edge or member is returned only when its stamped tenant, read from the window's records
+or the reader's snapshot, is the reader's. Each decoded event or delta counts as one row against the statement budget,
+and a window over budget fails as a whole rather than returning a partial answer.
+
 ### Validity time
 
 Membership validity is indexed: every membership-tree summary carries the minimum `validFrom` and maximum

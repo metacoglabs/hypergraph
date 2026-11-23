@@ -209,6 +209,12 @@ public final class TransactionManager {
         return pinned.isPresent() ? Math.min(oldest, pinned.getAsLong()) : oldest;
     }
 
+    public void awaitPublished(long generation) {
+        if (current().id() < generation) {
+            committer.awaitPublished(generation);
+        }
+    }
+
     CommitResult commit(Transaction txn) {
         CommitResult result = commitOnce(txn);
         if (result.outcome() == CommitResult.Outcome.DUPLICATE && current().id() < result.generation()) {

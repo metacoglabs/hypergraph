@@ -338,6 +338,36 @@ class SecurityTest {
     }
 
     @Test
+    void transitionsStayInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass");
+             Session auditor = login("auditor", "readonly")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmeEdge = alice.variables().get("e");
+            long globexPatient = bob.variables().get("p");
+            long globexEdge = bob.variables().get("e");
+            long g1 = database.engine().transactions().current().id();
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> Incidence.of(globexPatient));
+                return null;
+            });
+            bob.execute("DELETE $e");
+            alice.execute("REMOVE $p FROM $e");
+            long g2 = database.engine().transactions().current().id();
+            String gone = "TRANSITIONS EDGE x FROM GENERATION " + g1 + " TO GENERATION " + g2 + " DISAPPEARED";
+            String came = "TRANSITIONS EDGE x FROM GENERATION " + g1 + " TO GENERATION " + g2 + " APPEARED MEMBERS";
+            for (Session session : List.of(alice, auditor)) {
+                String rendered = session.execute(gone).rows().toString() + session.execute(gone + " MEMBERS").rows() + session.execute(came).rows();
+                assertFalse(rendered.contains("@" + globexEdge + " "), rendered);
+                assertFalse(rendered.contains("@" + globexPatient + " "), rendered);
+                assertEquals(1, session.execute(gone + " MEMBERS").rows().size(), rendered);
+                assertEquals(0, session.execute(came).rows().size(), rendered);
+            }
+            assertEquals(List.of("@" + globexEdge), bob.execute(gone).rows().stream().map(row -> row.getFirst().render().split(" ")[0]).toList());
+        }
+    }
+
+    @Test
     void roleFilteredMatchesStayInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
