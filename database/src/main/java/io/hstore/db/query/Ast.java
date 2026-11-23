@@ -111,6 +111,15 @@ public final class Ast {
                         List<Projection> projections, Optional<Expr> orderBy, boolean descending, OptionalLong limit) {
     }
 
+    public record DiffuseSeed(Ref atom, double weight) {
+    }
+
+    public record DiffuseType(String type, double weight) {
+    }
+
+    public record RoleFactor(String role, double factor) {
+    }
+
     public record RefineLevel(String type, List<String> roles) {
     }
 
@@ -331,6 +340,16 @@ public final class Ast {
 
         record Members(Ref edge, Optional<String> role, Optional<WeightRange> weight, Optional<Expr> validAt,
                        Optional<EvidencePolicy> policy, OptionalLong limit) implements Statement {
+        }
+
+        record ExpandFrom(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
+                          Optional<Expr> validAt, Optional<Rank> towards, double gate, double hubDamping, double edgeDamping, double minimum,
+                          long top) implements Statement {
+        }
+
+        record Diffuse(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
+                       Optional<Expr> validAt, Optional<EvidencePolicy> policy, double alpha, double epsilon, long top, long edges)
+                implements Statement {
         }
 
         record Refine(List<Ref> roots, Optional<String> rootType, List<RefineLevel> levels, Optional<String> leafType,

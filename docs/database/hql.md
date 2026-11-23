@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `HYPERMATCH`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `HYPERMATCH`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -423,6 +423,37 @@ RANK EDGE e:Review
 -- | @14 Review    | 0.9734 | 1       | 1      | 1          | 0.8668 | 1        |
 -- | @16 Review    | 0.8083 | 0.6667  | 0.6667 | 1          | 1      | 0.75     |
 -- | @15 Review    | 0.7333 | 1       | 0.6667 | 0          | 1      | 1        |
+```
+
+### EXPAND FROM
+
+```ebnf
+expand_from = "EXPAND" "FROM" ref [ "WEIGHT" number ] { "," ref [ "WEIGHT" number ] }
+              [ "THROUGH" identifier [ "FACTOR" number ] { "," identifier [ "FACTOR" number ] } ]
+              [ "EXIT" factors ] [ "ENTER" factors ] [ "VALID" "AT" additive ]
+              [ "TOWARDS" "(" rank ")" [ "GATE" number ] ] [ "DAMPING" number number ] [ "MIN" number ] "TOP" integer ;
+```
+
+The best-connected hyperedges around the seeds, in exact order of chain value, optionally steered by a `RANK` query.
+Seed weights lie in `(0, 1]`, factors and `MIN` in `[0, 1]`. Columns: `edge, value, relevance, via, parent`. See
+[expansion](hora.md#expansion-towards-a-query).
+
+### DIFFUSE
+
+```ebnf
+diffuse = "DIFFUSE" "FROM" ref [ "WEIGHT" number ] { "," ref [ "WEIGHT" number ] }
+          [ "THROUGH" identifier [ "WEIGHT" number ] { "," identifier [ "WEIGHT" number ] } ]
+          [ "EXIT" factors ] [ "ENTER" factors ] [ "VALID" "AT" additive ] [ "POLICY" policy ]
+          [ "ALPHA" number ] [ "EPSILON" number ] "TOP" integer [ "EDGES" integer ] ;
+factors = "(" identifier number { "," identifier number } ")" ;
+```
+
+Personalized PageRank from the seed atoms over the hypergraph's memberships, with role, type, time and evidence
+constraints. Columns: `kind` (`atom` or `edge`), `id`, `score`, `upper`; atoms first, best first. The message gives the
+residual, which bounds the total error. See [diffusion](hora.md#diffusion).
+
+```
+DIFFUSE FROM @Person:'alice' THROUGH Meeting, Project WEIGHT 2 EXIT (participant 1, observer 0.2) VALID AT 1700000000000 TOP 10 EDGES 5;
 ```
 
 ### REFINE

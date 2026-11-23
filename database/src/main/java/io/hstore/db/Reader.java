@@ -182,6 +182,10 @@ public sealed class Reader permits Writer {
         return view.atom(atom).filter(this::admits).map(record -> record instanceof AtomRecord.EdgeRecord).orElse(false);
     }
 
+    public long postingCount(long atom) {
+        return onlyDefaultTenant() || visible(atom) ? view.degree(atom) : 0;
+    }
+
     public Tree<NestingSlots.ChildLink> childLinks(long parent) {
         return onlyDefaultTenant() || visible(parent) ? Nesting.tree(view, parent) : Tree.empty(NestingSlots.CHILD_INDEX.postingSchema(), view.source());
     }
@@ -212,6 +216,12 @@ public sealed class Reader permits Writer {
 
     public long countValidityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
         return ValidityIndex.count(view, tenant(), edgeType, side, lowExclusive, highInclusive);
+    }
+
+    public Tree<IndexValues.Incident> incidentPostings(long atom) {
+        return onlyDefaultTenant() || visible(atom)
+                ? view.incidentTree(atom)
+                : Tree.empty(EngineSlots.REVERSE_INDEX.postingSchema(), view.source());
     }
 
     public Tree<?> incidentTree(long atom) {

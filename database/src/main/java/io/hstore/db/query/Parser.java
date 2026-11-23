@@ -350,6 +350,37 @@ public final class Parser {
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
             return new Statement.Members(edge, role, weight, validAt, policy, limit());
         }
+        if (accept("DIFFUSE")) {
+            expect("FROM");
+            List<Ast.DiffuseSeed> seeds = new ArrayList<>();
+            do {
+                Ref seed = ref();
+                seeds.add(new Ast.DiffuseSeed(seed, accept("WEIGHT") ? number().doubleValue() : 1.0));
+                if (seeds.size() > 1_000) {
+                    throw HStoreException.invalid("DIFFUSE takes at most 1000 seeds");
+                }
+            } while (acceptSymbol(","));
+            List<Ast.DiffuseType> through = new ArrayList<>();
+            if (accept("THROUGH")) {
+                do {
+                    String type = identifier();
+                    through.add(new Ast.DiffuseType(type, accept("WEIGHT") ? number().doubleValue() : 1.0));
+                } while (acceptSymbol(","));
+            }
+            List<Ast.RoleFactor> exit = accept("EXIT") ? roleFactors() : List.of();
+            List<Ast.RoleFactor> entry = accept("ENTER") ? roleFactors() : List.of();
+            Optional<Expr> validAt = validAt();
+            Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
+            double alpha = accept("ALPHA") ? number().doubleValue() : 0.2;
+            double epsilon = accept("EPSILON") ? number().doubleValue() : 1e-4;
+            expect("TOP");
+            long top = longValue();
+            long edges = accept("EDGES") ? longValue() : 0;
+            if (top < 0 || top > 10_000 || edges < 0 || edges > 10_000) {
+                throw HStoreException.invalid("TOP and EDGES must be between 0 and 10000");
+            }
+            return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, top, edges);
+        }
         if (accept("REFINE")) {
             expect("FROM");
             List<Ref> roots = new ArrayList<>();
@@ -484,6 +515,9 @@ public final class Parser {
             return rank();
         }
         if (accept("EXPAND")) {
+            if (accept("FROM")) {
+                return expandFrom();
+            }
             Ref atom = ref();
             int depth = accept("DEPTH") ? intValue() : 4;
             return new Statement.Expand(atom, depth, limit());
@@ -1347,6 +1381,64 @@ public final class Parser {
             throw error("expected a $variable but found " + token);
         }
         return token.text();
+    }
+
+    private Statement.ExpandFrom expandFrom() {
+        List<Ast.DiffuseSeed> seeds = new ArrayList<>();
+        do {
+            Ref seed = ref();
+            seeds.add(new Ast.DiffuseSeed(seed, accept("WEIGHT") ? number().doubleValue() : 1.0));
+            if (seeds.size() > 1_000) {
+                throw HStoreException.invalid("EXPAND FROM takes at most 1000 seeds");
+            }
+        } while (acceptSymbol(","));
+        List<Ast.DiffuseType> through = new ArrayList<>();
+        if (accept("THROUGH")) {
+            do {
+                String type = identifier();
+                through.add(new Ast.DiffuseType(type, accept("FACTOR") ? number().doubleValue() : 1.0));
+            } while (acceptSymbol(","));
+        }
+        List<Ast.RoleFactor> exit = accept("EXIT") ? roleFactors() : List.of();
+        List<Ast.RoleFactor> entry = accept("ENTER") ? roleFactors() : List.of();
+        Optional<Expr> validAt = validAt();
+        Optional<Statement.Rank> towards = Optional.empty();
+        double gate = 0.1;
+        if (accept("TOWARDS")) {
+            expectSymbol("(");
+            expect("RANK");
+            towards = Optional.of(rank());
+            expectSymbol(")");
+            if (accept("GATE")) {
+                gate = number().doubleValue();
+            }
+        } else {
+            gate = 1.0;
+        }
+        double hub = 0.5;
+        double edge = 0.5;
+        if (accept("DAMPING")) {
+            hub = number().doubleValue();
+            edge = number().doubleValue();
+        }
+        double minimum = accept("MIN") ? number().doubleValue() : 0;
+        expect("TOP");
+        long top = longValue();
+        if (top < 1 || top > 10_000) {
+            throw HStoreException.invalid("TOP must be between 1 and 10000");
+        }
+        return new Statement.ExpandFrom(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, towards, gate, hub, edge, minimum, top);
+    }
+
+    private List<Ast.RoleFactor> roleFactors() {
+        expectSymbol("(");
+        List<Ast.RoleFactor> factors = new ArrayList<>();
+        do {
+            String role = identifier();
+            factors.add(new Ast.RoleFactor(role, number().doubleValue()));
+        } while (acceptSymbol(","));
+        expectSymbol(")");
+        return List.copyOf(factors);
     }
 
     private List<String> refineRoles() {
