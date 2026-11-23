@@ -185,6 +185,30 @@ EXPAND @120 DEPTH 2 LIMIT 20;
 -- | [@120, @83, @11] | @11 Patient:'kavya-iyer'     | EMIT |
 ```
 
+## Diffusion
+
+`DIFFUSE` ([HQL](hql.md#diffuse)) ranks the atoms and hyperedges most associated with a set of seed atoms by
+personalized PageRank on the hypergraph's incidence structure (`hora/Diffusion.java`, `Hora.diffuse`). One step goes
+from an atom to a hyperedge that contains it, then to one of that hyperedge's members, so a hyperedge is never
+expanded into pairwise links; at every atom the walk stops with probability `ALPHA` (default 0.2).
+
+From atom `v`, a hyperedge `e` is chosen with weight `typeWeight(e) · exit(role of v in e)`; from `e`, a member `u`
+with weight `weight(u in e) · enter(role of u in e)`. A role-set factor is the largest factor of the roles in the
+set, and unnamed roles count 1. `THROUGH` limits the hyperedge types and sets their weights, `VALID AT` keeps only
+memberships valid at that instant, and `POLICY` keeps only memberships whose evidence the policy accepts. A step with
+nothing admitted sends its mass back to the seeds, so the walk stays a probability distribution.
+
+The estimate comes from local push (Andersen, Chung and Lang): residual mass is pushed from atoms and hyperedges until
+every remaining residual is below `EPSILON` (default `1e-4`) times its node's incidence count. The work is at most about
+`(2 - ALPHA) / (ALPHA · EPSILON)` incidence reads, independent of the size of the database. The result carries its own
+error: the residual left, which bounds the total error of the atom scores exactly, and each row's `upper` column, a
+guaranteed upper bound on its exact score. Pushes run in a fixed order, so a result is reproducible. `PROPAGATE`
+keeps its own unnormalized semantics; `DIFFUSE` is the normalized walk.
+
+Each incidence read counts against the row budget; when it runs out the walk stops early and the message says so, and
+the residual still bounds the error. Hyperedges and atoms of another tenant are never entered, and a seed of another
+tenant is an error.
+
 ## Pattern matching
 
 `PATTERN (vars) WHERE constraints` (`PatternMatcher`) is a conjunctive query over node and edge variables:

@@ -14,6 +14,7 @@ import io.hstore.db.evidence.EvidencePolicy;
 import io.hstore.db.evidence.Provenance;
 import io.hstore.db.evidence.Qualifier;
 import io.hstore.db.hora.Budget;
+import io.hstore.db.hora.Diffusion;
 import io.hstore.db.hora.Field;
 import io.hstore.db.hora.Hora;
 import io.hstore.db.hora.Pattern;
@@ -62,6 +63,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -317,6 +319,7 @@ final class Executor {
             case Statement.SetAlgebra algebra -> algebra.into().isPresent() ? write(writer -> setAlgebra(writer, algebra)) : read(reader -> setAlgebra(reader, algebra));
             case Statement.Rank rank -> read(reader -> rank(reader, rank));
             case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
+            case Statement.Diffuse diffuse -> read(reader -> diffuse(reader, diffuse));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -605,6 +608,40 @@ final class Executor {
         QueryResult result = QueryResult.table(match.projections().stream().map(Ast.Projection::alias).toList(), rows);
         return result.withTrace(new QueryResult.Trace(0, reader.generation(), plan.chosen().path().describe(), plan.chosen().rows(),
                 rows.size(), trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
+    }
+
+    private QueryResult diffuse(Reader reader, Statement.Diffuse statement) {
+        Evaluator evaluator = evaluator(reader);
+        Map<Long, Double> seeds = new LinkedHashMap<>();
+        statement.seeds().forEach(seed -> seeds.merge(reader.require(session.resolve(reader, seed.atom())).id(), seed.weight(), Double::sum));
+        Set<Integer> types = new HashSet<>();
+        Map<Integer, Double> typeWeights = new HashMap<>();
+        statement.through().forEach(found -> {
+            TypeDef type = reader.requireReadableType(found.type());
+            if (!type.kind().isEdge()) {
+                throw HStoreException.invalid(found.type() + " is not a hyperedge type");
+            }
+            types.add(type.id());
+            typeWeights.put(type.id(), found.weight());
+        });
+        Map<String, Double> exit = new HashMap<>();
+        statement.exit().forEach(factor -> exit.put(factor.role(), factor.factor()));
+        Map<String, Double> entry = new HashMap<>();
+        statement.entry().forEach(factor -> entry.put(factor.role(), factor.factor()));
+        OptionalLong validAt = statement.validAt().map(expr -> OptionalLong.of((long) evaluator.value(expr, Map.of()).number()
+                .orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")))).orElse(OptionalLong.empty());
+        Diffusion.Model model = new Diffusion.Model(types, typeWeights, new Diffusion.RoleFactors(exit, entry), validAt,
+                statement.policy().orElse(io.hstore.db.evidence.EvidencePolicy.ANY));
+        Diffusion.Result result = Hora.on(reader).diffuse(seeds, model,
+                new Diffusion.Params(statement.alpha(), statement.epsilon(), (int) statement.top(), (int) statement.edges()), Budget.DEFAULT.start());
+        List<List<Cell>> rows = new ArrayList<>();
+        result.atoms().forEach(scored -> rows.add(List.of(QueryResult.text("atom"), atomCell(reader, scored.id()),
+                QueryResult.number(scored.estimate()), QueryResult.number(scored.upper()))));
+        result.edges().forEach(scored -> rows.add(List.of(QueryResult.text("edge"), atomCell(reader, scored.id()),
+                QueryResult.number(scored.estimate()), QueryResult.number(scored.upper()))));
+        QueryResult table = QueryResult.table(List.of("kind", "id", "score", "upper"), rows);
+        return new QueryResult(table.columns(), table.rows(), table.message() + "; residual " + result.residual() + ", " + result.reads()
+                + " incidences read" + (result.exhausted() ? ", budget reached" : ""), table.trace());
     }
 
     private QueryResult transitions(Reader reader, Statement.Transitions statement) {

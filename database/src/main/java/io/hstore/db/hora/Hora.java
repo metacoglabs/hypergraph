@@ -344,4 +344,8 @@ public final class Hora {
         ancestors.remove(atom);
         return proceed;
     }
+
+    public Diffusion.Result diffuse(Map<Long, Double> seeds, Diffusion.Model model, Diffusion.Params params, Budget.Meter meter) {
+        return Diffusion.on(reader).run(seeds, model, params, meter);
+    }
 }

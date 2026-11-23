@@ -386,6 +386,29 @@ class SecurityTest {
     }
 
     @Test
+    void diffusionStaysInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmePatient = alice.variables().get("p");
+            long acmeEdge = alice.variables().get("e");
+            long globexPatient = bob.variables().get("p");
+            long globexEdge = bob.variables().get("e");
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> Incidence.of(globexPatient));
+                writer.transaction().upsert(globexEdge, acmePatient, _ -> Incidence.of(acmePatient));
+                return null;
+            });
+            var result = alice.execute("DIFFUSE FROM @" + acmePatient + " TOP 50 EDGES 50");
+            String rendered = result.rows().toString();
+            assertFalse(rendered.contains("@" + globexPatient + " "), rendered);
+            assertFalse(rendered.contains("@" + globexEdge + " "), rendered);
+            assertTrue(rendered.contains("'p1'"), rendered);
+            assertThrows(HStoreException.class, () -> alice.execute("DIFFUSE FROM @" + globexPatient + " TOP 5"));
+        }
+    }
+
+    @Test
     void roleFilteredMatchesStayInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");

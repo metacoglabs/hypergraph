@@ -343,6 +343,37 @@ public final class Parser {
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
             return new Statement.Members(edge, role, weight, validAt, policy, limit());
         }
+        if (accept("DIFFUSE")) {
+            expect("FROM");
+            List<Ast.DiffuseSeed> seeds = new ArrayList<>();
+            do {
+                Ref seed = ref();
+                seeds.add(new Ast.DiffuseSeed(seed, accept("WEIGHT") ? number().doubleValue() : 1.0));
+                if (seeds.size() > 1_000) {
+                    throw HStoreException.invalid("DIFFUSE takes at most 1000 seeds");
+                }
+            } while (acceptSymbol(","));
+            List<Ast.DiffuseType> through = new ArrayList<>();
+            if (accept("THROUGH")) {
+                do {
+                    String type = identifier();
+                    through.add(new Ast.DiffuseType(type, accept("WEIGHT") ? number().doubleValue() : 1.0));
+                } while (acceptSymbol(","));
+            }
+            List<Ast.RoleFactor> exit = accept("EXIT") ? roleFactors() : List.of();
+            List<Ast.RoleFactor> entry = accept("ENTER") ? roleFactors() : List.of();
+            Optional<Expr> validAt = validAt();
+            Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
+            double alpha = accept("ALPHA") ? number().doubleValue() : 0.2;
+            double epsilon = accept("EPSILON") ? number().doubleValue() : 1e-4;
+            expect("TOP");
+            long top = longValue();
+            long edges = accept("EDGES") ? longValue() : 0;
+            if (top < 0 || top > 10_000 || edges < 0 || edges > 10_000) {
+                throw HStoreException.invalid("TOP and EDGES must be between 0 and 10000");
+            }
+            return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, top, edges);
+        }
         if (accept("TRANSITIONS")) {
             expect("EDGE");
             String variable = identifier();
@@ -1246,6 +1277,17 @@ public final class Parser {
             throw error("expected a $variable but found " + token);
         }
         return token.text();
+    }
+
+    private List<Ast.RoleFactor> roleFactors() {
+        expectSymbol("(");
+        List<Ast.RoleFactor> factors = new ArrayList<>();
+        do {
+            String role = identifier();
+            factors.add(new Ast.RoleFactor(role, number().doubleValue()));
+        } while (acceptSymbol(","));
+        expectSymbol(")");
+        return List.copyOf(factors);
     }
 
     private Ast.Instant transitionInstant() {
