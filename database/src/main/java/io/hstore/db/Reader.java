@@ -16,6 +16,7 @@ import io.hstore.db.value.Json;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.db.value.Values;
+import io.hstore.db.temporal.ValidityIndex;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.AtomRecord;
 import io.hstore.engine.catalog.EngineSlots;
@@ -162,6 +163,14 @@ public sealed class Reader permits Writer {
                 .filter(entry -> entry.value().validAt(instant))
                 .mapToLong(Entry::key)
                 .filter(this::owns);
+    }
+
+    public LongStream validityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
+        return ValidityIndex.edges(view, tenant(), edgeType, side, lowExclusive, highInclusive);
+    }
+
+    public long countValidityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
+        return ValidityIndex.count(view, tenant(), edgeType, side, lowExclusive, highInclusive);
     }
 
     public Tree<?> incidentTree(long atom) {

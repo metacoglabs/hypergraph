@@ -7,6 +7,7 @@ import io.hstore.db.Atom;
 import io.hstore.db.Reader;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.semantic.SemanticPlane;
+import io.hstore.db.temporal.ValiditySlots;
 import io.hstore.db.value.Value;
 import io.hstore.engine.Dictionary;
 import io.hstore.engine.index.IndexValues;
@@ -150,6 +151,23 @@ public sealed interface AccessPath {
 
         public LongStream scan(Reader reader) {
             return reader.similar(text, k, consistency).stream().mapToLong(SemanticPlane.Hit::atom);
+        }
+    }
+
+    record ValidityTransition(TypeDef type, long t1, long t2, Direction direction) implements AccessPath {
+        public enum Direction { DISAPPEARED, APPEARED }
+
+        public String kind() {
+            return "validity-transition";
+        }
+
+        public String describe() {
+            return "ValidityTransition(" + type.name() + " " + direction.name().toLowerCase(java.util.Locale.ROOT) + " in (" + t1 + ", " + t2 + "])";
+        }
+
+        public LongStream scan(Reader reader) {
+            int side = direction == Direction.DISAPPEARED ? ValiditySlots.VALID_TO : ValiditySlots.VALID_FROM;
+            return reader.validityEndpoints(type.id(), side, t1, t2);
         }
     }
 
