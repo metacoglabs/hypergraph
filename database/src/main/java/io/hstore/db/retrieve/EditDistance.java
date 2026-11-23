@@ -12,6 +12,7 @@ import java.util.Map;
 public final class EditDistance {
 
     public static final int EXACT_EDGE_LIMIT = 5;
+    public static final int ASSIGNMENT_LIMIT = 512;
 
     public record Shape(int[] nodeTypes, int[] edgeTypes, int[][] members, long[] nodeIds) {
         public Shape {
@@ -55,6 +56,18 @@ public final class EditDistance {
     }
 
     private EditDistance() {
+    }
+
+    static boolean solvable(Shape q, Shape c) {
+        return q.nodes() + c.nodes() <= ASSIGNMENT_LIMIT && q.edges() + c.edges() <= ASSIGNMENT_LIMIT;
+    }
+
+    static double trivialUpper(Shape q, Shape c) {
+        return q.nodes() + q.edges() + q.incidences() + c.nodes() + c.edges() + c.incidences();
+    }
+
+    private static void charge(Budget.Meter meter, int size) {
+        meter.consume(1 + (long) size * size);
     }
 
     static double withEdgeMap(Shape q, Shape c, int[] map) {
@@ -106,7 +119,7 @@ public final class EditDistance {
             return;
         }
         if (edge == q.edges()) {
-            meter.consume(1);
+            charge(meter, q.nodes() + c.nodes());
             best[0] = Math.min(best[0], withEdgeMap(q, c, map));
             return;
         }
@@ -122,7 +135,12 @@ public final class EditDistance {
         search(q, c, edge + 1, mapped, relabels, map, used, best, meter);
     }
 
-    public static double upper(Shape q, Shape c) {
+    public static double upper(Shape q, Shape c, Budget.Meter meter) {
+        if (!solvable(q, c)) {
+            return trivialUpper(q, c);
+        }
+        charge(meter, q.edges() + c.edges());
+        charge(meter, q.nodes() + c.nodes());
         int k = q.edges();
         int l = c.edges();
         double[][] substitute = new double[k][l];
@@ -177,7 +195,22 @@ public final class EditDistance {
         return total;
     }
 
-    public static double identity(Shape q, Shape c) {
+    public static Interval identity(Shape q, Shape c, Budget.Meter meter) {
+        if (q.edges() + c.edges() > ASSIGNMENT_LIMIT) {
+            Map<Long, Integer> seen = new HashMap<>();
+            for (long id : q.nodeIds()) {
+                seen.merge(id, 1, Integer::sum);
+            }
+            long shared = Arrays.stream(c.nodeIds()).filter(seen::containsKey).distinct().count();
+            double nodes = q.nodes() + c.nodes() - 2.0 * shared;
+            return new Interval(nodes, nodes + q.edges() + q.incidences() + c.edges() + c.incidences());
+        }
+        charge(meter, q.edges() + c.edges());
+        double distance = identity(q, c);
+        return new Interval(distance, distance);
+    }
+
+    static double identity(Shape q, Shape c) {
         Map<Long, Integer> qNodes = new HashMap<>();
         for (long id : q.nodeIds()) {
             qNodes.merge(id, 1, Integer::sum);
@@ -203,11 +236,11 @@ public final class EditDistance {
         return nodes + Assignment.minimum(Assignment.withDeletions(substitute, delete, insert));
     }
 
-    public static Interval measure(Shape q, Shape c, double cutoff, Budget.Meter meter) {
-        if (q.edges() <= EXACT_EDGE_LIMIT && c.edges() <= EXACT_EDGE_LIMIT) {
+    public static Interval measure(Shape q, Shape c, double lower, double cutoff, Budget.Meter meter) {
+        if (q.edges() <= EXACT_EDGE_LIMIT && c.edges() <= EXACT_EDGE_LIMIT && solvable(q, c)) {
             double distance = exact(q, c, cutoff, meter);
-            return distance <= cutoff ? new Interval(distance, distance) : new Interval(Math.max(lower(q, c), Math.nextUp(cutoff)), upper(q, c));
+            return distance <= cutoff ? new Interval(distance, distance) : new Interval(Math.max(lower, Math.nextUp(cutoff)), Double.POSITIVE_INFINITY);
         }
-        return new Interval(lower(q, c), upper(q, c));
+        return new Interval(lower, upper(q, c, meter));
     }
 }

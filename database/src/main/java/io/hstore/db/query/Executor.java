@@ -915,7 +915,11 @@ final class Executor {
         if (!statement.pattern().isEmpty()) {
             query = patternShape(reader, statement.pattern());
         } else if (statement.container().isPresent()) {
-            query = Similarity.shapeOf(reader, Similarity.children(reader, reader.require(session.resolve(reader, statement.container().get())).id()));
+            long[] children = Similarity.children(reader, reader.require(session.resolve(reader, statement.container().get())).id());
+            if (children.length == 0) {
+                throw HStoreException.invalid("the example container has no child hyperedges to compare");
+            }
+            query = Similarity.shapeOf(reader, children);
         } else {
             long[] edges = statement.example().stream().mapToLong(ref -> {
                 long id = reader.require(session.resolve(reader, ref)).id();
@@ -936,16 +940,21 @@ final class Executor {
             }
             case Ast.SimilarSpace.Around(Ast.Ref anchor, long size, List<String> through) -> {
                 Set<Integer> types = new HashSet<>();
-                through.forEach(name -> types.add(reader.requireReadableType(name).id()));
+                through.forEach(name -> {
+                    TypeDef def = reader.requireReadableType(name);
+                    if (!def.kind().isEdge()) {
+                        throw HStoreException.invalid(name + " is not a hyperedge type");
+                    }
+                    types.add(def.id());
+                });
                 yield new Similarity.Space.Around(reader.require(session.resolve(reader, anchor)).id(), (int) Math.min(Integer.MAX_VALUE, size), types);
             }
             case Ast.SimilarSpace.Sets(List<List<Ast.Ref>> sets) -> new Similarity.Space.Given(sets.stream()
                     .map(set -> set.stream().mapToLong(ref -> reader.require(session.resolve(reader, ref)).id()).toArray()).toList());
         };
-        Budget.Meter meter = Budget.DEFAULT.start();
         Similarity.Result result = statement.within().isPresent()
-                ? Similarity.within(reader, query, statement.identity(), space, statement.within().getAsDouble(), meter)
-                : Similarity.top(reader, query, statement.identity(), space, (int) statement.top().getAsLong(), meter);
+                ? Similarity.within(reader, query, statement.identity(), space, statement.within().getAsDouble(), Budget.DEFAULT)
+                : Similarity.top(reader, query, statement.identity(), space, (int) statement.top().getAsLong(), Budget.DEFAULT);
         QueryResult table = QueryResult.table(List.of("candidate", "edges", "lower", "upper"), result.hits().stream()
                 .map(hit -> List.<Cell>of(atomCell(reader, hit.key()), QueryResult.text(Arrays.stream(hit.edges()).mapToObj(edge -> "@" + edge)
                         .collect(Collectors.joining(", "))), QueryResult.number(hit.lower()),

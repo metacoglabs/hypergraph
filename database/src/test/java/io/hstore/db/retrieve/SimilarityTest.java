@@ -126,13 +126,13 @@ class SimilarityTest {
                 boolean identity = q % 4 == 3;
                 List<Truth> truth = truths(reader, query, identity, sets, containers);
                 double threshold = random.nextInt(7);
-                Result within = Similarity.within(reader, query, identity, new Space.Children(episode), threshold, Budget.UNBOUNDED.start());
+                Result within = Similarity.within(reader, query, identity, new Space.Children(episode), threshold, Budget.UNBOUNDED);
                 assertTrue(within.exact() && within.complete());
                 List<Truth> inside = truth.stream().filter(t -> t.distance() <= threshold).sorted(ORDER).toList();
                 assertEquals(inside.stream().map(Truth::key).toList(), within.hits().stream().map(Hit::key).toList(), "within query " + q);
                 assertEquals(inside.stream().map(Truth::distance).toList(), within.hits().stream().map(Hit::lower).toList());
                 int k = 1 + random.nextInt(5);
-                Result top = Similarity.top(reader, query, identity, new Space.Children(episode), k, Budget.UNBOUNDED.start());
+                Result top = Similarity.top(reader, query, identity, new Space.Children(episode), k, Budget.UNBOUNDED);
                 List<Truth> best = truth.stream().sorted(ORDER).limit(k).toList();
                 assertEquals(best.stream().map(Truth::key).toList(), top.hits().stream().map(Hit::key).toList(), "top query " + q);
                 assertEquals(best.stream().map(Truth::distance).toList(), top.hits().stream().map(Hit::upper).toList());
@@ -178,12 +178,12 @@ class SimilarityTest {
                 Shape query = Similarity.shapeOf(reader, Similarity.children(reader, example));
                 List<Truth> truth = truths(reader, query, false, sets, sets.stream().map(_ -> anchor).toList());
                 double threshold = random.nextInt(6);
-                Result within = Similarity.within(reader, query, false, new Space.Around(anchor, size, types), threshold, Budget.UNBOUNDED.start());
+                Result within = Similarity.within(reader, query, false, new Space.Around(anchor, size, types), threshold, Budget.UNBOUNDED);
                 List<Truth> inside = truth.stream().filter(t -> t.distance() <= threshold).sorted(ORDER).toList();
                 assertEquals(inside.stream().map(t -> Arrays.stream(t.edges()).boxed().toList()).toList(),
                         within.hits().stream().map(hit -> Arrays.stream(hit.edges()).boxed().toList()).toList(), "around query " + q);
                 int k = 1 + random.nextInt(4);
-                Result top = Similarity.top(reader, query, false, new Space.Around(anchor, size, types), k, Budget.UNBOUNDED.start());
+                Result top = Similarity.top(reader, query, false, new Space.Around(anchor, size, types), k, Budget.UNBOUNDED);
                 assertEquals(truth.stream().sorted(ORDER).limit(k).map(Truth::distance).toList(), top.hits().stream().map(Hit::upper).toList(),
                         "around top query " + q);
             }
@@ -208,7 +208,7 @@ class SimilarityTest {
                 Shape query = Similarity.shapeOf(reader, sets.get(random.nextInt(sets.size())));
                 List<Truth> truth = truths(reader, query, false, sets, keys);
                 int k = 1 + random.nextInt(3);
-                Result top = Similarity.top(reader, query, false, new Space.Given(sets), k, Budget.UNBOUNDED.start());
+                Result top = Similarity.top(reader, query, false, new Space.Given(sets), k, Budget.UNBOUNDED);
                 assertEquals(truth.stream().sorted(ORDER).limit(k).map(t -> Arrays.stream(t.edges()).boxed().toList()).toList(),
                         top.hits().stream().map(hit -> Arrays.stream(hit.edges()).boxed().toList()).toList(), "query " + q);
             }
@@ -228,7 +228,7 @@ class SimilarityTest {
                 for (List<Long> set : found) {
                     long[] edges = set.stream().mapToLong(Long::longValue).toArray();
                     Shape query = Similarity.shapeOf(reader, edges);
-                    Result within = Similarity.within(reader, query, false, new Space.Around(anchor, 2, types), 0, Budget.UNBOUNDED.start());
+                    Result within = Similarity.within(reader, query, false, new Space.Around(anchor, 2, types), 0, Budget.UNBOUNDED);
                     assertTrue(within.hits().stream().anyMatch(hit -> Arrays.equals(hit.edges(), edges)), "anchor " + anchor + " set " + set);
                     checked++;
                 }
@@ -239,12 +239,92 @@ class SimilarityTest {
     }
 
     @Test
+    void aHugeCandidateGetsAnIntervalInsteadOfAnAssignment() {
+        long[] big = database.write(writer -> {
+            long edge = writer.edge("Meeting");
+            for (int i = 0; i < 3_000; i++) {
+                writer.add(edge, writer.node("Person", "crowd" + i), MemberSpec.PLAIN);
+            }
+            return new long[]{edge};
+        });
+        database.read(reader -> {
+            Shape query = new Shape(new int[]{reader.requireReadableType("Person").id()}, new int[]{reader.requireReadableType("Meeting").id()},
+                    new int[][]{{0}}, new long[]{-1});
+            Result result = Similarity.top(reader, query, false, new Space.Given(List.of(big)), 1, Budget.DEFAULT);
+            Hit hit = result.hits().getFirst();
+            assertTrue(hit.lower() <= 5_998 && hit.upper() >= 5_998, hit.toString());
+            assertFalse(result.exact());
+            return null;
+        });
+    }
+
+    @Test
+    void anExactAnswerIsNeverClaimedWhenAnIntervalWasDropped() {
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(98L);
+        episodes(random, 20);
+        database.read(reader -> {
+            List<long[]> sets = new ArrayList<>();
+            for (int i = 0; i < 30; i++) {
+                int size = random.nextInt(3) == 0 ? 6 + random.nextInt(2) : 1 + random.nextInt(2);
+                long[] set = random.longs(size * 2L, 0, children.size()).map(index -> children.get((int) index)).distinct().limit(size).sorted().toArray();
+                if (sets.stream().noneMatch(other -> Arrays.equals(other, set))) {
+                    sets.add(set);
+                }
+            }
+            int claimed = 0;
+            for (int q = 0; q < 60; q++) {
+                Shape query = Similarity.shapeOf(reader, sets.get(random.nextInt(sets.size())));
+                int k = 1 + random.nextInt(3);
+                Result top = Similarity.top(reader, query, false, new Space.Given(sets), k, Budget.UNBOUNDED);
+                if (top.exact()) {
+                    claimed++;
+                    List<Double> truth = sets.stream().map(set -> EditDistance.exact(query, Similarity.shapeOf(reader, set), Double.POSITIVE_INFINITY,
+                            Budget.UNBOUNDED.start())).sorted().limit(k).toList();
+                    assertEquals(truth, top.hits().stream().map(Hit::upper).toList(), "query " + q);
+                }
+            }
+            assertTrue(claimed > 10, "claimed " + claimed);
+            return null;
+        });
+    }
+
+    @Test
+    void runningOutOfBudgetKeepsWhatWasVerified() {
+        RandomGenerator random = RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(99L);
+        episodes(random, 5);
+        long anchor = database.write(writer -> {
+            long hub = writer.node("Person", "hub");
+            long first = -1;
+            for (int i = 0; i < 40; i++) {
+                long edge = writer.edge("Meeting");
+                writer.add(edge, hub, MemberSpec.PLAIN);
+                writer.add(edge, writer.node("Person", "spoke" + i), MemberSpec.PLAIN);
+                first = first < 0 ? edge : first;
+            }
+            return first;
+        });
+        database.read(reader -> {
+            Set<Integer> types = Set.of(reader.requireReadableType("Meeting").id(), reader.requireReadableType("Call").id());
+            Shape query = Similarity.shapeOf(reader, new long[]{anchor});
+            Result top = Similarity.top(reader, query, false, new Space.Around(anchor, 6, types), 3, Budget.DEFAULT.withRows(60));
+            assertFalse(top.complete());
+            assertFalse(top.hits().isEmpty(), top.toString());
+            Result within = Similarity.within(reader, query, false, new Space.Around(anchor, 6, types), 50, Budget.DEFAULT.withRows(60));
+            assertFalse(within.complete());
+            assertFalse(within.hits().isEmpty());
+            Result twice = Similarity.top(reader, query, false, new Space.Given(List.of(new long[]{anchor}, new long[]{anchor})), 5, Budget.UNBOUNDED);
+            assertEquals(1, twice.hits().size());
+            return null;
+        });
+    }
+
+    @Test
     void aSmallBudgetGivesAnIncompleteAnswer() {
         episodes(RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(95L), 30);
         database.read(reader -> {
             Shape query = Similarity.shapeOf(reader, Similarity.children(reader, containers.getFirst()));
             Result result = Similarity.top(reader, query, false, new Space.Children(reader.requireReadableType("Episode").id()), 3,
-                    Budget.DEFAULT.withRows(10).start());
+                    Budget.DEFAULT.withRows(10));
             assertFalse(result.complete());
             assertFalse(result.exact());
             return null;

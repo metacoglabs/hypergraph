@@ -135,17 +135,18 @@ class EditDistanceTest {
             int truth = bruteForce(q, c);
             assertEquals(truth, EditDistance.exact(q, c, Double.POSITIVE_INFINITY, Budget.UNBOUNDED.start()), 1e-9, "trial " + trial);
             assertTrue(EditDistance.lower(q, c) <= truth + 1e-9, "lower bound above the distance in trial " + trial);
-            assertTrue(EditDistance.upper(q, c) >= truth - 1e-9, "upper bound below the distance in trial " + trial);
+            assertTrue(EditDistance.upper(q, c, Budget.UNBOUNDED.start()) >= truth - 1e-9, "upper bound below the distance in trial " + trial);
             double threshold = random.nextInt(8);
             double cut = EditDistance.exact(q, c, threshold, Budget.UNBOUNDED.start());
             assertEquals(truth <= threshold ? truth : Double.POSITIVE_INFINITY, cut, 1e-9, "threshold " + threshold + " in trial " + trial);
-            EditDistance.Interval interval = EditDistance.measure(q, c, threshold, Budget.UNBOUNDED.start());
+            EditDistance.Interval interval = EditDistance.measure(q, c, EditDistance.lower(q, c), threshold, Budget.UNBOUNDED.start());
             assertTrue(interval.lower() <= Math.max(truth, interval.lower()) && interval.upper() >= truth - 1e-9);
             if (truth <= threshold) {
                 assertTrue(interval.exact() && interval.lower() == truth);
             } else {
                 assertTrue(interval.lower() > threshold);
             }
+            assertTrue(EditDistance.trivialUpper(q, c) >= truth);
         }
     }
 

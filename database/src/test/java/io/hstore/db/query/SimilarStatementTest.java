@@ -109,5 +109,7 @@ class SimilarStatementTest {
         assertThrows(HStoreException.class, () -> session.execute("SIMILAR TO EDGES ($p1) IN CHILDREN OF Episode TOP 1"));
         assertThrows(HStoreException.class, () -> session.execute("SIMILAR TO " + PATTERN + " IN SETS (($p1)) TOP 1"));
         assertThrows(HStoreException.class, () -> session.execute("SIMILAR TO " + PATTERN + " IN CHILDREN OF Episode TOP 0"));
+        assertThrows(HStoreException.class, () -> session.execute("SIMILAR TO " + PATTERN + " IN AROUND $x1 THROUGH Person TOP 1"));
+        assertThrows(HStoreException.class, () -> session.execute("SIMILAR TO CHILDREN OF $x1 IN CHILDREN OF Episode TOP 1"));
     }
 }

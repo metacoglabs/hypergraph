@@ -28,7 +28,9 @@ away, not a different meeting.
 For a fixed mapping of the query's hyperedges onto the candidate's, the best node mapping is one assignment problem,
 solved exactly with the Hungarian method. The search tries every mapping of hyperedges and stops a branch once its
 hyperedge cost alone reaches the best distance found. This is exact for up to 5 hyperedges on each side. A larger
-candidate gets an interval: a lower bound and the cost of one good mapping.
+candidate gets an interval: a lower bound and the cost of one good mapping. An assignment over more than 512 nodes or
+hyperedges is not solved at all; the upper end of the interval is then the cost of deleting the query and inserting
+the candidate.
 
 Before that, a lower bound rejects most candidates cheaply. It adds the nodes and hyperedges that cannot be matched by
 type to the larger of two sorted differences: hyperedge sizes and node degrees. It never exceeds the distance.
@@ -43,7 +45,9 @@ difference plus the members in one of the two only.
 visited in order of their lower bound, and the search stops when the next lower bound is above the `k`-th distance
 found. Columns: `candidate` (the container, the anchor, or the first hyperedge of a listed set), `edges`, `lower`,
 `upper`. When `lower` equals `upper` the distance is exact. Ties are broken by the smallest atom id in the candidate,
-then by its hyperedges.
+then by its hyperedges. The message says the answer is exact only when every row is exact and no candidate that was
+left out with an interval could have ranked higher. A query taken from the data is itself a candidate when the space
+contains it, and then comes first at distance 0. Listed sets that repeat are compared once.
 
 Example: the query `(q1:Meeting(a:Person, b:Person, d:Doc), q2:Meeting(b, c:Person))` against three episodes:
 
@@ -56,8 +60,9 @@ Example: the query `(q1:Meeting(a:Person, b:Person, d:Doc), q2:Meeting(b, c:Pers
 ## Tenants and budget
 
 Containers, anchors and listed hyperedges must belong to the reader's tenant, and only members the reader can see are
-part of a candidate. Every candidate and every hyperedge mapping tried counts against the statement's row budget. When
-it runs out, the answer contains what was verified and says the list may be incomplete.
+part of a candidate. Half of the statement's row budget goes to finding candidates and their lower bounds, where every
+candidate and every member read counts; the other half goes to verification, where every assignment counts by its
+size. When either half runs out, the answer contains what was verified and says the list may be incomplete.
 
 ## Not supported
 
