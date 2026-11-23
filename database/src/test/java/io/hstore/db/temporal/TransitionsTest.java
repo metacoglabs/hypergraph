@@ -325,6 +325,34 @@ class TransitionsTest {
     }
 
     @Test
+    void lineageThroughAMergedParentKeepsItsEvents() {
+        open(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(5000));
+        try (Session session = new Session(database)) {
+            session.executeAll("""
+                    INSERT NODE Person 'a' AS $a;
+                    INSERT EDGE Collaboration AS $e;
+                    CREATE BRANCH parent;
+                    USE BRANCH parent;
+                    """);
+            long before = database.engine().transactions().current().id();
+            session.executeAll("""
+                    ADD $a TO $e;
+                    CREATE BRANCH child FROM parent;
+                    USE MAIN;
+                    MERGE BRANCH parent;
+                    """);
+            int child = database.engine().branches().stream().filter(found -> found.name().equals("child")).findFirst().orElseThrow().id();
+            long now = database.engine().transactions().current().id();
+            database.read(child, reader -> {
+                int type = reader.requireReadableType("Collaboration").id();
+                assertEquals(List.of(new Change.Membership(session.variables().get("e"), session.variables().get("a"))),
+                        Transitions.of(reader, OptionalInt.of(type), before, now, Direction.APPEARED, true, Budget.DEFAULT.start(), Route.FEED));
+                return null;
+            });
+        }
+    }
+
+    @Test
     void statementReturnsEdgesAndMembers() {
         open(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(5000));
         try (Session session = new Session(database)) {

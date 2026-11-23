@@ -49,7 +49,7 @@ public final class Transitions {
             throw HStoreException.invalid("generation " + through + " is after this snapshot's generation " + reader.generation());
         }
         HypergraphDatabase database = reader.database();
-        Lineage lineage = Lineage.of(database.engine().branches(), reader.engineView().branch());
+        Lineage lineage = Lineage.of(database, reader.engineView().branch());
         Route chosen = route == Route.AUTO ? (retained(database, lineage, after) && retained(database, lineage, through) ? Route.DIFF : Route.FEED) : route;
         Map<Change, Span> spans = new HashMap<>();
         Map<Long, AtomRecord> records = new HashMap<>();
@@ -174,7 +174,7 @@ public final class Transitions {
         unknown.removeIf(records::containsKey);
         unknown.removeIf(atom -> reader.engineView().atom(atom).map(found -> records.put(atom, found) == null).orElse(false));
         if (!unknown.isEmpty() && through < reader.generation()) {
-            records.putAll(FeedFold.fold(feed.replay(through), Lineage.of(database.engine().branches(), reader.engineView().branch()),
+            records.putAll(FeedFold.fold(feed.replay(through), Lineage.of(database, reader.engineView().branch()),
                     reader.generation(), meter).records());
         }
     }
