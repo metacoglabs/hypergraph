@@ -241,6 +241,90 @@ class TransitionsTest {
     }
 
     @Test
+    void feedPathWaitsForTheReadersNewestCommitToReachTheFeed() throws Exception {
+        java.util.concurrent.CountDownLatch reached = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicBoolean armed = new java.util.concurrent.atomic.AtomicBoolean();
+        open(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(5000).withFaults(point -> {
+            if (point == io.hstore.engine.txn.CrashPoint.FEED_APPEND && armed.compareAndSet(true, false)) {
+                reached.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        }));
+        long[] ids = database.write(writer -> new long[]{writer.edge("Collaboration"), writer.node("Person", "seed")});
+        int type = database.read(reader -> reader.requireReadableType("Collaboration").id());
+        armed.set(true);
+        var pool = java.util.concurrent.Executors.newCachedThreadPool();
+        try {
+            var commit = pool.submit(() -> database.write(writer -> {
+                writer.add(ids[0], ids[1], MemberSpec.PLAIN);
+                return null;
+            }));
+            reached.await();
+            var query = pool.submit(() -> database.read(reader -> Transitions.of(reader, OptionalInt.of(type), reader.generation() - 1,
+                    reader.generation(), Direction.APPEARED, true, Budget.DEFAULT.start(), Route.FEED)));
+            assertThrows(java.util.concurrent.TimeoutException.class, () -> query.get(300, java.util.concurrent.TimeUnit.MILLISECONDS));
+            release.countDown();
+            commit.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(List.of(new Change.Membership(ids[0], ids[1])), query.get(10, java.util.concurrent.TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void timesInsideAHistoryHoleResolveThroughTheFeed() throws Exception {
+        open(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(2));
+        database.write(writer -> writer.node("Person", "start"));
+        Map<Long, Long> wallTimes = new HashMap<>();
+        try (var _ = database.engine().snapshot()) {
+            for (int i = 0; i < 8; i++) {
+                Thread.sleep(3);
+                int n = i;
+                database.write(writer -> writer.node("Person", "h" + n));
+                var current = database.engine().transactions().current();
+                wallTimes.put(current.id(), current.wallTime());
+            }
+            long middle = wallTimes.keySet().stream().sorted().toList().get(3);
+            database.read(reader -> {
+                assertEquals(middle, Transitions.generationAt(reader, wallTimes.get(middle)).orElseThrow());
+                return null;
+            });
+        }
+    }
+
+    @Test
+    void twoTimesWithoutACommitBetweenGiveNoRows() {
+        open(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(5000));
+        try (Session session = new Session(database)) {
+            session.execute("INSERT NODE Person 'a'");
+            long now = System.currentTimeMillis() + 10;
+            String from = java.time.Instant.ofEpochMilli(now).toString();
+            String to = java.time.Instant.ofEpochMilli(now + 5).toString();
+            assertEquals(0, session.execute("TRANSITIONS EDGE x FROM '" + from + "' TO '" + to + "' APPEARED").rows().size());
+        }
+    }
+
+    @Test
+    void transitionsCountPagesAgainstTheQueryBudget() {
+        open(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(5000));
+        History history = randomHistory(RandomGeneratorFactory.<RandomGenerator>of("L64X128MixRandom").create(13L), 200);
+        database.close();
+        database = HypergraphDatabase.open(directory, DatabaseOptions.defaults().withQueryPages(1)
+                .withEngine(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(5000)));
+        try (Session session = new Session(database)) {
+            HStoreException refused = assertThrows(HStoreException.class, () -> session.execute("TRANSITIONS EDGE x FROM GENERATION "
+                    + history.generations().getFirst() + " TO GENERATION " + history.generations().getLast() + " APPEARED MEMBERS"));
+            assertTrue(refused.getMessage().contains("page visits"), refused.getMessage());
+        }
+    }
+
+    @Test
     void statementReturnsEdgesAndMembers() {
         open(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(5000));
         try (Session session = new Session(database)) {

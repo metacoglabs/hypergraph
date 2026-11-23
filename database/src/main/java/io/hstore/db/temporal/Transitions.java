@@ -66,12 +66,12 @@ public final class Transitions {
                 return;
             }
             Optional<AtomRecord> edge = record.apply(change.edge());
-            if (edge.isEmpty() || !(edge.get() instanceof EdgeRecord) || edge.get().tenant() != reader.tenant()
+            if (edge.isEmpty() || !(edge.get() instanceof EdgeRecord) || !reader.admits(edge.get())
                     || edgeType.stream().anyMatch(type -> type != edge.get().type())) {
                 return;
             }
             if (change instanceof Change.Membership(long _, long member)
-                    && record.apply(member).map(found -> found.tenant() != reader.tenant()).orElse(true)) {
+                    && record.apply(member).map(found -> !reader.admits(found)).orElse(true)) {
                 return;
             }
             result.add(change);
@@ -81,7 +81,10 @@ public final class Transitions {
 
     public static OptionalLong generationAt(Reader reader, long wallTime) {
         HypergraphDatabase database = reader.database();
-        Optional<Long> retained = Temporal.resolve(database, wallTime).map(generation -> generation.id());
+        long current = database.engine().transactions().current().id();
+        Optional<Long> retained = Temporal.resolve(database, wallTime).map(generation -> generation.id())
+                .filter(found -> found == current || database.engine().transactions().history().stream()
+                        .anyMatch(generation -> generation.id() == found + 1));
         if (retained.isPresent()) {
             return OptionalLong.of(retained.get());
         }

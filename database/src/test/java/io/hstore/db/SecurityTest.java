@@ -368,6 +368,24 @@ class SecurityTest {
     }
 
     @Test
+    void transitionsRespectTypeGrants() {
+        admin.executeAll("""
+                CREATE NODE TYPE Note;
+                CREATE USER nurse PASSWORD 'nurse-pass-1' TENANT acme ROLE none;
+                GRANT READ ON TYPE Patient TO nurse;
+                """);
+        try (Session alice = login("alice", "s3cret-pass"); Session nurse = login("nurse", "nurse-pass-1")) {
+            long g1 = database.engine().transactions().current().id();
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long g2 = database.engine().transactions().current().id();
+            String query = "TRANSITIONS EDGE x FROM GENERATION " + g1 + " TO GENERATION " + g2 + " APPEARED";
+            assertEquals(1, alice.execute(query).rows().size());
+            assertEquals(0, nurse.execute(query).rows().size());
+            assertEquals(0, nurse.execute(query + " MEMBERS").rows().size());
+        }
+    }
+
+    @Test
     void roleFilteredMatchesStayInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");

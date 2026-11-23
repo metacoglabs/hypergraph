@@ -615,7 +615,12 @@ final class Executor {
             }
             return OptionalInt.of(found.id());
         }).orElse(OptionalInt.empty());
-        List<FeedFold.Change> changes = Transitions.of(reader, type, generation(reader, statement.from()), generation(reader, statement.to()),
+        long from = generation(reader, statement.from());
+        long to = generation(reader, statement.to());
+        if (from == to && statement.from() instanceof Ast.Instant.Time && statement.to() instanceof Ast.Instant.Time) {
+            return QueryResult.table(statement.members() ? List.of("edge", "member") : List.of("edge"), List.of());
+        }
+        List<FeedFold.Change> changes = Transitions.of(reader, type, from, to,
                 statement.appeared() ? Transitions.Direction.APPEARED : Transitions.Direction.DISAPPEARED, statement.members(),
                 Budget.DEFAULT.start());
         return table(statement.members() ? List.of("edge", "member") : List.of("edge"), limited(changes.stream().map(change -> switch (change) {

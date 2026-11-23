@@ -85,7 +85,7 @@ public sealed class Reader permits Writer {
         return view.atom(atom).map(this::admits).orElse(false);
     }
 
-    boolean admits(AtomRecord record) {
+    public boolean admits(AtomRecord record) {
         return record.tenant() == tenant() && readable(record.type());
     }
 
