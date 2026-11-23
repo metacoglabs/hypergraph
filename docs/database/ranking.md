@@ -106,3 +106,30 @@ still count a member of another tenant.
 | graded role similarity | the role part is 0 or 1 per slot |
 | ordered positions in slots | position is not part of a slot |
 | a tight bound for typed slots | needs the edge-signature index proposed for structural matching |
+
+## Evidence selection
+
+`SELECT EVIDENCE` (`retrieve/Selection.java`) picks a set of hyperedges rather than ranking them one by one. Candidates
+are the top hyperedges of the `RANK` query and, with `FROM`, up to `CANDIDATES` (default 200) hyperedges an
+[expansion](hora.md#expansion-towards-a-query) reaches from the seeds. A reached hyperedge of a type other than the
+`RANK` type has relevance 0 and covers no slot, so it is only chosen to connect others. Only members the reader can see
+count, and a hyperedge with more than 10,000 members is left out. The value of a set `A` is
+
+```
+F(A) = Σ over atoms x  min(KAPPA, Σ over e in A containing x  r(e) / |M(e)|)  +  LAMBDA · Σ over slots i  w_i · (1 - Π over e in A (1 - cover(e, i)))
+```
+
+where `r(e)` is the `RANK` score and `cover(e, i)` is 1 when `e` fills slot `i` in an accepted role, 1/2 in another
+role and 0 otherwise. Relevance is spread over a hyperedge's members and capped per atom, so a second hyperedge with
+the same members adds little and an exact duplicate adds nothing once its members are capped; coverage counts each
+slot once. `F` is monotone and submodular.
+
+With only `TOP k`, a lazy greedy picks the hyperedge with the largest gain each step, which is within `1 - 1/e` of the
+best `k` candidates. With `BUDGET` (the total member count), it picks by gain per member and then compares with the
+best single candidate, which is within `(1 - 1/e) / 2`. With both, it also runs the count-only greedy and keeps the
+better set. Generation and selection each have their own share of the statement's budget; when selection runs out it
+returns the set chosen so far and says it has no bound. The message reports `F(A)` and an upper bound on the best
+possible value from these candidates, computed from the final marginal gains, so `F(A) / bound` is a certified lower
+bound on how good the choice is. With `CONNECTED`, every chosen hyperedge comes with the hyperedges of its expansion
+chain back to a seed, so the set stays connected; there is no approximation guarantee then, but the same bound holds.
+

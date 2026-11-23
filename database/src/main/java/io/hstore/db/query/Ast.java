@@ -347,6 +347,10 @@ public final class Ast {
                           long top) implements Statement {
         }
 
+        record SelectEvidence(Rank query, List<Ref> seeds, boolean connected, OptionalLong top, OptionalLong budget, double kappa,
+                              double lambda, long candidates) implements Statement {
+        }
+
         record Diffuse(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
                        Optional<Expr> validAt, Optional<EvidencePolicy> policy, double alpha, double epsilon, long top, long edges)
                 implements Statement {

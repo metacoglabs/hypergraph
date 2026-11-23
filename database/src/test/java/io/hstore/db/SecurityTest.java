@@ -454,6 +454,24 @@ class SecurityTest {
     }
 
     @Test
+    void evidenceSelectionCountsOnlyTheTenantsMembers() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmePatient = alice.variables().get("p");
+            long acmeEdge = alice.variables().get("e");
+            long globexPatient = bob.variables().get("p");
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> Incidence.of(globexPatient));
+                return null;
+            });
+            var result = alice.execute("SELECT EVIDENCE FOR (RANK EDGE e:Encounter LIKE (@" + acmePatient + " AS patient) TOP 5) BUDGET 1");
+            assertEquals(List.of("@" + acmeEdge), result.rows().stream().map(row -> row.getFirst().render().split(" ")[0]).toList());
+            assertFalse(result.rows().toString().contains("@" + globexPatient + " "));
+        }
+    }
+
+    @Test
     void roleFilteredMatchesStayInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
