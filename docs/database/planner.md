@@ -49,7 +49,7 @@ drive an access path; a predicate inside `OR` or `NOT` is always evaluated as a 
 `!=` on an indexed property maps to a `TypeScan` (`Planner.range`, case `NE`). A path is **exact** when every atom
 it yields satisfies the conjunct that produced it (`Planner.exact`); an exact conjunct is dropped from the residual
 filters. `HAS r AS role` is exact because every reverse-index posting carries the role set of its incidence
-(`IndexValues.Incident(roleSet, locator)`), kept in step with the membership by the derivation that maintains the
+(`IndexValues.Incident(roleSet, locator, validFrom, validTo)`), kept in step with the membership by the derivation that maintains the
 index, so the role check runs on the posting.
 
 Paths other than `TypeScan` may yield atoms of the wrong kind or type (an incidence set contains hyperedges of every

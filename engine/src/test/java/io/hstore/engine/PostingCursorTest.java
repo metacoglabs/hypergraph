@@ -51,7 +51,7 @@ class PostingCursorTest {
     private static List<Long> naive(View view, List<Long> anchors, List<Predicate<IndexValues.Incident>> filters) {
         List<Set<Long>> sets = IntStream.range(0, anchors.size())
                 .mapToObj(i -> Set.copyOf(view.incident(anchors.get(i))
-                        .filter(edge -> filters.get(i).test(new IndexValues.Incident(edge.roleSet(), edge.locator())))
+                        .filter(edge -> filters.get(i).test(new IndexValues.Incident(edge.roleSet(), edge.locator(), edge.validFrom(), edge.validTo())))
                         .map(IncidentEdge::edge).toList()))
                 .toList();
         return sets.getFirst().stream().filter(edge -> sets.stream().allMatch(set -> set.contains(edge))).sorted().toList();

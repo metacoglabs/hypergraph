@@ -25,7 +25,8 @@ final class EngineDerivations {
             switch (change) {
                 case MemberChange.Added(long edge, Incidence incidence, long locator) -> link(workspace, edge, incidence, locator);
                 case MemberChange.Updated(long edge, Incidence before, Incidence after, long from, long to)
-                        when before.roleSet() != after.roleSet() || from != to -> link(workspace, edge, after, to);
+                        when before.roleSet() != after.roleSet() || from != to
+                        || before.validFrom() != after.validFrom() || before.validTo() != after.validTo() -> link(workspace, edge, after, to);
                 case MemberChange.Updated _ -> {
                 }
                 case MemberChange.Removed(long edge, Incidence incidence, long _) -> workspace.replace(EngineSlots.REVERSE,
@@ -35,7 +36,7 @@ final class EngineDerivations {
 
         private void link(Workspace workspace, long edge, Incidence incidence, long locator) {
             workspace.replace(EngineSlots.REVERSE, EngineSlots.REVERSE_INDEX.add(workspace.tree(EngineSlots.REVERSE),
-                    workspace.scope(), incidence.member(), edge, new Incident(incidence.roleSet(), locator)));
+                    workspace.scope(), incidence.member(), edge, new Incident(incidence.roleSet(), locator, incidence.validFrom(), incidence.validTo())));
         }
     };
 

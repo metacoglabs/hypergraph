@@ -3,5 +3,5 @@
 
 package io.hstore.engine.txn;
 
-public record IncidentEdge(long edge, int roleSet, long locator) {
+public record IncidentEdge(long edge, int roleSet, long locator, long validFrom, long validTo) {
 }

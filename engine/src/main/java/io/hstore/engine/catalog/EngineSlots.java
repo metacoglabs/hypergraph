@@ -10,6 +10,7 @@ import io.hstore.engine.index.IndexValues;
 import io.hstore.engine.index.PostingIndex;
 import io.hstore.engine.index.Postings;
 import io.hstore.engine.page.ByteCursor;
+import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.tree.EntryMeasure;
 import io.hstore.engine.tree.FingerprintMode;
 import io.hstore.engine.tree.Hashing;
@@ -30,7 +31,9 @@ public final class EngineSlots {
             new TreeSchema<>(1, "atoms", FingerprintMode.SET, AtomCodec.INSTANCE, EntryMeasure.keyed(AtomRecord::contentHash));
 
     public static final PostingIndex<Incident> REVERSE_INDEX =
-            PostingIndex.of(5, 6, "reverse", IndexValues.INCIDENT, Incident::hash, 48);
+            PostingIndex.of(5, 6, "reverse", IndexValues.INCIDENT, Incident::hash, 48, (_, incident, into) -> into
+                    .validity(incident.validFrom(), incident.validTo())
+                    .roles(Incidence.roleBit(incident.roleSet())));
 
     public static final PostingIndex<Marker> TYPE_INDEX =
             PostingIndex.of(7, 8, "type-index", IndexValues.MARKER, _ -> 1, 32);
