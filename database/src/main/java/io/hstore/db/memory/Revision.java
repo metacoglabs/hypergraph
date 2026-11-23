@@ -28,16 +28,24 @@ public record Revision(long id, long document, int number, long parent, long pay
                 Hashing.of(validFrom, validTo, recordedAt, Hashing.of(author), Hashing.of(note), listed, sections, tenant));
     }
 
-    static final ValueCodec<Revision> CODEC = ValueCodec.rows(
-            revision -> 130 + ByteCursor.stringSize(revision.author()) + ByteCursor.stringSize(revision.note()) + 10 * revision.sources().size(),
-            (out, revision) -> {
+    static int encodedSize(Revision revision) {
+        ByteCursor out = ByteCursor.growable(256);
+        write(out, revision);
+        return (int) out.position();
+    }
+
+    private static void write(ByteCursor out, Revision revision) {
                 out.putVarLong(revision.id()).putVarLong(revision.document()).putVarInt(revision.number()).putVarLong(revision.parent())
                         .putVarLong(revision.payload()).putVarLong(revision.length()).putLong(revision.contentHash())
                         .putSignedVarLong(revision.validFrom()).putSignedVarLong(revision.validTo()).putSignedVarLong(revision.recordedAt())
                         .putString(revision.author()).putString(revision.note()).putVarInt(revision.sources().size());
                 revision.sources().forEach(out::putVarLong);
                 out.putVarInt(revision.sections()).putVarInt(revision.tenant());
-            },
+    }
+
+    static final ValueCodec<Revision> CODEC = ValueCodec.rows(
+            revision -> 130 + ByteCursor.stringSize(revision.author()) + ByteCursor.stringSize(revision.note()) + 10 * revision.sources().size(),
+            Revision::write,
             in -> {
                 long id = in.getVarLong();
                 long document = in.getVarLong();

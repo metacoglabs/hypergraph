@@ -141,4 +141,9 @@ class DocumentStatementTest {
         assertThrows(HStoreException.class, () -> session.execute("SECTION $doc"));
         assertEquals(List.of(), session.execute("SECTIONS OF $alice").rows());
     }
+
+    @Test
+    void wholeGraphQueriesSkipRevisionsAndSections() {
+        assertEquals("2", session.execute("MATCH NODE n RETURN count(*)").rows().getFirst().getFirst().render());
+    }
 }

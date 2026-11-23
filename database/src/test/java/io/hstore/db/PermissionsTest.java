@@ -100,6 +100,10 @@ class PermissionsTest {
             clerk.execute("REVISE @" + id("p") + " MARKDOWN 'x'");
             assertEquals(2, clerk.execute("REVISIONS OF @" + id("p")).rows().size());
             assertThrows(HStoreException.class, () -> clerk.execute("PURGE @" + id("d")));
+            admin.execute("INSERT EDGE Encounter MEMBERS (" + chart + " AS patient)");
+            admin.execute("GRANT READ ON TYPE Encounter TO clerk");
+            String refused = assertThrows(HStoreException.class, () -> clerk.execute("PURGE @" + id("p"))).getMessage();
+            assertTrue(refused.contains("Encounter"), refused);
         }
     }
 

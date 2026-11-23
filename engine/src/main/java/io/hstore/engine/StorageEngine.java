@@ -48,6 +48,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.LongConsumer;
 
 public final class StorageEngine implements AutoCloseable {
 
@@ -76,6 +77,7 @@ public final class StorageEngine implements AutoCloseable {
     private final ReentrantLock settings = new ReentrantLock();
     private final Thread maintainer;
     private final List<Runnable> checkpointListeners = new CopyOnWriteArrayList<>();
+    private final List<LongConsumer> generationListeners = new CopyOnWriteArrayList<>();
     private long writtenAtCheckpoint;
     private volatile OptionalLong checkpointAt;
     private final AtomicBoolean wakePending = new AtomicBoolean();
@@ -283,6 +285,10 @@ public final class StorageEngine implements AutoCloseable {
         checkpointListeners.add(listener);
     }
 
+    public void onCheckpointed(LongConsumer listener) {
+        generationListeners.add(listener);
+    }
+
     public Checkpointer.Result checkpoint() {
         requireOpen();
         maintenance.lock();
@@ -302,6 +308,13 @@ public final class StorageEngine implements AutoCloseable {
         for (Runnable listener : checkpointListeners) {
             try {
                 listener.run();
+            } catch (RuntimeException failure) {
+                LOG.log(System.Logger.Level.WARNING, "checkpoint listener failed", failure);
+            }
+        }
+        for (LongConsumer listener : generationListeners) {
+            try {
+                listener.accept(result.generation());
             } catch (RuntimeException failure) {
                 LOG.log(System.Logger.Level.WARNING, "checkpoint listener failed", failure);
             }

@@ -21,6 +21,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.function.LongSupplier;
 
 public final class Documents {
 
@@ -89,7 +90,7 @@ public final class Documents {
     }
 
     public static Revision append(Transaction txn, Types types, long document, int tenant, String author, String markdown, byte[] bytes,
-                                  long payload, RevisionSpec spec) {
+                                  RevisionSpec spec, int valueLimit, LongSupplier payloadWriter) {
         checkSpec(spec);
         List<Markdown.Part> parts = Markdown.sections(markdown);
         if (parts.size() > MAX_SECTIONS) {
@@ -103,19 +104,37 @@ public final class Documents {
         if (validFrom >= spec.validTo()) {
             throw HStoreException.invalid("a revision must be valid for some time: " + validFrom + " is not before " + spec.validTo());
         }
-        Security.charge(txn, tenant, new Usage(1 + parts.size(), 0, 0));
-        long id = txn.createNode(new AtomRecord.NodeRecord(types.revision(), revisionKey(document, number), 0, 0, 0, tenant, 0));
-        for (Markdown.Part part : parts) {
-            long section = txn.createNode(new AtomRecord.NodeRecord(types.section(), sectionKey(document, number, part.ordinal()), 0, 0, 0, tenant, 0));
-            String title = part.path().isEmpty() ? "" : truncate(part.path().getLast());
-            txn.put(MemorySlots.SECTIONS, section, new Section(section, document, id, part.ordinal(), part.parent(), part.level(), title,
-                    part.anchor(), part.start(), part.end(), digest(bytes, part.start(), part.end()), tenant));
+        long widest = Long.MAX_VALUE;
+        Revision probe = new Revision(widest, document, number, widest, widest, bytes.length, 0, validFrom, spec.validTo(), recordedAt, author,
+                spec.note(), spec.sources(), parts.size(), tenant);
+        requireFits("this revision's note, author and sources", Revision.encodedSize(probe), valueLimit);
+        List<Section> drafts = parts.stream().map(part -> new Section(widest, document, widest, part.ordinal(), part.parent(), part.level(),
+                part.path().isEmpty() ? "" : truncate(part.path().getLast()), part.anchor(), part.start(), part.end(),
+                digest(bytes, part.start(), part.end()), tenant)).toList();
+        for (Section draft : drafts) {
+            requireFits("section " + draft.ordinal() + "'s heading", Section.encodedSize(draft), valueLimit);
         }
+        long payload = payloadWriter.getAsLong();
+        Security.charge(txn, tenant, new Usage(1 + parts.size(), 0, 0));
+        txn.updateAtom(document, record -> record);
+        long id = txn.createNode(new AtomRecord.NodeRecord(types.revision(), revisionKey(document, number), 0, 0, 0, tenant, 0));
         Revision revision = new Revision(id, document, number, previous.map(Revision::id).orElse(0L), payload, bytes.length,
                 digest(bytes, 0, bytes.length), validFrom, spec.validTo(), recordedAt, author, spec.note(), spec.sources(), parts.size(), tenant);
         txn.put(MemorySlots.REVISIONS, id, revision);
+        for (Section draft : drafts) {
+            long section = txn.createNode(new AtomRecord.NodeRecord(types.section(), sectionKey(document, number, draft.ordinal()), 0, 0, 0, tenant, 0));
+            txn.put(MemorySlots.SECTIONS, section, new Section(section, document, id, draft.ordinal(), draft.parent(), draft.level(), draft.title(),
+                    draft.anchor(), draft.start(), draft.end(), draft.contentHash(), tenant));
+        }
         txn.merge(MemorySlots.DOCUMENTS, document, current -> current.equals(head), _ -> Optional.of(new DocumentHead(number, id, tenant)));
         return revision;
+    }
+
+    private static void requireFits(String what, int size, int limit) {
+        if (size > limit) {
+            throw HStoreException.limit(what + " take " + size + " bytes, more than the " + limit
+                    + " bytes a stored value may use with this database's page size; shorten them");
+        }
     }
 
     public static Optional<DocumentHead> head(View view, int tenant, long document) {
@@ -173,11 +192,11 @@ public final class Documents {
         if (bytes.length <= TITLE_BYTES) {
             return title;
         }
-        int end = title.length();
-        while (title.substring(0, end).getBytes(StandardCharsets.UTF_8).length > TITLE_BYTES) {
-            end = title.offsetByCodePoints(end, -1);
+        int cut = TITLE_BYTES;
+        while (cut > 0 && (bytes[cut] & 0xC0) == 0x80) {
+            cut--;
         }
-        return title.substring(0, end);
+        return new String(bytes, 0, cut, StandardCharsets.UTF_8);
     }
 
     public static long digest(byte[] bytes, int from, int to) {

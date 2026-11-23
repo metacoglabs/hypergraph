@@ -9,10 +9,12 @@ import io.hstore.db.evidence.Evidence;
 import io.hstore.db.evidence.Provenance;
 import io.hstore.db.schema.AtomKind;
 import io.hstore.db.schema.TypeDef.PropertyDef;
+import io.hstore.db.security.Security;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.txn.Durability;
 import io.hstore.engine.txn.IncidentEdge;
 import io.hstore.engine.txn.Transaction;
 import org.junit.jupiter.api.AfterEach;
@@ -283,6 +285,106 @@ class DocumentTest {
             assertEquals(0, reader.engineView().scan(MemorySlots.ERASURES).size());
             return null;
         });
+    }
+
+    @Test
+    void failedRevisionsLeaveNoMarkdownOrChargeBehind() throws IOException {
+        long doc = note("failing");
+        long usage = database.read(reader -> Security.usage(reader.engineView(), 0).payloadBytes());
+        assertThrows(HStoreException.class, () -> database.write(writer ->
+                writer.appendRevision(doc, "# T\nLEAK-ONE-marker\n", RevisionSpec.DEFAULT.validTo(5))));
+        assertThrows(IllegalStateException.class, () -> database.write(writer -> {
+            writer.appendRevision(doc, "# T\nLEAK-TWO-marker\n", RevisionSpec.DEFAULT);
+            throw new IllegalStateException("caller gave up");
+        }));
+        assertThrows(HStoreException.class, () -> database.write(writer -> writer.appendRevision(doc, "bad \uD800 text", RevisionSpec.DEFAULT)));
+        assertFalse(payloadsContain("LEAK-ONE-marker"));
+        assertFalse(payloadsContain("LEAK-TWO-marker"));
+        assertEquals(usage, (long) database.read(reader -> Security.usage(reader.engineView(), 0).payloadBytes()));
+        assertEquals(List.of(), database.read(reader -> reader.revisions(doc)));
+    }
+
+    @Test
+    void aFirstRevisionRacingADeleteFails() {
+        long doc = note("racing");
+        Transaction txn = database.engine().begin(database.options().transaction());
+        try {
+            database.writer(txn).appendRevision(doc, "# A\nrace\n", RevisionSpec.DEFAULT);
+            database.write(writer -> {
+                writer.delete(doc);
+                return null;
+            });
+            assertThrows(HStoreException.class, () -> database.commit(txn));
+        } finally {
+            txn.close();
+        }
+        assertEquals(0L, (long) database.read(reader -> reader.engineView().scan(MemorySlots.REVISIONS).size()));
+    }
+
+    @Test
+    void purgeErasesOlderVersionsStillInHistoryAndEdgesOnRevisions() {
+        long doc = note("versions");
+        long first = database.write(writer -> {
+            writer.set(doc, "body", Value.of("OLDSECRET-" + "y".repeat(2000)));
+            return writer.transaction().generation();
+        });
+        long afterFirst = database.engine().transactions().current().id();
+        database.write(writer -> {
+            writer.set(doc, "body", Value.of("NEWSECRET-" + "z".repeat(2000)));
+            return null;
+        });
+        Revision revision = database.write(writer -> writer.appendRevision(doc, "x", RevisionSpec.DEFAULT));
+        long onRevision = database.write(writer -> {
+            long edge = writer.edge("Mentions");
+            writer.add(edge, revision.id(), "source");
+            return edge;
+        });
+        database.write(writer -> writer.purge(doc));
+        HStoreException erased = assertThrows(HStoreException.class, () -> database.readAt(afterFirst, 0,
+                reader -> reader.text(reader.property(doc, "body").orElseThrow())));
+        assertTrue(erased.getMessage().contains("purged"), erased.getMessage() + " " + first);
+        assertFalse((boolean) database.read(reader -> reader.visible(onRevision)));
+    }
+
+    @Test
+    void recordsThatCannotFitASmallPageAreRefusedBeforeAnythingIsWritten() throws IOException {
+        database.close();
+        directory = directory.resolve("small");
+        database = HypergraphDatabase.open(directory, DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(1024)));
+        database.write(writer -> {
+            writer.defineNode("Note", List.of());
+            writer.defineNode("Person", List.of());
+            writer.defineEdge("Mentions", AtomKind.SET_EDGE, List.of(), List.of("subject", "source"));
+            return null;
+        });
+        long doc = database.write(writer -> writer.node("Note", "small"));
+        String deep = "# " + "標題".repeat(40) + "\n## " + "小節".repeat(40) + "\n### " + "段落".repeat(40) + "\n#### " + "節".repeat(60) + "\nx\n";
+        Revision revision = database.write(writer -> writer.appendRevision(doc, deep, RevisionSpec.DEFAULT));
+        assertEquals(4, revision.sections());
+        List<Long> sources = new ArrayList<>();
+        for (int i = 0; i < 16; i++) {
+            int index = i;
+            sources.add(database.write(writer -> writer.node("Person", "p" + index)));
+        }
+        HStoreException refused = assertThrows(HStoreException.class, () -> database.write(writer ->
+                writer.appendRevision(doc, "TOO-BIG-marker", RevisionSpec.DEFAULT.note("注".repeat(200)).sources(sources))));
+        assertTrue(refused.getMessage().contains("page"), refused.getMessage());
+        assertFalse(payloadsContain("TOO-BIG-marker"));
+    }
+
+    @Test
+    void asynchronousDurabilityErasesOnlyAfterACheckpoint() throws IOException {
+        database.close();
+        directory = directory.resolve("async");
+        database = HypergraphDatabase.open(directory, DatabaseOptions.defaults()
+                .withEngine(EngineOptions.defaults().withPageSize(4096).withDurability(Durability.ASYNC)));
+        database.write(writer -> writer.defineNode("Note", List.of()));
+        long doc = database.write(writer -> writer.node("Note", "async"));
+        database.write(writer -> writer.appendRevision(doc, "ASYNC-marker", RevisionSpec.DEFAULT));
+        database.write(writer -> writer.purge(doc));
+        assertTrue(payloadsContain("ASYNC-marker"));
+        database.engine().checkpoint();
+        assertFalse(payloadsContain("ASYNC-marker"));
     }
 
     private boolean payloadsContain(String marker) throws IOException {

@@ -15,12 +15,22 @@ public record Section(long id, long document, long revision, int ordinal, int pa
                 start, end, contentHash, tenant));
     }
 
+    static int encodedSize(Section section) {
+        ByteCursor out = ByteCursor.growable(256);
+        write(out, section);
+        return (int) out.position();
+    }
+
+    private static void write(ByteCursor out, Section section) {
+        out.putVarLong(section.id()).putVarLong(section.document()).putVarLong(section.revision())
+                .putVarInt(section.ordinal()).putSignedVarLong(section.parent()).putVarInt(section.level()).putString(section.title())
+                .putString(section.anchor()).putVarInt(section.start()).putVarInt(section.end()).putLong(section.contentHash())
+                .putVarInt(section.tenant());
+    }
+
     static final ValueCodec<Section> CODEC = ValueCodec.rows(
             section -> 70 + ByteCursor.stringSize(section.title()) + ByteCursor.stringSize(section.anchor()),
-            (out, section) -> out.putVarLong(section.id()).putVarLong(section.document()).putVarLong(section.revision())
-                    .putVarInt(section.ordinal()).putSignedVarLong(section.parent()).putVarInt(section.level()).putString(section.title())
-                    .putString(section.anchor()).putVarInt(section.start()).putVarInt(section.end()).putLong(section.contentHash())
-                    .putVarInt(section.tenant()),
+            Section::write,
             in -> new Section(in.getVarLong(), in.getVarLong(), in.getVarLong(), in.getVarInt(), (int) in.getSignedVarLong(), in.getVarInt(),
                     in.getString(), in.getString(), in.getVarInt(), in.getVarInt(), in.getLong(), in.getVarInt()));
 }

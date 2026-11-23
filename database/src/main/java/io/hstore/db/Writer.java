@@ -34,14 +34,20 @@ import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.AtomRecord;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.EngineSlots;
+import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.topology.Validity;
 import io.hstore.engine.topology.Weight;
+import io.hstore.engine.tree.Layout;
 import io.hstore.engine.tree.Ref;
+import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.Transaction;
+import io.hstore.engine.txn.View;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +57,8 @@ import java.util.Set;
 import java.util.function.UnaryOperator;
 
 public final class Writer extends Reader {
+
+    private static final System.Logger LOG = System.getLogger("hstore.memory");
 
     private static final int INLINE_TEXT_LIMIT = 1024;
 
@@ -387,6 +395,9 @@ public final class Writer extends Reader {
         if (target.isEdge()) {
             throw HStoreException.invalid("only nodes hold revisions; @" + document + " is a hyperedge");
         }
+        if (!StandardCharsets.UTF_8.newEncoder().canEncode(markdown)) {
+            throw HStoreException.invalid("the Markdown of a revision must be valid Unicode text");
+        }
         Documents.checkSpec(spec);
         for (long source : spec.sources()) {
             if (Provenance.evidence(this, source).isEmpty() && !visible(source)) {
@@ -397,8 +408,12 @@ public final class Writer extends Reader {
         if (bytes.length > Documents.MAX_BYTES) {
             throw HStoreException.limit("a revision holds at most " + Documents.MAX_BYTES + " bytes of Markdown, not " + bytes.length);
         }
-        long payload = writePayload(bytes);
-        return Documents.append(txn, database.memoryTypes(), document, tenant(), principal().user(), markdown, bytes, payload, spec);
+        int valueLimit = Layout.of(database.engine().options().pageSize()).maxValueBytes();
+        return Documents.append(txn, database.memoryTypes(), document, tenant(), principal().user(), markdown, bytes, spec, valueLimit, () -> {
+            long payload = writePayload(bytes);
+            database.unsettled(txn, payload, tenant(), bytes.length);
+            return payload;
+        });
     }
 
     public Documents.Purged purge(long document) {
@@ -409,15 +424,31 @@ public final class Writer extends Reader {
         }
         Documents.Types types = database.memoryTypes();
         List<Revision> revisions = Documents.revisions(txn, types, tenant(), document);
+        List<List<Section>> sections = revisions.stream().map(revision -> Documents.sections(txn, types, tenant(), revision)).toList();
+        List<Long> owned = new ArrayList<>(List.of(document));
+        revisions.forEach(revision -> owned.add(revision.id()));
+        sections.forEach(list -> list.forEach(section -> owned.add(section.id())));
         Set<Long> touched = new LinkedHashSet<>();
-        int sections = 0;
+        for (long atom : owned) {
+            engineView().incident(atom).forEach(incident -> {
+                touched.add(incident.edge());
+                if (!principal().role().writesEveryType()) {
+                    engineView().atom(incident.edge()).filter(record -> record.tenant() == tenant() && !writable(record.type()))
+                            .ifPresent(record -> {
+                                throw HStoreException.invalid("PURGE @" + document + " would change hyperedge @" + incident.edge() + " of type "
+                                        + schema().require(engineView(), record.type()).name() + ", which user " + principal().user() + " may not change");
+                            });
+                }
+            });
+        }
+        int count = 0;
         long bytes = 0;
-        for (Revision revision : revisions) {
-            for (Section section : Documents.sections(txn, types, tenant(), revision)) {
-                txn.incident(section.id()).forEach(incident -> touched.add(incident.edge()));
+        for (int i = 0; i < revisions.size(); i++) {
+            Revision revision = revisions.get(i);
+            for (Section section : sections.get(i)) {
                 txn.delete(MemorySlots.SECTIONS, section.id());
                 txn.delete(section.id());
-                sections++;
+                count++;
             }
             erase(revision.payload(), revision.length());
             bytes += revision.length();
@@ -425,20 +456,42 @@ public final class Writer extends Reader {
             txn.delete(revision.id());
         }
         txn.delete(MemorySlots.DOCUMENTS, document);
-        txn.get(PropertySlots.PROPERTIES, document).ifPresent(bag -> bag.entries().values().forEach(property -> {
-            if (property.value() instanceof Value.Payload(long ref, long length, String _)) {
-                erase(ref, length);
+        Set<Long> erased = new HashSet<>();
+        for (Generation generation : database.engine().transactions().history()) {
+            try (Snapshot past = database.engine().snapshotAt(generation.id(), Branch.MAIN)) {
+                payloadsOf(past, document).forEach(ref -> {
+                    if (erased.add(ref)) {
+                        erase(ref, 0);
+                    }
+                });
+            } catch (HStoreException released) {
+                LOG.log(System.Logger.Level.DEBUG, "generation {0} was released during a purge", generation.id());
             }
-        }));
-        txn.get(Embedding.EMBEDDINGS, document).ifPresent(embedding -> erase(embedding.payloadRef(), 0));
-        Security.charge(txn, tenant(), new Usage(-(revisions.size() + sections), 0, -bytes));
+        }
+        payloadsOf(txn, document).forEach(ref -> {
+            if (erased.add(ref)) {
+                erase(ref, 0);
+            }
+        });
+        Security.charge(txn, tenant(), new Usage(-(revisions.size() + count), 0, -bytes));
         delete(target.id());
         for (long edge : touched) {
             txn.atom(edge).filter(record -> record.tenant() == tenant() && writable(record.type()) && txn.cardinality(edge) == 0)
                     .ifPresent(_ -> delete(edge));
         }
         database.erasureRequested(txn);
-        return new Documents.Purged(revisions.size(), sections);
+        return new Documents.Purged(revisions.size(), count);
+    }
+
+    private static List<Long> payloadsOf(View view, long atom) {
+        List<Long> refs = new ArrayList<>();
+        view.get(PropertySlots.PROPERTIES, atom).ifPresent(bag -> bag.entries().values().forEach(property -> {
+            if (property.value() instanceof Value.Payload(long ref, long _, String _)) {
+                refs.add(ref);
+            }
+        }));
+        view.get(Embedding.EMBEDDINGS, atom).ifPresent(embedding -> refs.add(embedding.payloadRef()));
+        return refs;
     }
 
     private void erase(long ref, long length) {

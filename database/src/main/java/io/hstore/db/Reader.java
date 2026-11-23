@@ -345,7 +345,7 @@ public sealed class Reader permits Writer {
     }
 
     public LongStream atomsOfType(int typeId) {
-        return readable(typeId) ? view.atomsOfType(tenant(), typeId) : LongStream.empty();
+        return readable(typeId) && !database.memoryTypes().contains(typeId) ? view.atomsOfType(tenant(), typeId) : LongStream.empty();
     }
 
     public long count(String type) {
@@ -353,11 +353,11 @@ public sealed class Reader permits Writer {
     }
 
     public long countOfType(int typeId) {
-        return readable(typeId) ? view.countOfType(tenant(), typeId) : 0;
+        return readable(typeId) && !database.memoryTypes().contains(typeId) ? view.countOfType(tenant(), typeId) : 0;
     }
 
     public long atomOfTypeAt(int typeId, long rank) {
-        if (!readable(typeId) || rank < 0 || rank >= view.countOfType(tenant(), typeId)) {
+        if (!readable(typeId) || database.memoryTypes().contains(typeId) || rank < 0 || rank >= view.countOfType(tenant(), typeId)) {
             throw HStoreException.invalid("no atom of type " + typeId + " at rank " + rank);
         }
         return view.typeTree(tenant(), typeId).at(rank).key();

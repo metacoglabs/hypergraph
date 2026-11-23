@@ -36,8 +36,10 @@ while a question asked as of yesterday still gets the text the database had yest
 ## Sections
 
 A revision is split at its Markdown headings: ATX headings (`#` to `######`) and setext headings (a paragraph
-underlined with `===` or `---`). Lines inside fenced code blocks, indented code and a leading YAML front matter block
-are never headings. Each section runs from its heading to the next heading of any level; text before the first
+underlined with `===` or `---`). Lines inside fenced code blocks (also when the fence opens on a list item or in a
+quote), HTML comments, indented code and a leading YAML front matter block are never headings, and neither are list
+items or quoted lines followed by `---`, which is a thematic break there. Tabs count to the next multiple of four
+columns. Each section runs from its heading to the next heading of any level; text before the first
 heading is section 0 with an empty path when it is not blank.
 
 | Field | Meaning |
@@ -45,7 +47,7 @@ heading is section 0 with an empty path when it is not blank.
 | `ordinal` | position in the revision, from 0 |
 | `level` | heading level, 0 for the text before the first heading |
 | `title` | the heading text, up to 120 bytes |
-| `anchor` | the slugs of the heading path joined with `/`, for example `claimsbay/decisions`; a repeated anchor in the same revision gets `~2`, `~3` |
+| `anchor` | the slugs of the heading path joined with `/`, for example `claimsbay/decisions`, at most 160 bytes; a repeated anchor in the same revision gets `~2`, `~3` |
 | `start`, `end` | byte offsets into the revision's UTF-8 Markdown |
 | `contentHash` | SHA-256 prefix of the section's bytes |
 
@@ -58,7 +60,16 @@ the section that records it, and every retrieval statement can reach the section
 
 Revisions and sections belong to the tenant of their node and are visible exactly when the node is: a user who may
 read the node's type sees them, and nobody else does, whatever grants exist on `$Revision` or `$Section`. Changing
-them needs write access to the node. `DELETE` refuses a node that has revisions.
+them needs write access to the node. `DELETE` refuses a node that has revisions. Whole-graph queries such as
+`MATCH NODE n` do not list revisions and sections; they are reached through their node or through hyperedges.
+
+A revision is checked in full before its Markdown is written: valid Unicode, the section limit, the valid interval,
+and whether every record fits in a stored value at the database's page size. If the transaction then rolls back,
+fails or is retried, the Markdown it wrote is erased again and its payload bytes are given back to the tenant. A
+crash in the middle of such a transaction can still leave unreferenced bytes in the payload files.
+
+A first revision written while another transaction deletes the node fails with a conflict, so revisions never outlive
+their node.
 
 ## Branches
 
@@ -69,12 +80,17 @@ because the two histories would claim the same revision numbers.
 ## Purge
 
 `Writer.purge(node)` (`PURGE`) removes the node, all its revisions and sections, and every hyperedge that is left
-with no members. The Markdown of every revision and any large text, JSON document or embedding stored for the node
-are erased in the payload files: their bytes are overwritten with zeros, and reading them afterwards reports that
-the payload was purged, also from an older generation with `AT GENERATION`.
+with no members. A user without WRITE on every hyperedge type that holds the node, a revision or a section is
+refused, as with `DELETE`. The Markdown of every revision is erased in the payload files, together with the large
+text values, JSON documents and embeddings the node has now or had in any generation still in the history window:
+their bytes are overwritten with zeros, and reading them afterwards, also with `AT GENERATION`, reports that the
+payload was purged. Values the node replaced before the history window are not reachable through the database, but
+their bytes stay in the payload files.
 
-The erasure is recorded in the `erasures` slot in the same transaction and carried out after the commit. If the
-process stops in between, the next open finishes it. Payload space is not reclaimed, since the payload files are
+The erasure is recorded in the `erasures` slot in the same transaction and carried out after the commit, so it never
+runs for a purge that did not commit. With `ASYNC` durability a commit can return before it is on disk, so the
+erasure waits for the next checkpoint and covers only purges that checkpoint made durable. If the process stops in
+between, the next open finishes it. Payload space is not reclaimed, since the payload files are
 append-only; the bytes are zero, not gone. Heading titles live in the section records, which leave the live trees in
 the purge commit; pages of older generations that still hold them are freed once the history window and the WAL
 move past them.
@@ -91,6 +107,10 @@ reads as purged.
 | Sources per revision | 16 |
 | Heading title stored | 120 bytes |
 | Anchor segment | 40 characters |
+| Anchor | 160 bytes |
+
+With small pages, a long note or many sources may not fit in one stored value (about 400 bytes with 1 KiB pages);
+such a revision is refused before anything is written.
 
 Each revision and section counts as one atom against the tenant's quota, and the Markdown counts toward its payload
 bytes. A purge gives both back.

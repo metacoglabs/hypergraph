@@ -117,6 +117,26 @@ class MarkdownTest {
     }
 
     @Test
+    void listsQuotesCommentsAndTabsAreNotHeadings() {
+        String markdown = "# Top\n- a\n- b\n---\n> quote\n---\n- ```sh\n  # comment\n  ```\n<!--\n# hidden\n-->\n\t# tabbed code\n"
+                + "- item\ncontinued\n---\n## Real\n";
+        assertEquals(List.of(List.of("Top"), List.of("Top", "Real")), Markdown.sections(markdown).stream().map(Markdown.Part::path).toList());
+        assertEquals(List.of(List.of(), List.of("A")), Markdown.sections("\uFEFF---\ntitle: x\n---\n# A\n").stream().map(Markdown.Part::path).toList());
+    }
+
+    @Test
+    void longHeadingsAreCheapAndAnchorsStayShort() {
+        String title = "word ".repeat(200_000);
+        long started = System.nanoTime();
+        List<Markdown.Part> parts = Markdown.sections("# " + title + "\n## " + "標題".repeat(100) + "\n### " + "小節".repeat(100) + "\n");
+        assertTrue(System.nanoTime() - started < 2_000_000_000L);
+        for (Markdown.Part part : parts) {
+            assertTrue(part.anchor().getBytes(StandardCharsets.UTF_8).length <= Markdown.ANCHOR_BYTES, part.anchor());
+        }
+        assertEquals(120, Documents.truncate("é".repeat(1_000_000)).getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    @Test
     void randomDocumentsAgreeWithASimpleReference() {
         Random random = new Random(7);
         String[] words = {"alpha", "beta", "Gamma", "δέλτα", "x", "#tag", "a # b"};

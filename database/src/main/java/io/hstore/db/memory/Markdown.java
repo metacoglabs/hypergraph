@@ -3,6 +3,7 @@
 
 package io.hstore.db.memory;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -12,6 +13,7 @@ import java.util.Map;
 public final class Markdown {
 
     public static final int SLUG_LIMIT = 40;
+    public static final int ANCHOR_BYTES = 160;
 
     public record Part(int ordinal, int parent, int level, List<String> path, String anchor, int start, int end) {
         public Part {
@@ -52,7 +54,7 @@ public final class Markdown {
                 ordinals.removeLast();
             }
             int parent = ordinals.isEmpty() ? -1 : ordinals.getLast();
-            String base = (anchors.isEmpty() ? "" : anchors.getLast() + "/") + slug(heading.title());
+            String base = capped((anchors.isEmpty() ? "" : anchors.getLast() + "/") + slug(heading.title()));
             int occurrence = seen.merge(base, 1, Integer::sum);
             String anchor = occurrence == 1 ? base : base + "~" + occurrence;
             levels.add(heading.level());
@@ -63,6 +65,19 @@ public final class Markdown {
             parts.add(new Part(parts.size(), parent, heading.level(), titles, anchor, heading.start(), end));
         }
         return List.copyOf(parts);
+    }
+
+    private static String capped(String anchor) {
+        byte[] bytes = anchor.getBytes(StandardCharsets.UTF_8);
+        int limit = ANCHOR_BYTES - 8;
+        if (bytes.length <= limit) {
+            return anchor;
+        }
+        int cut = limit;
+        while (cut > 0 && (bytes[cut] & 0xC0) == 0x80) {
+            cut--;
+        }
+        return new String(bytes, 0, cut, StandardCharsets.UTF_8).replaceAll("[-/]+$", "");
     }
 
     public static String slug(String title) {
@@ -128,12 +143,15 @@ public final class Markdown {
         int index = frontMatter(lines);
         char fence = 0;
         int fenceLength = 0;
+        boolean comment = false;
+        boolean container = false;
         List<Line> paragraph = new ArrayList<>();
         for (; index < lines.size(); index++) {
             Line line = lines.get(index);
-            String text = line.text();
-            int indent = indent(text);
-            String body = text.substring(Math.min(indent, text.length()));
+            String text = index == 0 && line.text().startsWith("\uFEFF") ? line.text().substring(1) : line.text();
+            int[] indentation = indentation(text);
+            int indent = indentation[0];
+            String body = text.substring(indentation[1]);
             if (fence != 0) {
                 if (indent <= 3 && run(body, fence) >= fenceLength && body.substring(run(body, fence)).isBlank()) {
                     fence = 0;
@@ -142,11 +160,23 @@ public final class Markdown {
             }
             if (body.isBlank()) {
                 paragraph.clear();
+                container = false;
                 continue;
             }
-            if (indent <= 3 && (run(body, '`') >= 3 || run(body, '~') >= 3)) {
-                fence = body.charAt(0);
-                fenceLength = run(body, fence);
+            if (comment) {
+                comment = !body.contains("-->");
+                continue;
+            }
+            String inner = indent <= 3 ? withoutContainers(body) : body;
+            String opener = inner.stripLeading();
+            if (indent <= 3 && (run(opener, '`') >= 3 || run(opener, '~') >= 3)) {
+                fence = opener.charAt(0);
+                fenceLength = run(opener, fence);
+                paragraph.clear();
+                continue;
+            }
+            if (indent <= 3 && body.startsWith("<!--")) {
+                comment = !body.substring(4).contains("-->");
                 paragraph.clear();
                 continue;
             }
@@ -157,6 +187,7 @@ public final class Markdown {
             if (level > 0) {
                 headings.add(new Heading(line.start(), level, atxTitle(body, level)));
                 paragraph.clear();
+                container = false;
                 continue;
             }
             int underline = indent <= 3 ? setext(body) : 0;
@@ -168,6 +199,15 @@ public final class Markdown {
             }
             if (underline == 2 || thematicBreak(body)) {
                 paragraph.clear();
+                container = false;
+                continue;
+            }
+            if (!inner.equals(body)) {
+                paragraph.clear();
+                container = true;
+                continue;
+            }
+            if (container) {
                 continue;
             }
             paragraph.add(line);
@@ -175,8 +215,45 @@ public final class Markdown {
         return headings;
     }
 
+    private static String withoutContainers(String body) {
+        String rest = body;
+        while (true) {
+            if (rest.startsWith(">")) {
+                rest = rest.substring(1);
+                if (rest.startsWith(" ")) {
+                    rest = rest.substring(1);
+                }
+                continue;
+            }
+            int marker = listMarker(rest);
+            if (marker == 0) {
+                return rest;
+            }
+            rest = rest.substring(marker);
+        }
+    }
+
+    private static int listMarker(String text) {
+        int at = 0;
+        if (!text.isEmpty() && (text.charAt(0) == '-' || text.charAt(0) == '*' || text.charAt(0) == '+')) {
+            at = 1;
+        } else {
+            while (at < text.length() && at < 9 && Character.isDigit(text.charAt(at))) {
+                at++;
+            }
+            if (at == 0 || at >= text.length() || (text.charAt(at) != '.' && text.charAt(at) != ')')) {
+                return 0;
+            }
+            at++;
+        }
+        if (at == text.length()) {
+            return at;
+        }
+        return text.charAt(at) == ' ' || text.charAt(at) == '\t' ? at + 1 : 0;
+    }
+
     private static int frontMatter(List<Line> lines) {
-        if (lines.isEmpty() || !lines.getFirst().text().equals("---")) {
+        if (lines.isEmpty() || !lines.getFirst().text().replace("\uFEFF", "").equals("---")) {
             return 0;
         }
         for (int i = 1; i < lines.size(); i++) {
@@ -188,12 +265,14 @@ public final class Markdown {
         return 0;
     }
 
-    private static int indent(String text) {
-        int count = 0;
-        while (count < text.length() && (text.charAt(count) == ' ' || text.charAt(count) == '\t')) {
-            count += 1;
+    private static int[] indentation(String text) {
+        int columns = 0;
+        int chars = 0;
+        while (chars < text.length() && (text.charAt(chars) == ' ' || text.charAt(chars) == '\t')) {
+            columns = text.charAt(chars) == '\t' ? (columns / 4 + 1) * 4 : columns + 1;
+            chars++;
         }
-        return count;
+        return new int[]{columns, chars};
     }
 
     private static int run(String text, char c) {
