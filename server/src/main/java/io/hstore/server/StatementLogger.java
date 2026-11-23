@@ -61,7 +61,7 @@ final class StatementLogger {
                  Statement.DiffGenerations _, Statement.ResolveSignals _, Statement.Trace _, Statement.ShowGrants _,
                  Statement.Revisions _, Statement.RevisionOf _, Statement.SectionsOf _, Statement.ShowSection _,
                  Statement.SearchText _, Statement.VectorsOf _, Statement.NearestVectors _, Statement.ShowHierarchies _, Statement.RegionsOf _,
-                 Statement.Route _ -> Category.READ;
+                 Statement.Route _, Statement.Retrieve _ -> Category.READ;
             default -> Category.MOD;
         };
     }

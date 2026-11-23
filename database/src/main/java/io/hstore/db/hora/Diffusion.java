@@ -6,6 +6,7 @@ package io.hstore.db.hora;
 import io.hstore.db.Reader;
 import io.hstore.db.evidence.EvidencePolicy;
 import io.hstore.db.evidence.Provenance;
+import io.hstore.db.evidence.Qualifier;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.txn.IncidentEdge;
@@ -42,8 +43,11 @@ public final class Diffusion {
     }
 
     public record Model(Set<Integer> edgeTypes, Map<Integer, Double> typeWeight, RoleFactors roles, OptionalLong validAt,
-                        EvidencePolicy policy) {
+                        OptionalLong validTo, EvidencePolicy policy, boolean confidence) {
         public Model {
+            if (validTo.isPresent() && (validAt.isEmpty() || validAt.getAsLong() >= validTo.getAsLong())) {
+                throw HStoreException.invalid("a validity interval needs a start before its end");
+            }
             edgeTypes = Set.copyOf(edgeTypes);
             typeWeight = Map.copyOf(typeWeight);
             typeWeight.forEach((type, weight) -> {
@@ -53,8 +57,20 @@ public final class Diffusion {
             });
         }
 
+        public Model(Set<Integer> edgeTypes, Map<Integer, Double> typeWeight, RoleFactors roles, OptionalLong validAt, EvidencePolicy policy) {
+            this(edgeTypes, typeWeight, roles, validAt, OptionalLong.empty(), policy, false);
+        }
+
         public static Model plain() {
             return new Model(Set.of(), Map.of(), RoleFactors.NONE, OptionalLong.empty(), EvidencePolicy.ANY);
+        }
+
+        boolean valid(long from, long to) {
+            if (validAt.isEmpty()) {
+                return true;
+            }
+            long start = validAt.getAsLong();
+            return validTo.isPresent() ? from < validTo.getAsLong() && start < to : from <= start && start < to;
         }
     }
 
@@ -276,6 +292,10 @@ public final class Diffusion {
         return edgeTypes.computeIfAbsent(edge, id -> reader.edgeAtom(id) ? reader.typeOf(id) : OptionalInt.empty());
     }
 
+    private double confidence(long qualifier) {
+        return qualifier == 0 ? 1.0 : Provenance.qualifier(reader, qualifier).map(Qualifier::confidence).orElse(1.0);
+    }
+
     private boolean admittedByEvidence(long edge, long member) {
         if (model.policy().equals(EvidencePolicy.ANY)) {
             return true;
@@ -302,10 +322,13 @@ public final class Diffusion {
             if (type.isEmpty() || (!model.edgeTypes().isEmpty() && !model.edgeTypes().contains(type.getAsInt()))) {
                 continue;
             }
-            if (model.validAt().isPresent() && !(incident.validFrom() <= model.validAt().getAsLong() && model.validAt().getAsLong() < incident.validTo())) {
+            if (!model.valid(incident.validFrom(), incident.validTo())) {
                 continue;
             }
             double weight = model.typeWeight().getOrDefault(type.getAsInt(), 1.0) * roleFactor(model.roles().exit(), incident.roleSet());
+            if (model.confidence()) {
+                weight *= reader.incidence(edge, atom).map(incidence -> confidence(incidence.qualifier())).orElse(1.0);
+            }
             if (weight <= 0 || !admittedByEvidence(edge, atom)) {
                 continue;
             }
@@ -331,10 +354,13 @@ public final class Diffusion {
         double total = 0;
         for (var entry : reader.edge(edge).members().stream().toList()) {
             Incidence incidence = entry.value();
-            if (!owns(incidence.member()) || model.validAt().isPresent() && !incidence.validAt(model.validAt().getAsLong())) {
+            if (!owns(incidence.member()) || !model.valid(incidence.validFrom(), incidence.validTo())) {
                 continue;
             }
             double weight = Math.max(incidence.weightValue(), 0) * roleFactor(model.roles().entry(), incidence.roleSet());
+            if (model.confidence()) {
+                weight *= confidence(incidence.qualifier());
+            }
             if (weight <= 0 || (!model.policy().equals(EvidencePolicy.ANY)
                     && !model.policy().admits(Provenance.qualifier(reader, incidence.qualifier())))) {
                 continue;

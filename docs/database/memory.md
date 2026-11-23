@@ -103,6 +103,13 @@ Deleting an atom drops its vectors; purging a node erases the vectors of the nod
 including versions still in the history window. `MERGE BRANCH` copies the vectors of the revisions and sections it
 copies, and drops the vectors of atoms the branch deleted.
 
+## Diffusion over time and confidence
+
+`DIFFUSE … VALID DURING [a, b)` walks only memberships whose validity overlaps the interval, where `VALID AT t` keeps
+those valid at one instant. `WEIGHTED BY CONFIDENCE` multiplies the weight of every membership by the confidence of
+its qualifier, 1 when it has none, on both sides of each hyperedge, so inferred or doubtful links carry less of the
+walk. See [HORA](hora.md#diffusion).
+
 ## Region hierarchy
 
 A hierarchy groups the sections of a tenant into nested regions, so a query can be routed down to a few regions
@@ -158,6 +165,40 @@ setting references and `REGIONS OF HIERARCHY` need an admin of the tenant; refre
 that finds the change feed no longer covers the hierarchy rebuilds it; routing and `SHOW HIERARCHIES` need a reader.
 Counts in `SHOW HIERARCHIES` are left empty for users limited by type grants, since they include sections of every
 type. `RECALL` charges every section of the hierarchy to the statement's budget before it ranks them.
+
+## Unified retrieval
+
+`Reader.retrieve(query, meter)` and `RETRIEVE` answer a question from memory documents in one call; the code is
+`memory/Retrieval.java`. A query has text, optional anchor atoms, types to resolve anchors in, types of documents to
+search, a valid time and a recorded time, an evidence policy, an optional hierarchy, a history switch and a limit.
+
+1. **Anchors.** The given atoms, plus atoms of the `RESOLVE IN` types whose key equals a run of one to three words of
+   the question, as written or lower-cased. "Alice" resolves to `@Person:'alice'`.
+2. **Lexical.** `SEARCH TEXT` over the question, at most 50 sections or five times the limit.
+3. **Semantic.** The nearest `content` vectors of sections to the question's encoding, or a `ROUTE` through the named
+   hierarchy.
+4. **Structural.** A personalised walk (`DIFFUSE`) from the anchors and the ten best sections of the first two lists,
+   over every hyperedge type, weighted by assertion confidence, restricted to memberships valid at the valid time
+   when one is given and to assertions the policy admits. Sections it reaches form the third list, so a section
+   linked to an anchor by a hyperedge is found even when it shares no words with the question.
+5. **Fusion.** The lists are combined by reciprocal rank. A configured `Reranker` (`DatabaseOptions.withReranker`, a
+   cross-encoder or any other scorer run outside the database) then reorders the best 30 candidates, and its order
+   decides.
+6. **Time.** Each candidate is moved to the same section, by anchor, in the revision of its node that is in force: the
+   latest one, or with a valid or recorded time the one `REVISION OF … VALID AT … RECORDED AT …` would return. A
+   section that did not exist then is dropped.
+7. **Evidence.** A hit lists the revision's sources and the evidence of qualifiers on the section's memberships that
+   the policy admits, keeping only records the user may read. `provenance` is 1 when the revision names a source and
+   otherwise the highest admitted confidence. `path` is an anchor, a hyperedge holding it and the section.
+8. **Coverage.** When there are more candidates than the limit, the best candidate is kept and the rest are chosen
+   with the evidence selection of `SELECT EVIDENCE`: relevance plus 1.5 times the share of the question's words and
+   anchors a section adds, each word weighted by how rarely the candidates contain it.
+
+A hit is `current` when its revision is the one in force and, if the section belongs to hyperedges, at least one of
+those memberships is valid at the requested time (now by default). A decision recorded in May whose membership ended
+in June is therefore returned with `current = no` once a later decision replaced it. `later` lists the revisions of
+the same node, after the hit's, in which that section changed or disappeared: what changed afterward. Every hit
+carries its heading path and its Markdown.
 
 ## Fusion
 

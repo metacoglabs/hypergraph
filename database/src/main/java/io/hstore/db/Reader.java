@@ -7,6 +7,7 @@ import io.hstore.db.hora.Nesting;
 import io.hstore.db.hora.NestingSlots;
 import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.MemorySlots;
+import io.hstore.db.memory.Retrieval;
 import io.hstore.db.memory.Revision;
 import io.hstore.db.memory.Section;
 import io.hstore.db.memory.TextIndex;
@@ -205,6 +206,10 @@ public sealed class Reader permits Writer {
                 .filter(this::admits)
                 .filter(record -> types.isEmpty() || types.contains(record.type()))
                 .isPresent(), meter);
+    }
+
+    public Retrieval.Result retrieve(Retrieval.Query query, Budget.Meter meter) {
+        return Retrieval.retrieve(this, query, meter);
     }
 
     public List<VectorRecord> vectors(long owner) {

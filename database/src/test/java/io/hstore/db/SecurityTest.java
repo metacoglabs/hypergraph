@@ -653,6 +653,34 @@ class SecurityTest {
     }
 
     @Test
+    void retrievalStaysInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
+                    REVISE $p MARKDOWN 'zebra decision for acme' EMBED AS $r;
+                    """);
+            bob.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'B-1'} AS $p;
+                    REVISE $p MARKDOWN 'zebra decision for globex' EMBED AS $r;
+                    INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;
+                    """);
+            long acmePatient = alice.variables().get("p");
+            long acmeSection = Long.parseLong(cell(alice.execute("SECTIONS OF $r")).split(" ")[0].substring(1));
+            long globexEdge = bob.variables().get("e");
+            database.write(writer -> {
+                writer.transaction().upsert(globexEdge, acmeSection, _ -> Incidence.of(acmeSection));
+                return null;
+            });
+            QueryResult answer = bob.execute("RETRIEVE 'zebra decision' ANCHORS ($p) RESOLVE IN (Patient) TOP 10");
+            String rendered = answer.rows().toString();
+            assertFalse(rendered.contains("acme") || rendered.contains("@" + acmeSection + " ") || rendered.contains("@" + acmePatient + " "), rendered);
+            assertFalse(answer.rows().isEmpty());
+            assertThrows(HStoreException.class, () -> bob.execute("RETRIEVE 'zebra' ANCHORS (@" + acmePatient + ") TOP 5"));
+            assertTrue(alice.execute("RETRIEVE 'zebra decision' TOP 10").rows().toString().contains("acme"));
+        }
+    }
+
+    @Test
     void expansionValuesIgnoreOtherTenantsMembers() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("""

@@ -195,7 +195,9 @@ expanded into pairwise links; at every atom the walk stops with probability `ALP
 From atom `v`, a hyperedge `e` is chosen with weight `typeWeight(e) · exit(role of v in e)`; from `e`, a member `u`
 with weight `weight(u in e) · enter(role of u in e)`. A role-set factor is the largest factor of the roles in the
 set, and unnamed roles count 1. `THROUGH` limits the hyperedge types and sets their weights, `VALID AT` keeps only
-memberships valid at that instant, and `POLICY` keeps only memberships whose evidence the policy accepts. A step with
+memberships valid at that instant, `VALID DURING [a, b)` keeps memberships whose validity overlaps the interval,
+`POLICY` keeps only memberships whose evidence the policy accepts, and `WEIGHTED BY CONFIDENCE` multiplies each
+membership's weight by its qualifier's confidence (1 without one) on both the exit and the entry side. A step with
 nothing admitted sends its mass back to the seeds, so the walk stays a probability distribution.
 
 The estimate comes from local push (Andersen, Chung and Lang): residual mass is pushed from atoms and hyperedges until

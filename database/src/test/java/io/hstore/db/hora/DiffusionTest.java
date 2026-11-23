@@ -8,7 +8,10 @@ import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.Member;
 import io.hstore.db.MemberSpec;
 import io.hstore.db.Reader;
+import io.hstore.db.evidence.AssertionType;
 import io.hstore.db.evidence.EvidencePolicy;
+import io.hstore.db.evidence.Provenance;
+import io.hstore.db.evidence.Qualifier;
 import io.hstore.db.hora.Diffusion.Model;
 import io.hstore.db.hora.Diffusion.Params;
 import io.hstore.db.hora.Diffusion.Result;
@@ -290,6 +293,71 @@ class DiffusionTest {
             assertTrue(refused.getMessage().contains("reach no atom"), refused.getMessage());
             return null;
         });
+    }
+
+    @Test
+    void aValidityIntervalKeepsMembershipsThatOverlapIt() {
+        long[] ids = database.write(writer -> {
+            long seed = writer.node("Person", "seed");
+            long a = writer.node("Person", "a");
+            long b = writer.node("Person", "b");
+            long first = writer.edge("Meeting");
+            writer.add(first, seed, MemberSpec.PLAIN);
+            writer.add(first, a, MemberSpec.PLAIN.withValidity(new Validity(10, 20)));
+            long second = writer.edge("Meeting");
+            writer.add(second, seed, MemberSpec.PLAIN);
+            writer.add(second, b, MemberSpec.PLAIN.withValidity(new Validity(30, 40)));
+            return new long[]{seed, a, b};
+        });
+        Model during = new Model(Set.of(), Map.of(), RoleFactors.NONE, OptionalLong.of(15), OptionalLong.of(25), EvidencePolicy.ANY, false);
+        Model gap = new Model(Set.of(), Map.of(), RoleFactors.NONE, OptionalLong.of(20), OptionalLong.of(30), EvidencePolicy.ANY, false);
+        Model early = new Model(Set.of(), Map.of(), RoleFactors.NONE, OptionalLong.of(5), OptionalLong.of(15), EvidencePolicy.ANY, false);
+        database.read(reader -> {
+            Set<Long> reached = Diffusion.on(reader).run(Map.of(ids[0], 1.0), during, new Params(0.2, 1e-6, 10, 10), Budget.UNBOUNDED.start())
+                    .atoms().stream().map(Diffusion.Scored::id).collect(java.util.stream.Collectors.toSet());
+            assertEquals(Set.of(ids[0], ids[1]), reached);
+            Set<Long> none = Diffusion.on(reader).run(Map.of(ids[0], 1.0), gap, new Params(0.2, 1e-6, 10, 10), Budget.UNBOUNDED.start())
+                    .atoms().stream().map(Diffusion.Scored::id).collect(java.util.stream.Collectors.toSet());
+            assertEquals(Set.of(ids[0]), none);
+            Set<Long> overlapping = Diffusion.on(reader).run(Map.of(ids[0], 1.0), early, new Params(0.2, 1e-6, 10, 10), Budget.UNBOUNDED.start())
+                    .atoms().stream().map(Diffusion.Scored::id).collect(java.util.stream.Collectors.toSet());
+            assertEquals(Set.of(ids[0], ids[1]), overlapping, "a membership that starts inside the interval counts");
+            return null;
+        });
+        assertThrows(io.hstore.engine.HStoreException.class, () -> new Model(Set.of(), Map.of(), RoleFactors.NONE, OptionalLong.of(5),
+                OptionalLong.of(5), EvidencePolicy.ANY, false));
+    }
+
+    @Test
+    void confidenceWeightsTheWalkOnBothSidesOfAHyperedge() {
+        for (boolean seedSide : new boolean[]{true, false}) {
+            String tag = seedSide ? "exit" : "entry";
+            long[] ids = database.write(writer -> {
+                long seed = writer.node("Person", tag + "-seed");
+                long sure = writer.node("Person", tag + "-sure");
+                long doubtful = writer.node("Person", tag + "-doubtful");
+                for (long member : new long[]{sure, doubtful}) {
+                    long edge = writer.edge("Meeting");
+                    writer.add(edge, seed, MemberSpec.PLAIN);
+                    writer.add(edge, member, MemberSpec.PLAIN);
+                    double confidence = member == sure ? 0.9 : 0.1;
+                    Provenance.qualify(writer, edge, seedSide ? seed : member, new Qualifier(0, AssertionType.INFERRED, confidence, 0, 1, List.of(), 0));
+                }
+                return new long[]{seed, sure, doubtful};
+            });
+            Model weighted = new Model(Set.of(), Map.of(), RoleFactors.NONE, OptionalLong.empty(), OptionalLong.empty(), EvidencePolicy.ANY, true);
+            database.read(reader -> {
+                Map<Long, Double> plain = new java.util.HashMap<>();
+                Diffusion.on(reader).run(Map.of(ids[0], 1.0), Model.plain(), new Params(0.2, 1e-9, 10, 10), Budget.UNBOUNDED.start()).atoms()
+                        .forEach(scored -> plain.put(scored.id(), scored.estimate()));
+                assertEquals(plain.get(ids[1]), plain.get(ids[2]), 1e-12);
+                Map<Long, Double> scored = new java.util.HashMap<>();
+                Diffusion.on(reader).run(Map.of(ids[0], 1.0), weighted, new Params(0.2, 1e-9, 10, 10), Budget.UNBOUNDED.start()).atoms()
+                        .forEach(found -> scored.put(found.id(), found.estimate()));
+                assertTrue(scored.get(ids[1]) > 1.5 * scored.get(ids[2]), tag + " " + scored);
+                return null;
+            });
+        }
     }
 
     @Test
