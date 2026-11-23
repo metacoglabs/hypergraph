@@ -36,6 +36,7 @@ import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.signal.Signals;
 import io.hstore.db.stats.Statistics;
 import io.hstore.db.temporal.BranchMerge;
+import io.hstore.db.temporal.BranchRetrieval;
 import io.hstore.db.temporal.StateBindings;
 import io.hstore.db.temporal.Temporal;
 import io.hstore.db.temporal.Transitions;
@@ -317,6 +318,29 @@ final class Executor {
             case Statement.SetAlgebra algebra -> algebra.into().isPresent() ? write(writer -> setAlgebra(writer, algebra)) : read(reader -> setAlgebra(reader, algebra));
             case Statement.Rank rank -> read(reader -> rank(reader, rank));
             case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
+            case Statement.BranchDelta delta -> read(reader -> branchDelta(reader, delta));
+            case Statement.BranchSurvivors survivors -> read(reader -> QueryResult.table(List.of("key"), limited(
+                    branches().survivors(session.branchId(survivors.branch()), scope(reader, survivors.scope())).stream()
+                            .map(key -> List.<Cell>of(QueryResult.text(key(reader, key)))), survivors.limit()).toList()));
+            case Statement.CompareBranches compare -> read(reader -> QueryResult.table(List.of("key", "side", "left", "right"), limited(
+                    branches().compare(session.branchId(compare.left()), session.branchId(compare.right()), scope(reader, compare.scope())).stream()
+                            .map(found -> List.of(QueryResult.text(key(reader, found.key())), QueryResult.text(found.side().name()),
+                                    QueryResult.text(found.left().map(net -> value(net.after())).orElse("unchanged")),
+                                    QueryResult.text(found.right().map(net -> value(net.after())).orElse("unchanged")))), compare.limit()).toList()));
+            case Statement.NearestBranch nearest -> read(reader -> {
+                List<Integer> among = nearest.among().isEmpty()
+                        ? database().engine().branches().stream().filter(Branch::isActive).map(Branch::id).toList()
+                        : nearest.among().stream().map(session::branchId).toList();
+                return QueryResult.table(List.of("branch", "distance", "lower_bound"), branches()
+                        .nearest(session.branchId(nearest.target()), among, scope(reader, nearest.scope()), nearest.top()).stream()
+                        .map(found -> List.of(QueryResult.text(branchName(found.branch())), QueryResult.number(found.distance()),
+                                QueryResult.number(found.lowerBound()))).toList());
+            });
+            case Statement.BranchAfter after -> read(reader -> QueryResult.table(List.of("generation", "branch", "key", "before", "after"), limited(
+                    branches().after(session.branchId(after.branch()), after.generation(), after.window()).stream()
+                            .flatMap(succession -> succession.changes().stream().map(net -> List.of(QueryResult.number(succession.generation()),
+                                    QueryResult.text(branchName(succession.branch())), QueryResult.text(key(reader, net.key())),
+                                    QueryResult.text(value(net.before())), QueryResult.text(value(net.after()))))), after.limit()).toList()));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -393,6 +417,7 @@ final class Executor {
     private static boolean engineWide(Statement statement) {
         return switch (statement) {
             case Statement.CreateBranch _, Statement.DropBranch _, Statement.MergeBranch _, Statement.ShowBranches _, Statement.Sample _,
+                 Statement.BranchDelta _, Statement.BranchSurvivors _, Statement.CompareBranches _, Statement.NearestBranch _, Statement.BranchAfter _,
                  Statement.DiffGenerations _, Statement.DiffBranches _, Statement.History _, Statement.CreateTenant _, Statement.AlterTenant _,
                  Statement.CreateType _, Statement.CreateIndex _, Statement.CreateJsonIndex _ -> true;
             default -> false;
@@ -605,6 +630,49 @@ final class Executor {
         QueryResult result = QueryResult.table(match.projections().stream().map(Ast.Projection::alias).toList(), rows);
         return result.withTrace(new QueryResult.Trace(0, reader.generation(), plan.chosen().path().describe(), plan.chosen().rows(),
                 rows.size(), trace.pagesRead(), trace.cacheHits(), System.nanoTime() - started));
+    }
+
+    private BranchRetrieval branches() {
+        return BranchRetrieval.on(database(), Budget.DEFAULT.start());
+    }
+
+    private String branchName(int id) {
+        return database().engine().branches().stream().filter(branch -> branch.id() == id).map(Branch::name).findFirst().orElse("#" + id);
+    }
+
+    private BranchRetrieval.Scope scope(Reader reader, Ast.BranchScope scope) {
+        return switch (scope) {
+            case Ast.BranchScope.Everything _ -> new BranchRetrieval.Scope.Everything();
+            case Ast.BranchScope.Incidences _ -> new BranchRetrieval.Scope.Incidences();
+            case Ast.BranchScope.OfType(String type) -> new BranchRetrieval.Scope.OfType(reader.tenant(), reader.requireReadableType(type).id());
+            case Ast.BranchScope.Around(Ast.Ref atom) -> new BranchRetrieval.Scope.Around(session.resolve(reader, atom));
+        };
+    }
+
+    private QueryResult branchDelta(Reader reader, Statement.BranchDelta statement) {
+        List<BranchRetrieval.Net> nets = branches().delta(session.branchId(statement.branch()), statement.since(), BranchRetrieval.Route.AUTO,
+                scope(reader, statement.scope()));
+        return QueryResult.table(List.of("key", "before", "after"), limited(nets.stream()
+                .map(net -> List.<Cell>of(QueryResult.text(key(reader, net.key())), QueryResult.text(value(net.before())),
+                        QueryResult.text(value(net.after())))), statement.limit()).toList());
+    }
+
+    private String key(Reader reader, BranchRetrieval.Key key) {
+        return switch (key) {
+            case BranchRetrieval.Key.Atom(long atom) -> "atom @" + atom;
+            case BranchRetrieval.Key.Member(long edge, long member) -> "member @" + edge + " / @" + member;
+            case BranchRetrieval.Key.Property(long atom, int property) -> "property @" + atom + "." + reader.schema().propertyName(property);
+        };
+    }
+
+    private static String value(Optional<Object> value) {
+        return value.map(found -> switch (found) {
+            case BranchRetrieval.AtomValue atom -> (atom.edge() ? "edge" : "node") + " type " + atom.type()
+                    + (atom.canonicalKey().isEmpty() ? "" : " '" + atom.canonicalKey() + "'");
+            case io.hstore.engine.topology.Incidence incidence -> "weight " + incidence.weightValue() + " valid " + interval(incidence.validFrom(), incidence.validTo());
+            case io.hstore.db.property.PropertyBag.Property property -> property.value().render();
+            default -> found.toString();
+        }).orElse("absent");
     }
 
     private QueryResult transitions(Reader reader, Statement.Transitions statement) {

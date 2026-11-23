@@ -194,6 +194,26 @@ MATCH NODE p:Patient WHERE p.name = 'Asha Rao'
 Property changes are not part of `Temporal.diff`; `BranchMerge` computes them separately. `Temporal.events(commit)`
 groups the member changes of one change-feed event into per-edge `TopologyEvent`s.
 
+## Branch retrieval
+
+`BranchRetrieval` (`temporal/BranchRetrieval.java`) answers the read-only branch statements. An entry is an
+incidence `(edge, member)`, an atom, or one property of an atom; derived indexes are not entries.
+
+The common ancestor of two branches is their lowest common ancestor in the branch tree at the earlier of the two
+generations where their paths left it. A side's net change, from that point to a branch head, comes from the
+ancestor snapshot when it is still retained (`Temporal.diff` plus a diff of the property trees) and otherwise from the
+change feed: the events on the branch's lineage after the ancestor generation, folded per entry into the first value
+before and the last value after, dropping entries that ended where they started. Both routes give the same rows. An
+ancestor that is neither retained nor covered by the feed is an error that names the generation.
+
+`NEAREST BRANCH` diffs the two heads directly; shared subtrees are skipped. Candidates are diffed in order of a lower
+bound on their distance (the difference in incidence counts, or in atoms of the type for `SCOPE TYPE`), and the scan
+stops once the bound exceeds the k-th best distance found. A changed value counts as two differing entries, one on
+each side.
+
+These statements read every tenant's data and the feed, so they are limited to global admins, like `DIFF` and
+`HISTORY`. Each decoded event or delta counts as one row against the statement budget.
+
 ## Branch merge
 
 Branches are copy-on-write forks of a parent branch at a base generation ([catalog and
