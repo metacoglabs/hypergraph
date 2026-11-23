@@ -386,6 +386,30 @@ class SecurityTest {
     }
 
     @Test
+    void refineStaysInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
+            alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;"
+                    + "INSERT EDGE Encounter MEMBERS ($e AS clinician) AS $root;");
+            bob.executeAll("INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");
+            long acmeEdge = alice.variables().get("e");
+            long acmeRoot = alice.variables().get("root");
+            long globexPatient = bob.variables().get("p");
+            long globexEdge = bob.variables().get("e");
+            database.write(writer -> {
+                writer.transaction().upsert(acmeEdge, globexPatient, _ -> Incidence.of(globexPatient));
+                writer.transaction().upsert(acmeRoot, globexEdge, _ -> Incidence.of(globexEdge));
+                return null;
+            });
+            String rendered = alice.execute("REFINE FROM @" + acmeRoot + " THROUGH Encounter TO TOP 10").rows().toString();
+            assertFalse(rendered.contains("@" + globexPatient + " "), rendered);
+            assertFalse(rendered.contains("@" + globexEdge), rendered);
+            assertTrue(rendered.contains("'p1'"), rendered);
+            assertThrows(HStoreException.class, () -> alice.execute("REFINE FROM @" + globexEdge + " TO TOP 10"));
+            assertEquals(0, alice.execute("REFINE FROM @" + acmeRoot + " THROUGH Encounter TO = @" + acmeEdge + " TOP 10").rows().size());
+        }
+    }
+
+    @Test
     void hypermatchStaysInsideTheTenant() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p; INSERT EDGE Encounter MEMBERS ($p AS patient) AS $e;");

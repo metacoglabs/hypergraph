@@ -80,7 +80,7 @@ Values and their storage are described in [data model](data-model.md#values).
 |---|---|
 | [Schema](#schema-ddl) | `CREATE NODE TYPE`, `CREATE SET EDGE TYPE`, `CREATE ORDERED EDGE TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`, `SHOW TYPES` |
 | [Data](#data-manipulation) | `INSERT NODE`, `INSERT EDGE`, `ADD`, `REMOVE`, `REMOVE AT`, `SET`, `UNSET`, `DOCUMENT`, `DELETE` |
-| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `HYPERMATCH`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
+| [Queries](#queries) | `MATCH`, `EXPLAIN`, `RANK`, `HYPERMATCH`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
@@ -423,6 +423,25 @@ RANK EDGE e:Review
 -- | @14 Review    | 0.9734 | 1       | 1      | 1          | 0.8668 | 1        |
 -- | @16 Review    | 0.8083 | 0.6667  | 0.6667 | 1          | 1      | 0.75     |
 -- | @15 Review    | 0.7333 | 1       | 0.6667 | 0          | 1      | 1        |
+```
+
+### REFINE
+
+```ebnf
+refine = "REFINE" "FROM" ( ref { "," ref } | "TYPE" identifier )
+         { "THROUGH" identifier [ "AS" identifier { "OR" identifier } ] }
+         "TO" [ identifier ] [ "AS" identifier { "OR" identifier } ] [ "=" ref ]
+         [ "VALID" "AT" additive ] [ "WEIGHT" "BETWEEN" number "AND" number ] [ "DISTINCT" ] "TOP" integer ;
+```
+
+Best paths from root hyperedges down through nested hyperedges to leaf members, scored by the product of membership
+weights (which must lie in `[0, 1]`). Columns: `path, leaf, score`, best first. See
+[hierarchical refinement](hora.md#hierarchical-refinement).
+
+```
+REFINE FROM @50 THROUGH Claim AS subject TO Provider AS provider VALID AT 7 DISTINCT TOP 2;
+-- | @50 > @62 | @10 Provider:'p10' | 0.63 |
+-- | @50 > @62 | @13 Provider:'p13' | 0.42 |
 ```
 
 ### HYPERMATCH

@@ -111,6 +111,9 @@ public final class Ast {
                         List<Projection> projections, Optional<Expr> orderBy, boolean descending, OptionalLong limit) {
     }
 
+    public record RefineLevel(String type, List<String> roles) {
+    }
+
     public sealed interface BranchScope {
         record Everything() implements BranchScope {
         }
@@ -328,6 +331,11 @@ public final class Ast {
 
         record Members(Ref edge, Optional<String> role, Optional<WeightRange> weight, Optional<Expr> validAt,
                        Optional<EvidencePolicy> policy, OptionalLong limit) implements Statement {
+        }
+
+        record Refine(List<Ref> roots, Optional<String> rootType, List<RefineLevel> levels, Optional<String> leafType,
+                      List<String> leafRoles, Optional<Ref> leafAnchor, Optional<Expr> validAt, double weightLow, double weightHigh,
+                      boolean distinct, long top) implements Statement {
         }
 
         record BranchDelta(String branch, OptionalLong since, BranchScope scope, OptionalLong limit) implements Statement {

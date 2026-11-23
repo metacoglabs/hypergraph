@@ -3,6 +3,8 @@
 
 package io.hstore.db;
 
+import io.hstore.db.hora.Nesting;
+import io.hstore.db.hora.NestingSlots;
 import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertyIndex;
@@ -178,6 +180,10 @@ public sealed class Reader permits Writer {
 
     public boolean edgeAtom(long atom) {
         return view.atom(atom).filter(this::admits).map(record -> record instanceof AtomRecord.EdgeRecord).orElse(false);
+    }
+
+    public Tree<NestingSlots.ChildLink> childLinks(long parent) {
+        return onlyDefaultTenant() || visible(parent) ? Nesting.tree(view, parent) : Tree.empty(NestingSlots.CHILD_INDEX.postingSchema(), view.source());
     }
 
     public long[] signatureEdges(Signature signature) {
