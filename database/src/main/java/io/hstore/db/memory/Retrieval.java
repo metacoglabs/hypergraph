@@ -16,8 +16,11 @@ import io.hstore.db.semantic.Encoder;
 import io.hstore.db.semantic.Reranker;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.txn.IncidentEdge;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -122,6 +125,7 @@ public final class Retrieval {
     private static final class Candidate {
         final Section section;
         final Revision inForce;
+        final Set<Long> matched = new LinkedHashSet<>();
         double score;
         double lexical;
         double semantic;
@@ -133,12 +137,71 @@ public final class Retrieval {
         }
     }
 
+    private static final class Stages {
+        private final Budget.Meter parent;
+        private final long started = System.nanoTime();
+        private final List<String> notes;
+
+        Stages(Budget.Meter parent, List<String> notes) {
+            this.parent = parent;
+            this.notes = notes;
+        }
+
+        Budget.Meter next(double share) {
+            Budget budget = parent.budget();
+            long left = Math.max(0, budget.maxRows() - parent.consumed());
+            long rows = Math.max(1, (long) Math.min(left, Math.ceil(left * share)));
+            Duration time = budget.maxTime().minusNanos(System.nanoTime() - started);
+            return new Budget(rows, budget.maxDepth(), time.isNegative() || time.isZero() ? Duration.ofNanos(1) : time).start();
+        }
+
+        void settle(Budget.Meter stage) {
+            parent.tryConsume(Math.min(stage.consumed(), stage.budget().maxRows()));
+        }
+
+        void note(String text) {
+            notes.add(text);
+        }
+    }
+
+    private static final class Cache {
+        final Reader reader;
+        final Map<Long, List<Section>> sections = new HashMap<>();
+        final Map<Long, List<Revision>> revisions = new HashMap<>();
+        final Map<Long, byte[]> markdown = new HashMap<>();
+
+        Cache(Reader reader) {
+            this.reader = reader;
+        }
+
+        List<Section> sections(long revision) {
+            return sections.computeIfAbsent(revision, reader::sections);
+        }
+
+        List<Revision> revisions(long document) {
+            return revisions.computeIfAbsent(document, reader::revisions);
+        }
+
+        String text(Section section) {
+            byte[] bytes = markdown.computeIfAbsent(section.revision(), id -> reader.revision(id)
+                    .map(found -> reader.markdown(found).getBytes(StandardCharsets.UTF_8)).orElse(new byte[0]));
+            int end = Math.min(bytes.length, section.end());
+            return section.start() >= end ? "" : new String(bytes, section.start(), end - section.start(), StandardCharsets.UTF_8);
+        }
+
+        Optional<Section> sameAnchor(long revision, String anchor) {
+            return sections(revision).stream().filter(other -> other.anchor().equals(anchor)).findFirst();
+        }
+    }
+
     private Retrieval() {
     }
 
     public static Result retrieve(Reader reader, Query query, Budget.Meter meter) {
         int pool = Math.max(50, query.limit() * 5);
         List<String> notes = new ArrayList<>();
+        Stages stages = new Stages(meter, notes);
+        Cache cache = new Cache(reader);
         Set<Integer> types = new HashSet<>();
         query.types().forEach(name -> types.add(reader.requireReadableType(name).id()));
         LinkedHashSet<Long> anchors = new LinkedHashSet<>();
@@ -146,43 +209,68 @@ public final class Retrieval {
             reader.require(anchor);
             anchors.add(anchor);
         }
-        anchors.addAll(resolve(reader, query.text(), query.resolveIn()));
+        anchors.addAll(resolve(reader, query.text(), query.resolveIn(), meter));
+        long now = query.validAt().orElse(System.currentTimeMillis());
+        boolean searchHistory = query.history() || query.timed();
 
         Map<Long, Double> lexical = new LinkedHashMap<>();
         Map<Long, Double> semantic = new LinkedHashMap<>();
         if (!query.text().isBlank()) {
-            reader.searchText(query.text(), new TextIndex.Options(Math.min(pool, TextIndex.MAX_TOP), query.history(), query.types()), meter)
-                    .forEach(hit -> lexical.put(hit.section(), hit.score()));
-            Encoder.Encoded encoded = reader.database().semantic().encoder().encode(query.text());
-            if (query.hierarchy().isPresent()) {
-                Hierarchies.route(reader, query.hierarchy().get(), encoded.vector(), Router.Policy.DEFAULT.withTop(Math.min(pool, 1000)), meter)
-                        .leaves().forEach(leaf -> semantic.put(leaf.id(), leaf.score()));
-                notes.add("semantic candidates routed through hierarchy " + query.hierarchy().get());
-            } else {
-                reader.nearestVectors(encoded.model(), encoded.vector(), pool, Optional.of("content"), query.history(),
-                                SemanticPlane.Consistency.FRESH, meter).stream()
-                        .filter(hit -> reader.section(hit.owner()).filter(section -> typeMatches(reader, types, section)).isPresent())
-                        .forEach(hit -> semantic.putIfAbsent(hit.owner(), 1.0 - hit.distance()));
+            Budget.Meter stage = stages.next(0.2);
+            try {
+                reader.searchText(query.text(), new TextIndex.Options(Math.min(pool, TextIndex.MAX_TOP), searchHistory, query.types()), stage)
+                        .forEach(hit -> lexical.put(hit.section(), hit.score()));
+            } catch (HStoreException.ResourceLimit exhausted) {
+                stages.note("the text search stopped at its budget");
             }
+            stages.settle(stage);
+            stage = stages.next(0.25);
+            try {
+                Encoder.Encoded encoded = reader.database().semantic().encoder().encode(query.text());
+                if (query.hierarchy().isPresent()) {
+                    Hierarchies.route(reader, query.hierarchy().get(), encoded.vector(), Router.Policy.DEFAULT.withTop(Math.min(pool, 1000)), stage)
+                            .leaves().stream()
+                            .filter(leaf -> reader.section(leaf.id()).filter(section -> typeMatches(reader, types, section)).isPresent())
+                            .forEach(leaf -> semantic.put(leaf.id(), leaf.score()));
+                    stages.note("semantic candidates routed through hierarchy " + query.hierarchy().get());
+                } else {
+                    reader.nearestVectors(encoded.model(), encoded.vector(), pool, Optional.of("content"), searchHistory,
+                                    SemanticPlane.Consistency.FRESH, stage).stream()
+                            .filter(hit -> reader.section(hit.owner()).filter(section -> typeMatches(reader, types, section)).isPresent())
+                            .forEach(hit -> semantic.putIfAbsent(hit.owner(), 1.0 - hit.distance()));
+                }
+            } catch (HStoreException.ResourceLimit exhausted) {
+                stages.note("the vector search stopped at its budget");
+            }
+            stages.settle(stage);
         }
 
         Map<Long, Double> seeds = new LinkedHashMap<>();
         anchors.forEach(anchor -> seeds.put(anchor, 1.0));
         List<Rrf.Fused<Long>> early = Rrf.combine(List.of(List.copyOf(lexical.keySet()), List.copyOf(semantic.keySet())));
         double top = early.isEmpty() ? 1 : early.getFirst().score();
-        early.stream().limit(SEEDS).forEach(fused -> seeds.merge(fused.item(), fused.score() / top, Math::max));
+        Set<Long> seededSections = new HashSet<>();
+        if (anchors.isEmpty()) {
+            early.stream().limit(SEEDS).forEach(fused -> {
+                seeds.merge(fused.item(), fused.score() / top, Math::max);
+                seededSections.add(fused.item());
+            });
+        }
         Map<Long, Double> structural = new LinkedHashMap<>();
         if (!seeds.isEmpty()) {
+            Budget.Meter stage = stages.next(0.5);
             Diffusion.Model model = new Diffusion.Model(Set.of(), Map.of(), Diffusion.RoleFactors.NONE, query.validAt(), OptionalLong.empty(),
                     query.policy(), true);
-            try {
-                Diffusion.on(reader).run(seeds, model, new Diffusion.Params(0.2, 1e-4, pool * 4, 0), meter).atoms().stream()
-                        .filter(scored -> reader.section(scored.id()).filter(section -> typeMatches(reader, types, section)).isPresent())
-                        .limit(pool)
-                        .forEach(scored -> structural.put(scored.id(), scored.estimate()));
-            } catch (HStoreException.ResourceLimit exhausted) {
-                notes.add("the structural walk stopped at the budget");
+            Diffusion.Result walk = Diffusion.on(reader).run(seeds, model, new Diffusion.Params(0.2, 1e-4, pool * 4, 0), stage);
+            if (walk.exhausted()) {
+                stages.note("the structural walk stopped at its budget");
             }
+            walk.atoms().stream()
+                    .filter(scored -> !seededSections.contains(scored.id()))
+                    .filter(scored -> reader.section(scored.id()).filter(section -> typeMatches(reader, types, section)).isPresent())
+                    .limit(pool)
+                    .forEach(scored -> structural.put(scored.id(), scored.estimate()));
+            stages.settle(stage);
         }
 
         List<List<Long>> lists = new ArrayList<>();
@@ -191,51 +279,38 @@ public final class Retrieval {
                 lists.add(List.copyOf(list.keySet()));
             }
         }
-        List<Rrf.Fused<Long>> fused = Rrf.combine(lists);
-        Reranker reranker = reader.database().options().reranker();
-        if (reranker != Reranker.NONE && !fused.isEmpty() && !query.text().isBlank()) {
-            List<Long> head = fused.stream().limit(RERANKED).map(Rrf.Fused::item).toList();
-            double[] scores = reranker.score(query.text(), head.stream().map(id -> reader.sectionText(reader.section(id).orElseThrow())).toList());
-            List<Long> reranked = new ArrayList<>(head);
-            Map<Long, Double> byId = new HashMap<>();
-            for (int i = 0; i < head.size(); i++) {
-                byId.put(head.get(i), i < scores.length ? scores[i] : 0);
-            }
-            reranked.sort(Comparator.<Long>comparingDouble(id -> -byId.get(id)).thenComparingInt(head::indexOf));
-            List<Long> order = new ArrayList<>(reranked);
-            fused.stream().skip(head.size()).map(Rrf.Fused::item).forEach(order::add);
-            List<Rrf.Fused<Long>> rescored = new ArrayList<>();
-            for (int rank = 1; rank <= order.size(); rank++) {
-                rescored.add(new Rrf.Fused<>(order.get(rank - 1), Rrf.term(rank), List.of(rank)));
-            }
-            fused = rescored;
-            notes.add("the top " + head.size() + " candidates were reordered by " + reranker.name());
-        }
-
-        long now = query.validAt().orElse(System.currentTimeMillis());
+        Budget.Meter assembly = stages.next(1.0);
         LinkedHashMap<Long, Candidate> resolved = new LinkedHashMap<>();
-        for (Rrf.Fused<Long> item : fused) {
+        boolean cut = false;
+        for (Rrf.Fused<Long> item : Rrf.combine(lists)) {
+            if (!assembly.tryConsume(1)) {
+                cut = true;
+                break;
+            }
             Optional<Section> found = reader.section(item.item());
             if (found.isEmpty()) {
                 continue;
             }
             Section section = found.get();
-            Optional<Revision> inForce = query.timed()
-                    ? reader.documentAt(section.document(), now, query.recordedAt().orElse(Long.MAX_VALUE))
-                    : query.history() ? reader.revision(section.revision()) : reader.latestRevision(section.document());
+            Optional<Revision> inForce = reader.documentAt(section.document(), now, query.recordedAt().orElse(Long.MAX_VALUE));
+            if (inForce.isEmpty() && !query.timed()) {
+                inForce = reader.latestRevision(section.document());
+            }
             if (inForce.isEmpty()) {
                 continue;
             }
             Section target = section;
             if (!query.history() && inForce.get().id() != section.revision()) {
-                Optional<Section> same = reader.sections(inForce.get().id()).stream().filter(other -> other.anchor().equals(section.anchor())).findFirst();
+                Optional<Section> same = cache.sameAnchor(inForce.get().id(), section.anchor());
                 if (same.isPresent()) {
                     target = same.get();
                 } else if (query.timed()) {
                     continue;
                 }
             }
-            Candidate candidate = resolved.computeIfAbsent(target.id(), key -> new Candidate(reader.section(key).orElseThrow(), inForce.get()));
+            Revision force = inForce.get();
+            Candidate candidate = resolved.computeIfAbsent(target.id(), key -> new Candidate(reader.section(key).orElseThrow(), force));
+            candidate.matched.add(section.id());
             candidate.score = Math.max(candidate.score, item.score());
             candidate.lexical = Math.max(candidate.lexical, lexical.getOrDefault(item.item(), 0.0));
             candidate.semantic = Math.max(candidate.semantic, semantic.getOrDefault(item.item(), 0.0));
@@ -244,13 +319,44 @@ public final class Retrieval {
                 break;
             }
         }
+        List<Candidate> ordered = new ArrayList<>(resolved.values());
+        Reranker reranker = reader.database().options().reranker();
+        if (reranker != Reranker.NONE && !ordered.isEmpty() && !query.text().isBlank()) {
+            List<Candidate> head = new ArrayList<>(ordered.subList(0, Math.min(RERANKED, ordered.size())));
+            try {
+                double[] scores = reranker.score(query.text(), head.stream().map(candidate -> cache.text(candidate.section)).toList());
+                Map<Candidate, Double> byCandidate = new HashMap<>();
+                for (int i = 0; i < head.size(); i++) {
+                    byCandidate.put(head.get(i), i < scores.length && Double.isFinite(scores[i]) ? scores[i] : Double.NEGATIVE_INFINITY);
+                }
+                List<Candidate> reranked = new ArrayList<>(head);
+                reranked.sort(Comparator.<Candidate>comparingDouble(candidate -> -byCandidate.get(candidate)).thenComparingInt(head::indexOf));
+                List<Candidate> order = new ArrayList<>(reranked);
+                order.addAll(ordered.subList(head.size(), ordered.size()));
+                for (int rank = 1; rank <= order.size(); rank++) {
+                    order.get(rank - 1).score = Rrf.term(rank);
+                }
+                ordered = order;
+                stages.note("the top " + head.size() + " candidates were reordered by " + reranker.name());
+            } catch (RuntimeException failure) {
+                stages.note("the reranker " + reranker.name() + " failed and was skipped: " + failure.getMessage());
+            }
+        }
 
         List<Hit> hits = new ArrayList<>();
-        for (Candidate candidate : resolved.values()) {
-            meter.consume(1);
-            hits.add(hit(reader, query, candidate, anchors, now));
+        for (Candidate candidate : ordered) {
+            Optional<Hit> hit = hit(reader, cache, query, candidate, anchors, now, assembly);
+            if (hit.isEmpty()) {
+                cut = true;
+                break;
+            }
+            hits.add(hit.get());
         }
-        List<Hit> chosen = select(hits, query, anchors, meter);
+        if (cut) {
+            stages.note("candidate assembly stopped at its budget; the answer uses the candidates found so far");
+        }
+        List<Hit> chosen = select(hits, query, anchors, assembly, stages);
+        stages.settle(assembly);
         return new Result(chosen, List.copyOf(anchors), notes);
     }
 
@@ -258,17 +364,17 @@ public final class Retrieval {
         return types.isEmpty() || reader.atom(section.document()).map(atom -> types.contains(atom.type().id())).orElse(false);
     }
 
-    private static Set<Long> resolve(Reader reader, String text, Set<String> types) {
+    private static Set<Long> resolve(Reader reader, String text, Set<String> types, Budget.Meter meter) {
         Set<Long> found = new LinkedHashSet<>();
         if (types.isEmpty() || text.isBlank()) {
             return found;
         }
-        String[] words = text.split("[^\\p{L}\\p{N}_.'-]+");
+        String[] words = text.replaceAll("(?i)'s\\b", "").split("[^\\p{L}\\p{N}_.-]+");
         List<String> grams = new ArrayList<>();
         for (int size = 3; size >= 1; size--) {
             for (int i = 0; i + size <= words.length; i++) {
-                String gram = String.join(" ", Arrays.asList(words).subList(i, i + size)).replaceAll("^[.'-]+|[.'-]+$", "");
-                if (!gram.isBlank()) {
+                String gram = String.join(" ", Arrays.asList(words).subList(i, i + size)).replaceAll("^[.-]+|[.-]+$", "");
+                if (gram.codePointCount(0, gram.length()) >= 3) {
                     grams.add(gram);
                 }
             }
@@ -277,6 +383,9 @@ public final class Retrieval {
             reader.requireReadableType(type);
             for (String gram : grams) {
                 for (String key : new LinkedHashSet<>(List.of(gram, gram.toLowerCase(Locale.ROOT)))) {
+                    if (!meter.tryConsume(1)) {
+                        return found;
+                    }
                     reader.find(type, key).ifPresent(found::add);
                 }
             }
@@ -284,10 +393,25 @@ public final class Retrieval {
         return found;
     }
 
-    private static Hit hit(Reader reader, Query query, Candidate candidate, Set<Long> anchors, long now) {
+    private static Optional<Hit> hit(Reader reader, Cache cache, Query query, Candidate candidate, Set<Long> anchors, long now, Budget.Meter meter) {
         Section section = candidate.section;
         Revision revision = reader.revision(section.revision()).orElseThrow();
-        boolean inForce = candidate.inForce.id() == section.revision();
+        boolean inForce = candidate.inForce.id() == section.revision() && candidate.inForce.validAt(now);
+        Set<Long> lineage = new LinkedHashSet<>();
+        lineage.add(section.id());
+        for (long matched : candidate.matched) {
+            reader.section(matched).flatMap(found -> reader.revision(found.revision()))
+                    .filter(found -> found.number() <= revision.number())
+                    .ifPresent(_ -> lineage.add(matched));
+        }
+        for (Revision earlier : cache.revisions(section.document())) {
+            if (earlier.number() <= revision.number()) {
+                cache.sameAnchor(earlier.id(), section.anchor()).ifPresent(same -> lineage.add(same.id()));
+            }
+        }
+        if (!meter.tryConsume(lineage.size())) {
+            return Optional.empty();
+        }
         List<Long> path = List.of();
         boolean linked = false;
         boolean live = false;
@@ -299,28 +423,32 @@ public final class Retrieval {
             }
         }
         double provenance = evidence.isEmpty() ? 0 : 1;
-        for (IncidentEdge incident : reader.incidentEdges(section.id()).toList()) {
-            if (!reader.visible(incident.edge())) {
-                continue;
-            }
-            linked = true;
-            live |= incident.validFrom() <= now && now < incident.validTo();
-            List<Member> members = reader.members(incident.edge()).toList();
-            for (Member member : members) {
-                if (member.atom() == section.id() && member.qualifier() != 0) {
-                    Optional<Qualifier> qualifier = Provenance.qualifier(reader, member.qualifier());
+        for (long member : lineage) {
+            for (IncidentEdge incident : reader.incidentEdges(member).toList()) {
+                if (!meter.tryConsume(1 + anchors.size())) {
+                    return Optional.empty();
+                }
+                if (!reader.visible(incident.edge())) {
+                    continue;
+                }
+                linked = true;
+                live |= incident.validFrom() <= now && now < incident.validTo();
+                Optional<Incidence> incidence = reader.incidence(incident.edge(), member);
+                long qualifierId = incidence.map(Incidence::qualifier).orElse(0L);
+                if (qualifierId != 0) {
+                    Optional<Qualifier> qualifier = Provenance.qualifier(reader, qualifierId);
                     if (qualifier.isPresent() && query.policy().admits(qualifier)) {
                         confidence = Math.max(confidence, qualifier.get().confidence());
                         qualifier.get().evidence().stream().filter(id -> Provenance.evidence(reader, id).isPresent() || reader.visible(id))
                                 .forEach(evidence::add);
                     }
                 }
-            }
-            if (path.isEmpty()) {
-                for (long anchor : anchors) {
-                    if (members.stream().anyMatch(member -> member.atom() == anchor)) {
-                        path = List.of(anchor, incident.edge(), section.id());
-                        break;
+                if (path.isEmpty()) {
+                    for (long anchor : anchors) {
+                        if (reader.incidence(incident.edge(), anchor).isPresent()) {
+                            path = List.of(anchor, incident.edge(), section.id());
+                            break;
+                        }
                     }
                 }
             }
@@ -328,23 +456,22 @@ public final class Retrieval {
         provenance = Math.max(provenance, confidence);
         boolean current = inForce && (!linked || live);
         List<Long> later = new ArrayList<>();
-        if (!query.history()) {
-            for (Revision next : reader.revisions(section.document())) {
-                if (next.number() <= revision.number() || query.recordedAt().isPresent() && next.recordedAt() > query.recordedAt().getAsLong()) {
-                    continue;
-                }
-                Optional<Section> same = reader.sections(next.id()).stream().filter(other -> other.anchor().equals(section.anchor())).findFirst();
-                if (same.isEmpty() || same.get().contentHash() != section.contentHash()) {
-                    later.add(next.id());
-                }
+        for (Revision next : cache.revisions(section.document())) {
+            if (next.id() == revision.id() || next.validFrom() <= revision.validFrom()
+                    || query.recordedAt().isPresent() && next.recordedAt() > query.recordedAt().getAsLong()) {
+                continue;
+            }
+            Optional<Section> same = cache.sameAnchor(next.id(), section.anchor());
+            if (same.isEmpty() || same.get().contentHash() != section.contentHash()) {
+                later.add(next.id());
             }
         }
-        return new Hit(section.id(), section.document(), section.revision(), candidate.score, candidate.lexical, candidate.semantic,
+        return Optional.of(new Hit(section.id(), section.document(), section.revision(), candidate.score, candidate.lexical, candidate.semantic,
                 candidate.structural, current ? 1 : 0, provenance, current, later, path, List.copyOf(evidence), reader.headingPath(section),
-                reader.sectionText(section));
+                cache.text(section)));
     }
 
-    private static List<Hit> select(List<Hit> hits, Query query, Set<Long> anchors, Budget.Meter meter) {
+    private static List<Hit> select(List<Hit> hits, Query query, Set<Long> anchors, Budget.Meter meter, Stages stages) {
         if (hits.size() <= query.limit()) {
             return hits;
         }
@@ -352,7 +479,6 @@ public final class Retrieval {
         List<Long> anchorList = List.copyOf(anchors);
         int slots = terms.size() + anchorList.size();
         List<double[]> covers = new ArrayList<>();
-        double[] counts = new double[slots];
         for (Hit hit : hits) {
             Set<String> words = new HashSet<>(Tokenizer.tokens(hit.text()));
             double[] cover = new double[slots];
@@ -362,10 +488,14 @@ public final class Retrieval {
             for (int i = 0; i < anchorList.size(); i++) {
                 cover[terms.size() + i] = !hit.path().isEmpty() && hit.path().getFirst().equals(anchorList.get(i)) ? 1 : 0;
             }
-            for (int i = 0; i < slots; i++) {
-                counts[i] += cover[i];
-            }
             covers.add(cover);
+        }
+        double[] first = covers.getFirst();
+        double[] counts = new double[slots];
+        for (int h = 1; h < hits.size(); h++) {
+            for (int i = 0; i < slots; i++) {
+                counts[i] += first[i] > 0 ? 0 : covers.get(h)[i];
+            }
         }
         double[] weights = new double[slots];
         double total = 0;
@@ -376,7 +506,6 @@ public final class Retrieval {
         for (int i = 0; i < slots && total > 0; i++) {
             weights[i] /= total;
         }
-        double[] first = covers.getFirst();
         double best = hits.getFirst().score();
         List<Selection.Candidate> candidates = new ArrayList<>();
         for (int h = 1; h < hits.size(); h++) {
@@ -388,10 +517,20 @@ public final class Retrieval {
             candidates.add(new Selection.Candidate(hit.section(), Math.min(1, hit.score() / best), cover, 1, new long[]{hit.section()},
                     Selection.UNREACHABLE));
         }
-        Set<Long> chosen = new HashSet<>(List.of(hits.getFirst().section()));
+        Set<Long> chosen = new LinkedHashSet<>(List.of(hits.getFirst().section()));
         if (query.limit() > 1) {
-            Selection.select(candidates, new Selection.Options(query.limit() - 1, Long.MAX_VALUE, 1.0, COVERAGE, weights, false), meter)
-                    .selected().forEach(selected -> chosen.add(selected.edge()));
+            Selection.Outcome outcome = Selection.select(candidates, new Selection.Options(query.limit() - 1, Long.MAX_VALUE, 1.0, COVERAGE, weights,
+                    false), meter);
+            outcome.selected().forEach(selected -> chosen.add(selected.edge()));
+            if (outcome.exhausted()) {
+                stages.note("coverage selection stopped at its budget; the rest of the answer follows the ranking");
+                for (Hit hit : hits) {
+                    if (chosen.size() >= query.limit()) {
+                        break;
+                    }
+                    chosen.add(hit.section());
+                }
+            }
         }
         return hits.stream().filter(hit -> chosen.contains(hit.section())).toList();
     }

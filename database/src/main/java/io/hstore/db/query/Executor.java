@@ -1292,6 +1292,10 @@ final class Executor {
                 lines.add(String.format(java.util.Locale.ROOT, "local push with alpha %.3g and epsilon %.3g: at most %.0f incidence reads",
                         diffuse.alpha(), diffuse.epsilon(), reads));
                 lines.add("the residual bounds the total error of the scores and is reported with the rows");
+                diffuse.during().ifPresent(during -> lines.add("memberships valid at some time in [" + during.from() + ", " + during.to() + ")"));
+                if (diffuse.confidence()) {
+                    lines.add("membership weights multiplied by their assertion's confidence");
+                }
             }
             case Statement.ExpandFrom expansion -> {
                 lines.add("family associative  exact best-first under the chain value, top " + expansion.top());

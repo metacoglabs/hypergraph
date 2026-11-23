@@ -37,7 +37,9 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -1051,7 +1053,12 @@ public final class Parser {
         Optional<String> hierarchy = Optional.empty();
         boolean history = false;
         int top = 10;
+        Set<String> seen = new HashSet<>();
         while (true) {
+            String option = peek().text().toUpperCase(Locale.ROOT);
+            if (Set.of("ANCHORS", "RESOLVE", "IN", "VALID", "RECORDED", "POLICY", "THROUGH", "HISTORY", "TOP").contains(option) && !seen.add(option)) {
+                throw error("RETRIEVE takes " + option + " at most once");
+            }
             if (accept("ANCHORS")) {
                 expectSymbol("(");
                 do {

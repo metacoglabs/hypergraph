@@ -174,30 +174,42 @@ search, a valid time and a recorded time, an evidence policy, an optional hierar
 
 1. **Anchors.** The given atoms, plus atoms of the `RESOLVE IN` types whose key equals a run of one to three words of
    the question, as written or lower-cased. "Alice" resolves to `@Person:'alice'`.
-2. **Lexical.** `SEARCH TEXT` over the question, at most 50 sections or five times the limit.
+2. **Lexical.** `SEARCH TEXT` over the question, at most 50 sections or five times the limit. With a valid or
+   recorded time, or `HISTORY`, every revision is searched, so text that was in force then is found by its own words.
 3. **Semantic.** The nearest `content` vectors of sections to the question's encoding, or a `ROUTE` through the named
-   hierarchy.
-4. **Structural.** A personalised walk (`DIFFUSE`) from the anchors and the ten best sections of the first two lists,
-   over every hyperedge type, weighted by assertion confidence, restricted to memberships valid at the valid time
-   when one is given and to assertions the policy admits. Sections it reaches form the third list, so a section
-   linked to an anchor by a hyperedge is found even when it shares no words with the question.
-5. **Fusion.** The lists are combined by reciprocal rank. A configured `Reranker` (`DatabaseOptions.withReranker`, a
-   cross-encoder or any other scorer run outside the database) then reorders the best 30 candidates, and its order
-   decides.
+   hierarchy, keeping only sections of the requested types.
+4. **Structural.** A personalised walk (`DIFFUSE`) over every hyperedge type, weighted by assertion confidence,
+   restricted to memberships valid at the valid time when one is given and to assertions the policy admits. It
+   starts from the anchors, or without anchors from the ten best sections of the first two lists, which are then left
+   out of its list. A section linked to an anchor by a hyperedge is found even when it shares no words with the
+   question.
+5. **Fusion.** The lists are combined by reciprocal rank.
 6. **Time.** Each candidate is moved to the same section, by anchor, in the revision of its node that is in force: the
-   latest one, or with a valid or recorded time the one `REVISION OF … VALID AT … RECORDED AT …` would return. A
-   section that did not exist then is dropped.
-7. **Evidence.** A hit lists the revision's sources and the evidence of qualifiers on the section's memberships that
-   the policy admits, keeping only records the user may read. `provenance` is 1 when the revision names a source and
-   otherwise the highest admitted confidence. `path` is an anchor, a hyperedge holding it and the section.
-8. **Coverage.** When there are more candidates than the limit, the best candidate is kept and the rest are chosen
+   one `REVISION OF … VALID AT … RECORDED AT …` would return for the requested times, now and everything recorded when
+   none are given, or the latest revision when no revision is valid now. With a requested time, a section that did
+   not exist then is dropped; without one it is kept and marked not current. With `HISTORY` sections stay in their
+   own revision.
+7. **Reranking.** A configured `Reranker` (`DatabaseOptions.withReranker`, a cross-encoder or any other scorer run
+   outside the database) reorders the best 30 candidates by the text that will be returned, and its order decides. A
+   reranker that fails is skipped with a note.
+8. **Evidence.** A hit lists the revision's sources and the evidence of qualifiers on the memberships the policy
+   admits, keeping only records the user may read. Memberships count for the section and for the same section, by
+   anchor, in every earlier revision of its node, since hyperedges usually point at the revision where a fact was
+   first written. `provenance` is 1 when the revision names a source and otherwise the highest admitted confidence.
+   `path` is an anchor, a hyperedge holding it and the section.
+9. **Coverage.** When there are more candidates than the limit, the best candidate is kept and the rest are chosen
    with the evidence selection of `SELECT EVIDENCE`: relevance plus 1.5 times the share of the question's words and
    anchors a section adds, each word weighted by how rarely the candidates contain it.
 
-A hit is `current` when its revision is the one in force and, if the section belongs to hyperedges, at least one of
-those memberships is valid at the requested time (now by default). A decision recorded in May whose membership ended
+A hit is `current` when its revision is the one in force at the requested time (now by default) and, if the section or
+its earlier versions belong to hyperedges, at least one of those memberships is valid then. A decision recorded in May whose membership ended
 in June is therefore returned with `current = no` once a later decision replaced it. `later` lists the revisions of
-the same node, after the hit's, in which that section changed or disappeared: what changed afterward. Every hit
+the same node valid from a later time than the hit's revision in which that section changed or disappeared: what
+changed afterward.
+
+Each stage gets a share of the statement's row budget and the time left: a fifth for the text search, a quarter of
+the rest for the vector search, half of what remains for the walk and the rest for assembling hits. A stage that runs
+out keeps what it found and adds a note to the result, so a tight budget gives a smaller answer instead of an error. Every hit
 carries its heading path and its Markdown.
 
 ## Fusion

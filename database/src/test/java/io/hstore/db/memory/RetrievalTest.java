@@ -53,6 +53,7 @@ class RetrievalTest {
             writer.defineNode("Person", List.of());
             writer.defineNode("Project", List.of());
             writer.defineNode("Note", List.of());
+            writer.defineNode("Log", List.of());
             writer.defineEdge("Meeting", AtomKind.SET_EDGE, List.of(), List.of("participant", "project", "decision"));
             writer.defineEdge("Decision", AtomKind.SET_EDGE, List.of(), List.of("project", "record"));
             alice = writer.node("Person", "alice");
@@ -83,6 +84,8 @@ class RetrievalTest {
                 ClaimsBay moved its claims storage to HStore after the June review.
                 """, RevisionSpec.DEFAULT.validFrom(200).embedded()));
         database.write(writer -> writer.appendRevision(budgetNote, "# Budget\nThe hardware budget for next year.\n", RevisionSpec.DEFAULT.embedded()));
+        database.write(writer -> writer.appendRevision(writer.node("Log", "garden"), "# Garden\nTomatoes need ClaimsBay water.\n",
+                RevisionSpec.DEFAULT.embedded()));
         database.read(reader -> {
             meetingDecision = reader.sections(notes.id()).get(1).id();
             storageBefore = reader.sections(before.id()).get(1).id();
@@ -179,6 +182,65 @@ class RetrievalTest {
         Retrieval.Result result = ask(Retrieval.Query.of("ClaimsBay storage budget").limit(2));
         assertEquals(2, result.hits().size());
         assertTrue(result.hits().stream().anyMatch(hit -> hit.document() == budgetNote), result.hits().toString());
+    }
+
+    @Test
+    void aSmallBudgetGivesAPartialAnswerWithANote() {
+        open(Reranker.NONE);
+        Retrieval.Result result = database.read(reader -> reader.retrieve(question("What did Alice and I decide about ClaimsBay?"),
+                new Budget(300, 8, java.time.Duration.ofSeconds(5)).start()));
+        assertTrue(result.notes().stream().anyMatch(note -> note.contains("budget")), result.notes().toString());
+    }
+
+    @Test
+    void anUnrelatedEditKeepsTheDecisionsLinks() {
+        open(Reranker.NONE);
+        database.write(writer -> writer.appendRevision(meetingNotes, """
+                # Meeting with Alice
+                Weekly sync on ClaimsBay.
+                ## Decision
+                We decided to keep ClaimsBay claims storage on Postgres for now.
+                ## Other
+                Lunch options were discussed again.
+                """, RevisionSpec.DEFAULT.validFrom(100).embedded()));
+        Retrieval.Result result = ask(question("What did Alice and I decide about ClaimsBay?").withAnchors(List.of(me)));
+        Retrieval.Hit decision = result.hits().stream().filter(hit -> hit.heading().equals(List.of("Meeting with Alice", "Decision"))).findFirst()
+                .orElseThrow(() -> new AssertionError(result.hits().toString()));
+        assertFalse(decision.current(), decision.toString());
+        assertEquals(3, decision.path().size(), decision.toString());
+    }
+
+    @Test
+    void inForceMeansValidNowAndHistoryDoesNotMakeOldTextCurrent() {
+        open(Reranker.NONE);
+        database.write(writer -> writer.appendRevision(architecture, """
+                # ClaimsBay architecture
+                ## Storage
+                During the pilot ClaimsBay kept claims in SQLite.
+                """, RevisionSpec.DEFAULT.validFrom(50).validTo(80).embedded()));
+        Retrieval.Result plain = ask(Retrieval.Query.of("ClaimsBay claims storage").limit(4));
+        for (Retrieval.Hit hit : plain.hits()) {
+            assertFalse(hit.current() && hit.text().contains("SQLite"), hit.toString());
+        }
+        assertTrue(plain.hits().stream().anyMatch(hit -> hit.current() && hit.text().contains("HStore")), plain.hits().toString());
+        Retrieval.Result history = ask(Retrieval.Query.of("Postgres claims storage").withHistory(true).limit(6));
+        Retrieval.Hit old = history.hits().stream().filter(hit -> hit.section() == storageBefore).findFirst()
+                .orElseThrow(() -> new AssertionError(history.hits().toString()));
+        assertFalse(old.current());
+        assertFalse(old.later().isEmpty());
+    }
+
+    @Test
+    void timedQueriesSearchTheTextOfTheirTimeAndHierarchyRoutesKeepTheTypeFilter() {
+        open(Reranker.NONE);
+        Retrieval.Result then = ask(Retrieval.Query.of("Postgres").withValidAt(OptionalLong.of(150)).limit(3));
+        Retrieval.Hit storage = then.hits().stream().filter(hit -> hit.section() == storageBefore).findFirst()
+                .orElseThrow(() -> new AssertionError(then.hits().toString()));
+        assertTrue(storage.lexical() > 0, storage.toString());
+        String model = database.semantic().encoder().model();
+        database.write(writer -> Hierarchies.create(writer, new Hierarchies.Spec("memory", model, "content", java.util.Optional.empty(), 4, 4, false)));
+        Retrieval.Result routed = ask(Retrieval.Query.of("ClaimsBay water").inTypes(Set.of("Note")).inHierarchy(java.util.Optional.of("memory")).limit(5));
+        assertFalse(routed.hits().stream().anyMatch(hit -> hit.text().contains("Tomatoes")), routed.hits().toString());
     }
 
     @Test
