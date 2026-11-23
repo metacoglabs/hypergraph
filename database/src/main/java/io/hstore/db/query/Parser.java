@@ -8,6 +8,7 @@ import io.hstore.db.evidence.EvidencePolicy;
 import io.hstore.db.hora.Field;
 import io.hstore.db.hora.Pattern;
 import io.hstore.db.hora.Reducer;
+import io.hstore.db.query.Ast.BranchScope;
 import io.hstore.db.query.Ast.Comparison;
 import io.hstore.db.query.Ast.Expr;
 import io.hstore.db.query.Ast.MemberClause;
@@ -325,8 +326,14 @@ public final class Parser {
             return new Statement.Query(match());
         }
         if (accept("EXPLAIN")) {
+            if (accept("HYPERMATCH")) {
+                return new Statement.ExplainStructural(structuralMatch());
+            }
             expect("MATCH");
             return new Statement.Explain(match());
+        }
+        if (accept("HYPERMATCH")) {
+            return structuralMatch();
         }
         if (accept("MEMBERS")) {
             expect("OF");
@@ -373,6 +380,100 @@ public final class Parser {
                 throw HStoreException.invalid("TOP and EDGES must be between 0 and 10000");
             }
             return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, top, edges);
+        }
+        if (accept("REFINE")) {
+            expect("FROM");
+            List<Ref> roots = new ArrayList<>();
+            Optional<String> rootType = Optional.empty();
+            if (accept("TYPE")) {
+                rootType = Optional.of(identifier());
+            } else {
+                do {
+                    roots.add(ref());
+                } while (acceptSymbol(","));
+            }
+            List<Ast.RefineLevel> levels = new ArrayList<>();
+            while (accept("THROUGH")) {
+                levels.add(new Ast.RefineLevel(identifier(), refineRoles()));
+                if (levels.size() > 16) {
+                    throw HStoreException.invalid("REFINE goes through at most 16 levels");
+                }
+            }
+            expect("TO");
+            Optional<String> leafType = peek().kind() == Token.Kind.WORD && !peek().is("AS") && !peek().is("VALID") && !peek().is("WEIGHT")
+                    && !peek().is("DISTINCT") && !peek().is("TOP") ? Optional.of(identifier()) : Optional.empty();
+            List<String> leafRoles = refineRoles();
+            Optional<Ref> anchor = acceptSymbol("=") ? Optional.of(ref()) : Optional.empty();
+            Optional<Expr> validAt = validAt();
+            double low = 0;
+            double high = 1;
+            if (accept("WEIGHT")) {
+                expect("BETWEEN");
+                low = number().doubleValue();
+                expect("AND");
+                high = number().doubleValue();
+            }
+            boolean distinct = accept("DISTINCT");
+            expect("TOP");
+            long top = longValue();
+            if (top < 1 || top > 10_000) {
+                throw HStoreException.invalid("TOP must be between 1 and 10000");
+            }
+            return new Statement.Refine(List.copyOf(roots), rootType, List.copyOf(levels), leafType, leafRoles, anchor, validAt, low, high, distinct, top);
+        }
+        if (peekWord("BRANCH") && peekWordAt(1, "DELTA", "SURVIVORS", "AFTER")) {
+            expect("BRANCH");
+            if (accept("DELTA")) {
+                String branch = identifier();
+                OptionalLong since = OptionalLong.empty();
+                if (accept("SINCE")) {
+                    expect("GENERATION");
+                    since = OptionalLong.of(longValue());
+                }
+                return new Statement.BranchDelta(branch, since, branchScope(), limit());
+            }
+            if (accept("SURVIVORS")) {
+                return new Statement.BranchSurvivors(identifier(), branchScope(), limit());
+            }
+            expect("AFTER");
+            String branch = identifier();
+            expect("GENERATION");
+            long generation = longValue();
+            long window = 1_000;
+            if (accept("WINDOW")) {
+                if (peek().is("-")) {
+                    throw HStoreException.invalid("WINDOW must not be negative");
+                }
+                window = longValue();
+            }
+            return new Statement.BranchAfter(branch, generation, window, limit());
+        }
+        if (accept("COMPARE")) {
+            expect("BRANCH");
+            String left = identifier();
+            expect("AND");
+            String right = identifier();
+            return new Statement.CompareBranches(left, right, branchScope(), limit());
+        }
+        if (accept("NEAREST")) {
+            expect("BRANCH");
+            expect("TO");
+            String target = identifier();
+            List<String> among = new ArrayList<>();
+            if (accept("AMONG")) {
+                expectSymbol("(");
+                do {
+                    among.add(identifier());
+                } while (acceptSymbol(","));
+                expectSymbol(")");
+            }
+            BranchScope scope = branchScope();
+            expect("TOP");
+            long top = longValue();
+            if (top < 1 || top > 1_000) {
+                throw HStoreException.invalid("TOP must be between 1 and 1000");
+            }
+            return new Statement.NearestBranch(target, List.copyOf(among), scope, (int) top);
         }
         if (accept("TRANSITIONS")) {
             expect("EDGE");
@@ -1340,6 +1441,71 @@ public final class Parser {
         return List.copyOf(factors);
     }
 
+    private List<String> refineRoles() {
+        List<String> roles = new ArrayList<>();
+        if (accept("AS")) {
+            do {
+                roles.add(identifier());
+            } while (accept("OR"));
+        }
+        return List.copyOf(roles);
+    }
+
+    private BranchScope branchScope() {
+        if (!accept("SCOPE")) {
+            return new BranchScope.Everything();
+        }
+        if (accept("INCIDENCES")) {
+            return new BranchScope.Incidences();
+        }
+        if (accept("TYPE")) {
+            return new BranchScope.OfType(identifier());
+        }
+        expect("AROUND");
+        return new BranchScope.Around(ref());
+    }
+
+    private Statement.StructuralMatch structuralMatch() {
+        List<Ast.StructuralEdge> edges = new ArrayList<>();
+        do {
+            String name = identifier();
+            expectSymbol(":");
+            String type = identifier();
+            expectSymbol("(");
+            List<Ast.StructuralVertex> vertices = new ArrayList<>();
+            do {
+                String vertex = identifier();
+                vertices.add(new Ast.StructuralVertex(vertex, acceptSymbol(":") ? Optional.of(identifier()) : Optional.empty()));
+            } while (acceptSymbol(","));
+            expectSymbol(")");
+            edges.add(new Ast.StructuralEdge(name, type, List.copyOf(vertices)));
+            if (edges.size() > 64) {
+                throw HStoreException.invalid("a structural match has at most 64 hyperedges");
+            }
+        } while (acceptSymbol(","));
+        List<Ast.StructuralAnchor> anchors = new ArrayList<>();
+        if (accept("WHERE")) {
+            do {
+                String vertex = identifier();
+                expectSymbol("=");
+                anchors.add(new Ast.StructuralAnchor(vertex, ref()));
+            } while (accept("AND"));
+        }
+        Optional<String> mode = Optional.empty();
+        if (accept("MODE")) {
+            String found = identifier().toUpperCase(java.util.Locale.ROOT);
+            if (!List.of("AUTO", "HGMATCH", "MACH").contains(found)) {
+                throw HStoreException.invalid("MODE must be AUTO, HGMATCH or MACH");
+            }
+            mode = Optional.of(found);
+        }
+        if (accept("COUNT")) {
+            return new Statement.StructuralMatch(List.copyOf(edges), List.copyOf(anchors), mode, true, false, OptionalLong.empty());
+        }
+        boolean bindings = accept("BINDINGS");
+        return new Statement.StructuralMatch(List.copyOf(edges), List.copyOf(anchors), mode, false, bindings, limit());
+    }
+
     private Ast.Instant transitionInstant() {
         return accept("GENERATION") ? new Ast.Instant.Generation(longValue()) : new Ast.Instant.Time(parseInstant(string()));
     }
@@ -1390,6 +1556,15 @@ public final class Parser {
 
     private Token peek() {
         return tokens.get(index);
+    }
+
+    private boolean peekWord(String word) {
+        return peek().is(word);
+    }
+
+    private boolean peekWordAt(int ahead, String... words) {
+        Token token = peek(ahead);
+        return java.util.Arrays.stream(words).anyMatch(token::is);
     }
 
     private Token peek(int ahead) {

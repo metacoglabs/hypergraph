@@ -16,6 +16,7 @@ import io.hstore.db.evidence.Qualifier;
 import io.hstore.db.hora.Budget;
 import io.hstore.db.hora.Diffusion;
 import io.hstore.db.hora.Expansion;
+import io.hstore.db.hora.Refinement;
 import io.hstore.db.hora.Field;
 import io.hstore.db.hora.Hora;
 import io.hstore.db.hora.Pattern;
@@ -25,6 +26,8 @@ import io.hstore.db.query.Ast.Expr;
 import io.hstore.db.query.Ast.MemberClause;
 import io.hstore.db.query.Ast.Statement;
 import io.hstore.db.query.QueryResult.Cell;
+import io.hstore.db.retrieve.HyperMatch;
+import io.hstore.db.retrieve.HyperQuery;
 import io.hstore.db.retrieve.RankQuery;
 import io.hstore.db.retrieve.Ranking;
 import io.hstore.db.retrieve.RoleTimeScorer;
@@ -38,6 +41,7 @@ import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.signal.Signals;
 import io.hstore.db.stats.Statistics;
 import io.hstore.db.temporal.BranchMerge;
+import io.hstore.db.temporal.BranchRetrieval;
 import io.hstore.db.temporal.StateBindings;
 import io.hstore.db.temporal.Temporal;
 import io.hstore.db.temporal.Transitions;
@@ -62,9 +66,11 @@ import io.hstore.engine.txn.Snapshot;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -323,6 +329,33 @@ final class Executor {
             case Statement.Transitions transitions -> read(reader -> transitions(reader, transitions));
             case Statement.Diffuse diffuse -> read(reader -> diffuse(reader, diffuse));
             case Statement.ExpandFrom expansion -> read(reader -> expandFrom(reader, expansion));
+            case Statement.Refine refine -> read(reader -> refine(reader, refine));
+            case Statement.BranchDelta delta -> read(reader -> branchDelta(reader, delta));
+            case Statement.BranchSurvivors survivors -> read(reader -> QueryResult.table(List.of("key"), limited(
+                    branches().survivors(session.branchId(survivors.branch()), scope(reader, survivors.scope())).stream()
+                            .map(key -> List.<Cell>of(QueryResult.text(key(reader, key)))), survivors.limit()).toList()));
+            case Statement.CompareBranches compare -> read(reader -> QueryResult.table(List.of("key", "side", "left", "right"), limited(
+                    branches().compare(session.branchId(compare.left()), session.branchId(compare.right()), scope(reader, compare.scope())).stream()
+                            .map(found -> List.of(QueryResult.text(key(reader, found.key())), QueryResult.text(found.side().name()),
+                                    QueryResult.text(found.left().map(net -> value(net.after())).orElse("unchanged")),
+                                    QueryResult.text(found.right().map(net -> value(net.after())).orElse("unchanged")))), compare.limit()).toList()));
+            case Statement.NearestBranch nearest -> read(reader -> {
+                List<Integer> among = nearest.among().isEmpty()
+                        ? database().engine().branches().stream().filter(Branch::isActive).map(Branch::id).toList()
+                        : nearest.among().stream().map(session::branchId).distinct().toList();
+                return QueryResult.table(List.of("branch", "distance", "lower_bound"), branches()
+                        .nearest(session.branchId(nearest.target()), among, scope(reader, nearest.scope()), nearest.top()).stream()
+                        .map(found -> List.of(QueryResult.text(branchName(found.branch())), QueryResult.number(found.distance()),
+                                QueryResult.number(found.lowerBound()))).toList());
+            });
+            case Statement.BranchAfter after -> read(reader -> QueryResult.table(List.of("generation", "branch", "key", "before", "after"), limited(
+                    branches().after(session.branchId(after.branch()), after.generation(), after.window()).stream()
+                            .flatMap(succession -> succession.changes().stream().map(net -> List.of(QueryResult.number(succession.generation()),
+                                    QueryResult.text(branchName(succession.branch())), QueryResult.text(key(reader, net.key())),
+                                    QueryResult.text(value(net.before())), QueryResult.text(value(net.after()))))), after.limit()).toList()));
+            case Statement.StructuralMatch match -> read(reader -> structural(reader, match));
+            case Statement.ExplainStructural(Statement.StructuralMatch match) -> read(reader ->
+                    QueryResult.message(hyperMatch(reader, match).explain(hyperQuery(reader, match))));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
                     Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
@@ -399,6 +432,7 @@ final class Executor {
     private static boolean engineWide(Statement statement) {
         return switch (statement) {
             case Statement.CreateBranch _, Statement.DropBranch _, Statement.MergeBranch _, Statement.ShowBranches _, Statement.Sample _,
+                 Statement.BranchDelta _, Statement.BranchSurvivors _, Statement.CompareBranches _, Statement.NearestBranch _, Statement.BranchAfter _,
                  Statement.DiffGenerations _, Statement.DiffBranches _, Statement.History _, Statement.CreateTenant _, Statement.AlterTenant _,
                  Statement.CreateType _, Statement.CreateIndex _, Statement.CreateJsonIndex _ -> true;
             default -> false;
@@ -706,6 +740,146 @@ final class Executor {
         QueryResult table = QueryResult.table(List.of("kind", "id", "score", "upper"), rows);
         return new QueryResult(table.columns(), table.rows(), table.message() + "; residual " + result.residual() + ", " + result.reads()
                 + " incidences read" + (result.exhausted() ? ", budget reached" : ""), table.trace());
+    }
+
+    private QueryResult refine(Reader reader, Statement.Refine statement) {
+        Evaluator evaluator = evaluator(reader);
+        List<Long> roots = statement.rootType().isPresent()
+                ? reader.atomsOfType(reader.requireReadableType(statement.rootType().get()).id()).boxed().toList()
+                : statement.roots().stream().map(ref -> session.resolve(reader, ref)).toList();
+        OptionalInt rootType = statement.rootType().map(name -> OptionalInt.of(reader.requireReadableType(name).id())).orElse(OptionalInt.empty());
+        List<Refinement.Level> levels = statement.levels().stream()
+                .map(level -> new Refinement.Level(reader.requireReadableType(level.type()).id(), level.roles())).toList();
+        OptionalInt leafType = statement.leafType().map(name -> OptionalInt.of(reader.requireReadableType(name).id())).orElse(OptionalInt.empty());
+        OptionalLong anchor = statement.leafAnchor().map(ref -> OptionalLong.of(session.resolve(reader, ref))).orElse(OptionalLong.empty());
+        OptionalLong validAt = statement.validAt().map(expr -> OptionalLong.of((long) evaluator.value(expr, Map.of()).number()
+                .orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")))).orElse(OptionalLong.empty());
+        Refinement.Spec spec = new Refinement.Spec(roots, rootType, levels, new Refinement.LeafSpec(leafType, statement.leafRoles(), anchor), validAt,
+                statement.weightLow(), statement.weightHigh(), statement.distinct() ? Refinement.Mode.DISTINCT : Refinement.Mode.ALL,
+                (int) statement.top());
+        Refinement.Outcome outcome = Refinement.on(reader).run(spec, Budget.DEFAULT.start());
+        QueryResult result = QueryResult.table(List.of("path", "leaf", "score"), outcome.results().stream()
+                .map(found -> List.of(QueryResult.text(found.path().stream().map(edge -> "@" + edge).collect(Collectors.joining(" > "))),
+                        atomCell(reader, found.leaf()), QueryResult.number(found.score()))).toList());
+        return outcome.prefix() ? new QueryResult(result.columns(), result.rows(), result.message() + " (budget reached; a prefix of the answer)", result.trace()) : result;
+    }
+
+    private BranchRetrieval branches() {
+        return BranchRetrieval.on(database(), Budget.DEFAULT.start());
+    }
+
+    private String branchName(int id) {
+        return database().engine().branches().stream().filter(branch -> branch.id() == id).map(Branch::name).findFirst().orElse("#" + id);
+    }
+
+    private BranchRetrieval.Scope scope(Reader reader, Ast.BranchScope scope) {
+        return switch (scope) {
+            case Ast.BranchScope.Everything _ -> new BranchRetrieval.Scope.Everything();
+            case Ast.BranchScope.Incidences _ -> new BranchRetrieval.Scope.Incidences();
+            case Ast.BranchScope.OfType(String type) -> new BranchRetrieval.Scope.OfType(reader.tenant(), reader.requireReadableType(type).id());
+            case Ast.BranchScope.Around(Ast.Ref atom) -> new BranchRetrieval.Scope.Around(session.resolve(reader, atom));
+        };
+    }
+
+    private QueryResult branchDelta(Reader reader, Statement.BranchDelta statement) {
+        List<BranchRetrieval.Net> nets = branches().delta(session.branchId(statement.branch()), statement.since(), BranchRetrieval.Route.AUTO,
+                scope(reader, statement.scope()));
+        return QueryResult.table(List.of("key", "before", "after"), limited(nets.stream()
+                .map(net -> List.<Cell>of(QueryResult.text(key(reader, net.key())), QueryResult.text(value(net.before())),
+                        QueryResult.text(value(net.after())))), statement.limit()).toList());
+    }
+
+    private String key(Reader reader, BranchRetrieval.Key key) {
+        return switch (key) {
+            case BranchRetrieval.Key.Atom(long atom) -> "atom @" + atom;
+            case BranchRetrieval.Key.Member(long edge, long member) -> "member @" + edge + " / @" + member;
+            case BranchRetrieval.Key.Property(long atom, int property) -> "property @" + atom + "." + reader.schema().propertyName(property);
+        };
+    }
+
+    private static String value(Optional<Object> value) {
+        return value.map(found -> switch (found) {
+            case BranchRetrieval.AtomValue atom -> (atom.edge() ? "edge" : "node") + " type " + atom.type()
+                    + (atom.canonicalKey().isEmpty() ? "" : " '" + atom.canonicalKey() + "'");
+            case io.hstore.engine.topology.Incidence incidence -> "weight " + incidence.weightValue() + " valid " + interval(incidence.validFrom(), incidence.validTo());
+            case io.hstore.db.property.PropertyBag.Property property -> property.value().render();
+            default -> found.toString();
+        }).orElse("absent");
+    }
+
+    private HyperMatch hyperMatch(Reader reader, Statement.StructuralMatch statement) {
+        return HyperMatch.on(reader).withThreads(Math.max(1, Runtime.getRuntime().availableProcessors()))
+                .withMode(statement.mode().map(HyperMatch.Mode::valueOf).orElse(HyperMatch.Mode.AUTO));
+    }
+
+    private HyperQuery hyperQuery(Reader reader, Statement.StructuralMatch statement) {
+        Map<String, String> types = new LinkedHashMap<>();
+        for (Ast.StructuralEdge edge : statement.edges()) {
+            for (Ast.StructuralVertex vertex : edge.vertices()) {
+                types.putIfAbsent(vertex.name(), null);
+                vertex.type().ifPresent(type -> {
+                    String known = types.get(vertex.name());
+                    if (known != null && !known.equals(type)) {
+                        throw HStoreException.invalid("vertex " + vertex.name() + " is declared as " + known + " and " + type);
+                    }
+                    types.put(vertex.name(), type);
+                });
+            }
+        }
+        HyperQuery.Builder builder = HyperQuery.builder();
+        types.forEach((name, type) -> {
+            if (type == null) {
+                throw HStoreException.invalid("vertex " + name + " needs a type the first time it is named, as " + name + ":Type");
+            }
+            builder.vertex(name, reader.requireReadableType(type).id());
+        });
+        for (Ast.StructuralEdge edge : statement.edges()) {
+            TypeDef type = reader.requireReadableType(edge.type());
+            if (!type.kind().isEdge()) {
+                throw HStoreException.invalid(edge.type() + " is not a hyperedge type");
+            }
+            builder.edge(edge.name(), type.id(), edge.vertices().stream().map(Ast.StructuralVertex::name).toArray(String[]::new));
+        }
+        for (Ast.StructuralAnchor anchor : statement.anchors()) {
+            builder.anchor(anchor.vertex(), reader.require(session.resolve(reader, anchor.atom())).id());
+        }
+        return builder.build();
+    }
+
+    private QueryResult structural(Reader reader, Statement.StructuralMatch statement) {
+        long started = System.nanoTime();
+        HyperQuery query = hyperQuery(reader, statement);
+        HyperMatch match = hyperMatch(reader, statement);
+        Budget.Meter meter = Budget.DEFAULT.start();
+        HyperMatch.Plan plan = match.prepare(query, meter);
+        if (statement.count()) {
+            return QueryResult.table(List.of("count"), List.of(List.of(QueryResult.number(match.count(plan, meter)))));
+        }
+        long limit = statement.limit().orElse(Long.MAX_VALUE);
+        List<long[]> tuples = match.tuples(plan, meter, limit);
+        List<String> columns = new ArrayList<>(query.edges().stream().map(HyperQuery.Edge::name).toList());
+        if (statement.bindings()) {
+            columns.addAll(query.vertices().stream().map(HyperQuery.Vertex::name).toList());
+        }
+        List<List<Cell>> rows = new ArrayList<>();
+        for (int t = 0; t < tuples.size() && rows.size() < limit; t++) {
+            long[] tuple = tuples.get(t);
+            List<Cell> edges = Arrays.stream(tuple).mapToObj(edge -> atomCell(reader, edge)).toList();
+            if (!statement.bindings()) {
+                rows.add(edges);
+                continue;
+            }
+            Iterator<long[]> bindings = match.bindings(query, tuple);
+            while (bindings.hasNext() && rows.size() < limit) {
+                meter.consume(1);
+                List<Cell> row = new ArrayList<>(edges);
+                Arrays.stream(bindings.next()).forEach(vertex -> row.add(atomCell(reader, vertex)));
+                rows.add(row);
+            }
+        }
+        Optional<IoTrace> trace = IoTrace.current();
+        return QueryResult.table(columns, rows).withTrace(new QueryResult.Trace(0, reader.generation(), match.describe(plan), Double.NaN, rows.size(),
+                trace.map(IoTrace::pagesRead).orElse(0L), trace.map(IoTrace::cacheHits).orElse(0L), System.nanoTime() - started));
     }
 
     private QueryResult transitions(Reader reader, Statement.Transitions statement) {

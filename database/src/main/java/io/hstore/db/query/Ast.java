@@ -120,6 +120,32 @@ public final class Ast {
     public record RoleFactor(String role, double factor) {
     }
 
+    public record RefineLevel(String type, List<String> roles) {
+    }
+
+    public sealed interface BranchScope {
+        record Everything() implements BranchScope {
+        }
+
+        record Incidences() implements BranchScope {
+        }
+
+        record OfType(String type) implements BranchScope {
+        }
+
+        record Around(Ref atom) implements BranchScope {
+        }
+    }
+
+    public record StructuralVertex(String name, Optional<String> type) {
+    }
+
+    public record StructuralEdge(String name, String type, List<StructuralVertex> vertices) {
+    }
+
+    public record StructuralAnchor(String vertex, Ref atom) {
+    }
+
     public sealed interface Instant {
         record Generation(long id) implements Instant {
         }
@@ -302,6 +328,13 @@ public final class Ast {
         record Query(Match match) implements Statement {
         }
 
+        record StructuralMatch(List<StructuralEdge> edges, List<StructuralAnchor> anchors, Optional<String> mode, boolean count,
+                               boolean bindings, OptionalLong limit) implements Statement {
+        }
+
+        record ExplainStructural(StructuralMatch match) implements Statement {
+        }
+
         record Explain(Match match) implements Statement {
         }
 
@@ -317,6 +350,26 @@ public final class Ast {
         record Diffuse(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
                        Optional<Expr> validAt, Optional<EvidencePolicy> policy, double alpha, double epsilon, long top, long edges)
                 implements Statement {
+        }
+
+        record Refine(List<Ref> roots, Optional<String> rootType, List<RefineLevel> levels, Optional<String> leafType,
+                      List<String> leafRoles, Optional<Ref> leafAnchor, Optional<Expr> validAt, double weightLow, double weightHigh,
+                      boolean distinct, long top) implements Statement {
+        }
+
+        record BranchDelta(String branch, OptionalLong since, BranchScope scope, OptionalLong limit) implements Statement {
+        }
+
+        record BranchSurvivors(String branch, BranchScope scope, OptionalLong limit) implements Statement {
+        }
+
+        record CompareBranches(String left, String right, BranchScope scope, OptionalLong limit) implements Statement {
+        }
+
+        record NearestBranch(String target, List<String> among, BranchScope scope, int top) implements Statement {
+        }
+
+        record BranchAfter(String branch, long generation, long window, OptionalLong limit) implements Statement {
         }
 
         record Transitions(String variable, Optional<String> type, Instant from, Instant to, boolean appeared, boolean members,
