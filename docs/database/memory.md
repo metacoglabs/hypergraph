@@ -103,6 +103,51 @@ Deleting an atom drops its vectors; purging a node erases the vectors of the nod
 including versions still in the history window. `MERGE BRANCH` copies the vectors of the revisions and sections it
 copies, and drops the vectors of atoms the branch deleted.
 
+## Region hierarchy
+
+A hierarchy groups the sections of a tenant into nested regions, so a query can be routed down to a few regions
+instead of being compared with every section. `CREATE HIERARCHY name ON MODEL m VIEW v [OF Type] [FANOUT f]
+[LEAVES n] [CONTINUOUS]` builds one over the sections of each node's latest revision that have a vector in model `m`
+and view `v` (usually `content`, written by `REVISE … EMBED`), optionally only for nodes of one type. The code is
+`memory/Hierarchies.java`, `memory/Clustering.java` and `memory/Router.java`.
+
+The build clusters the leaves with spherical k-means (cosine similarity, k-means++ seeding with a fixed seed, ten
+rounds) into at most `FANOUT` groups (default 16) and repeats inside each group until a group has at most `LEAVES`
+sections (default 64). A group k-means cannot split is divided evenly along one direction instead. Each region keeps
+its parent, level (0 for regions that hold sections), the number of sections under it and a centroid: the mean of the
+unit vectors under it, stored as a vector record of the region that is not part of the vector search index.
+
+`REFRESH HIERARCHY` brings a hierarchy up to date from the change feed. For every node whose sections, revisions or
+vectors changed since the hierarchy's generation it removes sections that are no longer current and inserts new ones:
+an insert follows the most similar centroid down to a level-0 region, a region over `LEAVES` sections or `FANOUT`
+children splits in two with 2-means, and the root splits into a new root. Emptied regions are removed and a root with
+one child is replaced by that child. Centroids on the changed paths are recomputed from their children. If the feed no
+longer covers the hierarchy's generation, it is rebuilt. A `CONTINUOUS` hierarchy is refreshed after every commit
+that touches sections or their vectors, and once when the database opens; `REBUILD HIERARCHY` rebuilds from scratch.
+
+Learned routing data comes from outside the database. `REFERENCE REGION r OF HIERARCHY h VECTORS (…)` stores up to 16
+reference vectors for a region; when a region has them, the router scores it by the best of them instead of its
+centroid. `CALIBRATE HIERARCHY h [TEMPERATURE t] [LEVEL l SCALE a SHIFT b] …` sets the softmax temperature (default
+0.1) and an affine calibration of scores per level, and increases the hierarchy's router version.
+
+### Routing
+
+`ROUTE query IN HIERARCHY h` expands regions best first by path probability. For each expanded region it scores the
+children by cosine similarity, applies the level's calibration, divides by the temperature and turns the scores into
+probabilities with a softmax. It keeps the smallest set of most probable children whose probabilities add up to
+`MASS` (default 0.9), at least `MIN` (1) and at most `MAX` (32). When the normalised entropy of the distribution is
+above `FALLBACK` (0.95), the router cannot tell the children apart and keeps `MAX` children instead. Expansion stops
+after `REGIONS` regions (256) or `DEPTH` levels (16). The sections of the level-0 regions it reached are ranked by
+cosine similarity; sections the user may not read are skipped.
+
+Every route reports regions scored, regions expanded, sections examined, the mean normalised entropy, the mean
+probability mass kept, and whether the fallback was used. With `RECALL` it also ranks every section of the hierarchy
+exactly and reports the share of the exact top results the route found. With `MASS 1.0` and enough `REGIONS`, a
+route examines every section and returns the exact answer.
+
+Hierarchies are kept on the main branch and belong to one tenant. Creating, rebuilding, dropping, calibrating and
+setting references needs an admin of the tenant; refreshing needs a writer; routing and listing need a reader.
+
 ## Fusion
 
 `Rrf.combine(lists)` in `retrieve/Rrf.java` fuses ranked lists by reciprocal rank: an item scores `1 / (60 + rank)`

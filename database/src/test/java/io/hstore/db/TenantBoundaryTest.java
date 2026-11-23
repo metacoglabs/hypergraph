@@ -30,6 +30,7 @@ class TenantBoundaryTest {
             entry("io/hstore/db/evidence/Provenance.java", "qualifier and evidence records filtered by their stamped tenant, written after the writer's checks"),
             entry("io/hstore/db/signal/Signals.java", "signals of an atom that Reader.visible or Writer.requireWritable accepted"),
             entry("io/hstore/db/temporal/StateBindings.java", "state of an atom that Reader.visible or Writer.requireWritable accepted"),
+            entry("io/hstore/db/memory/Hierarchies.java", "hierarchies, regions and leaves stamped with their tenant; routed leaves pass Reader.visible"),
             entry("io/hstore/db/hora/SwapSampler.java", "SAMPLE writes a new branch, for global admins only"),
             entry("io/hstore/db/temporal/Temporal.java", "DIFF over whole generations, for global admins only"),
             entry("io/hstore/db/temporal/BranchMerge.java", "branch merges, for global admins only"),

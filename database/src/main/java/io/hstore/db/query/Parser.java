@@ -219,6 +219,9 @@ public final class Parser {
             return new Statement.SetFormat(identifier().toLowerCase());
         }
         if (accept("DROP")) {
+            if (accept("HIERARCHY")) {
+                return new Statement.DropHierarchy(identifier());
+            }
             if (accept("USER")) {
                 return new Statement.DropUser(identifierOrString());
             }
@@ -229,6 +232,9 @@ public final class Parser {
             return new Statement.DropBranch(identifier());
         }
         if (accept("REFRESH")) {
+            if (accept("HIERARCHY")) {
+                return new Statement.RefreshHierarchy(identifier());
+            }
             expect("VIEW");
             return new Statement.RefreshView(identifier());
         }
@@ -418,6 +424,47 @@ public final class Parser {
         }
         if (accept("REVISE")) {
             return revise();
+        }
+        if (accept("REBUILD")) {
+            expect("HIERARCHY");
+            return new Statement.RebuildHierarchy(identifier());
+        }
+        if (accept("REGIONS")) {
+            expect("OF");
+            expect("HIERARCHY");
+            return new Statement.RegionsOf(identifier());
+        }
+        if (accept("CALIBRATE")) {
+            expect("HIERARCHY");
+            String name = identifier();
+            OptionalDouble temperature = accept("TEMPERATURE") ? OptionalDouble.of(number().doubleValue()) : OptionalDouble.empty();
+            Map<Integer, double[]> levels = new LinkedHashMap<>();
+            while (accept("LEVEL")) {
+                int level = (int) bounded(longValue(), 0, 7, "LEVEL");
+                expect("SCALE");
+                double scale = number().doubleValue();
+                expect("SHIFT");
+                levels.put(level, new double[]{scale, number().doubleValue()});
+            }
+            return new Statement.CalibrateHierarchy(name, temperature, levels);
+        }
+        if (accept("REFERENCE")) {
+            expect("REGION");
+            long region = longValue();
+            expect("OF");
+            expect("HIERARCHY");
+            String name = identifier();
+            expect("VECTORS");
+            expectSymbol("(");
+            List<float[]> vectors = new ArrayList<>();
+            do {
+                vectors.add(vector());
+            } while (acceptSymbol(","));
+            expectSymbol(")");
+            return new Statement.ReferenceRegion(region, name, vectors);
+        }
+        if (accept("ROUTE")) {
+            return route();
         }
         if (accept("SEARCH")) {
             expect("TEXT");
@@ -763,6 +810,9 @@ public final class Parser {
             return new Statement.Stats();
         }
         if (accept("SHOW")) {
+            if (accept("HIERARCHIES")) {
+                return new Statement.ShowHierarchies();
+            }
             if (accept("TYPES")) {
                 return new Statement.ShowTypes();
             }
@@ -794,6 +844,19 @@ public final class Parser {
     }
 
     private Statement create() {
+        if (accept("HIERARCHY")) {
+            String name = identifier();
+            expect("ON");
+            expect("MODEL");
+            String model = identifierOrString();
+            expect("VIEW");
+            String view = string();
+            Optional<String> type = accept("OF") ? Optional.of(identifierOrString()) : Optional.empty();
+            int fanout = accept("FANOUT") ? (int) bounded(longValue(), 2, 64, "FANOUT") : 16;
+            int capacity = accept("LEAVES") ? (int) bounded(longValue(), 2, 1024, "LEAVES") : 64;
+            boolean continuous = accept("CONTINUOUS");
+            return new Statement.CreateHierarchy(name, model, view, type, fanout, capacity, continuous);
+        }
         if (accept("TENANT")) {
             String name = identifier();
             return new Statement.CreateTenant(name, accept("QUOTA") ? quota() : Map.of());
@@ -958,6 +1021,69 @@ public final class Parser {
             }
         }
         return new Statement.Revise(document, markdown, validFrom, validTo, sources, note, embed, binding());
+    }
+
+    private Statement route() {
+        Optional<String> text = Optional.empty();
+        Optional<float[]> values = Optional.empty();
+        if (peek().kind() == Token.Kind.STRING) {
+            text = Optional.of(string());
+        } else {
+            values = Optional.of(vector());
+        }
+        expect("IN");
+        expect("HIERARCHY");
+        String name = identifier();
+        double mass = 0.9;
+        int min = 1;
+        int max = 32;
+        int depth = 16;
+        int regions = 256;
+        OptionalDouble temperature = OptionalDouble.empty();
+        double fallback = 0.95;
+        boolean recall = false;
+        int top = 10;
+        while (true) {
+            if (accept("MASS")) {
+                mass = number().doubleValue();
+                if (!(mass > 0 && mass <= 1)) {
+                    throw error("MASS must be greater than 0 and at most 1");
+                }
+            } else if (accept("MIN")) {
+                min = (int) bounded(longValue(), 1, 1024, "MIN");
+            } else if (accept("MAX")) {
+                max = (int) bounded(longValue(), 1, 1024, "MAX");
+            } else if (accept("DEPTH")) {
+                depth = (int) bounded(longValue(), 1, 64, "DEPTH");
+            } else if (accept("REGIONS")) {
+                regions = (int) bounded(longValue(), 1, 1_000_000, "REGIONS");
+            } else if (accept("TEMPERATURE")) {
+                double value = number().doubleValue();
+                if (!(value > 0 && value <= 100)) {
+                    throw error("TEMPERATURE must be greater than 0 and at most 100");
+                }
+                temperature = OptionalDouble.of(value);
+            } else if (accept("FALLBACK")) {
+                fallback = number().doubleValue();
+            } else if (accept("RECALL")) {
+                recall = true;
+            } else if (peek().is("TOP")) {
+                top = top(10);
+            } else {
+                break;
+            }
+        }
+        if (max < min) {
+            throw error("MAX must be at least MIN");
+        }
+        return new Statement.Route(text, values, name, mass, min, max, depth, regions, temperature, fallback, recall, top);
+    }
+
+    private long bounded(long value, long low, long high, String what) {
+        if (value < low || value > high) {
+            throw error(what + " must be between " + low + " and " + high);
+        }
+        return value;
     }
 
     private Statement nearestVectors() {

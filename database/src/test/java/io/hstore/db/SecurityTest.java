@@ -609,6 +609,50 @@ class SecurityTest {
     }
 
     @Test
+    void hierarchiesStayInsideTheTenant() {
+        admin.execute("CREATE USER carol PASSWORD 'c4rol-pass' TENANT acme ROLE admin");
+        String model = database.semantic().encoder().model();
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass");
+             Session carol = login("carol", "c4rol-pass"); Session auditor = login("auditor", "readonly")) {
+            alice.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
+                    REVISE $p MARKDOWN '# Visit
+                    zebra stripes
+                    # Plan
+                    rest
+                    ' EMBED;
+                    """);
+            bob.executeAll("""
+                    INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $b;
+                    REVISE $b MARKDOWN '# Visit
+                    zebra stripes
+                    ' EMBED;
+                    """);
+            long globexPatient = bob.variables().get("b");
+            assertThrows(HStoreException.class, () -> alice.execute("CREATE HIERARCHY h ON MODEL '" + model + "' VIEW 'content'"));
+            carol.execute("CREATE HIERARCHY h ON MODEL '" + model + "' VIEW 'content' LEAVES 2");
+            assertEquals("2", carol.execute("SHOW HIERARCHIES").rows().getFirst().get(4).render());
+            assertTrue(bob.execute("SHOW HIERARCHIES").rows().isEmpty());
+            assertThrows(HStoreException.class, () -> bob.execute("ROUTE 'zebra stripes' IN HIERARCHY h"));
+            assertThrows(HStoreException.class, () -> bob.execute("REFRESH HIERARCHY h"));
+            String rendered = alice.execute("ROUTE 'zebra stripes' IN HIERARCHY h MASS 1.0 TOP 10").rows().toString();
+            assertFalse(rendered.contains("@" + globexPatient + " "), rendered);
+            assertEquals(2, auditor.execute("ROUTE 'zebra stripes' IN HIERARCHY h MASS 1.0 TOP 10").rows().size());
+            assertThrows(HStoreException.class, () -> auditor.execute("REFRESH HIERARCHY h"));
+            alice.execute("REFRESH HIERARCHY h");
+            String region = carol.execute("REGIONS OF HIERARCHY h").rows().getFirst().getFirst().render();
+            assertThrows(HStoreException.class, () -> bob.execute("REGIONS OF HIERARCHY h"));
+            assertThrows(HStoreException.class, () -> alice.execute("DROP HIERARCHY h"));
+            admin.execute("CREATE USER dave PASSWORD 'd4ve-pass' TENANT globex ROLE admin");
+            try (Session dave = login("dave", "d4ve-pass")) {
+                dave.execute("CREATE HIERARCHY h ON MODEL '" + model + "' VIEW 'content'");
+                assertThrows(HStoreException.class, () -> dave.execute("REFERENCE REGION " + region + " OF HIERARCHY h VECTORS ([" + "0.1, ".repeat(255) + "0.1])"));
+                assertEquals("1", dave.execute("SHOW HIERARCHIES").rows().getFirst().get(4).render());
+            }
+        }
+    }
+
+    @Test
     void expansionValuesIgnoreOtherTenantsMembers() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("""

@@ -280,6 +280,10 @@ public final class SemanticPlane implements AutoCloseable {
         vectorIndexes.computeIfAbsent(record.model(), _ -> new HnswIndex(16, 128)).upsert(record.id(), vector);
     }
 
+    public float[] vectorOf(VectorRecord record) {
+        return Embedding.decode(payloads.read(record.payload()));
+    }
+
     public List<VectorRecord.Hit> nearestVectors(View view, int model, float[] query, int k, Consistency consistency,
                                                  Predicate<VectorRecord> admit, Budget.Meter meter) {
         Comparator<VectorRecord.Hit> order = Comparator.comparingDouble(VectorRecord.Hit::distance).thenComparingLong(VectorRecord.Hit::vector);

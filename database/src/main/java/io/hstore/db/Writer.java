@@ -6,6 +6,7 @@ package io.hstore.db;
 import io.hstore.db.evidence.Provenance;
 import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.Erasure;
+import io.hstore.db.memory.HierarchySlots;
 import io.hstore.db.memory.MemorySlots;
 import io.hstore.db.memory.Revision;
 import io.hstore.db.memory.RevisionSpec;
@@ -408,6 +409,37 @@ public final class Writer extends Reader {
 
     private void refund(VectorRecord record) {
         Security.charge(txn, tenant(), new Usage(0, 0, -VectorRecord.bytes(record)));
+    }
+
+    public VectorRecord regionVector(long region, String view, int model, float[] vector) {
+        principal().requireWrite();
+        requireRegion(region);
+        VectorRecord.requireView(view);
+        Embedding.requireValid(vector);
+        return storeVector(region, view, model, 1, vector, false);
+    }
+
+    public void regionVectors(String view, int model, Map<Long, float[]> vectors) {
+        principal().requireWrite();
+        VectorRecord.requireView(view);
+        vectors.keySet().forEach(this::requireRegion);
+        vectors.values().forEach(Embedding::requireValid);
+        database.chargePayload(tenant(), vectors.values().stream().mapToLong(vector -> 4L * vector.length).sum());
+        vectors.forEach((region, vector) -> storeVector(region, view, model, 1, vector, false, false));
+    }
+
+    public void dropRegionVector(long region, String view) {
+        requireRegion(region);
+        VectorRecord.ofOwner(txn, region).stream().filter(record -> view == null || record.view().equals(view)).forEach(record -> {
+            refund(record);
+            txn.delete(VectorRecord.VECTORS, record.id());
+        });
+    }
+
+    private void requireRegion(long region) {
+        if (txn.get(HierarchySlots.REGIONS, region).filter(found -> found.tenant() == tenant()).isEmpty()) {
+            throw HStoreException.invalid("region " + region + " does not exist");
+        }
     }
 
     public VectorRecord vector(long owner, String view, String text) {

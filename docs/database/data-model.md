@@ -363,13 +363,20 @@ slots use 1 to 8.
 | 61 | `owner-vectors` | derived | 122/123 | `memory/VectorRecord.java` |
 | 62 | `text-index` | derived | 117/118 | `memory/TextIndex.java` |
 | 63 | `text-stats` | derived | 119 | `memory/TextIndex.java` |
+| 64 | `hierarchies` | primary | 131 | `memory/HierarchySlots.java` |
+| 65 | `regions` | primary | 130 | `memory/HierarchySlots.java` |
+| 66 | `region-children` | derived | 124/125 | `memory/HierarchySlots.java` |
+| 68 | `leaf-regions` | primary | 132 | `memory/HierarchySlots.java` |
+| 69 | `document-leaves` | derived | 126/127 | `memory/HierarchySlots.java` |
+| 70 | `hierarchy-regions` | derived | 128/129 | `memory/HierarchySlots.java` |
+| 71 | `revision-sections` | derived | 133/134 | `memory/TextIndex.java` |
 | 67 | `erasures` | primary | 116 | `memory/MemorySlots.java` |
 | 75 | `grants` | primary | 110 | `security/Access.java` |
 | 76 | `user-options` | primary | 111 | `security/Access.java` |
 | 77 | `tenant-options` | primary | 112 | `security/Access.java` |
 
 Derived slots are rebuilt by derivations (`PropertyIndexing`, `Signals.INDEXING`, `ValidityIndexing`, `SignatureIndexing`, `NestingIndexing`,
-`TextIndex.indexing`, `VectorRecord.INDEXING`) inside the writing
+`TextIndex.indexing`, `VectorRecord.INDEXING`, `HierarchySlots.INDEXING`) inside the writing
 transaction; they are never written directly by API calls.
 
 ## Java API

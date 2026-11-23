@@ -352,6 +352,35 @@ public final class Ast {
         record VectorsOf(Ref owner) implements Statement {
         }
 
+        record CreateHierarchy(String name, String model, String view, Optional<String> type, int fanout, int capacity, boolean continuous)
+                implements Statement {
+        }
+
+        record RefreshHierarchy(String name) implements Statement {
+        }
+
+        record RebuildHierarchy(String name) implements Statement {
+        }
+
+        record DropHierarchy(String name) implements Statement {
+        }
+
+        record ShowHierarchies() implements Statement {
+        }
+
+        record RegionsOf(String hierarchy) implements Statement {
+        }
+
+        record CalibrateHierarchy(String name, OptionalDouble temperature, Map<Integer, double[]> levels) implements Statement {
+        }
+
+        record ReferenceRegion(long region, String hierarchy, List<float[]> vectors) implements Statement {
+        }
+
+        record Route(Optional<String> text, Optional<float[]> vector, String hierarchy, double mass, int min, int max, int depth, int regions,
+                     OptionalDouble temperature, double fallback, boolean recall, int top) implements Statement {
+        }
+
         record NearestVectors(Optional<String> text, Optional<float[]> vector, Optional<String> model, Optional<String> view, boolean history, int top)
                 implements Statement {
         }
