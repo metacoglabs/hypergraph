@@ -83,6 +83,7 @@ Values and their storage are described in [data model](data-model.md#values).
 | [Queries](#queries) | `MATCH`, `EXPLAIN`, `FUSE`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `MOTIFS`, `MOTIF`, `SIMILAR TO`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
+| [Memory documents](#memory-documents) | `REVISE`, `REVISIONS OF`, `REVISION OF`, `SECTIONS OF`, `SECTION`, `PURGE` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
 | [Transactions, branches, time](#transactions-branches-and-time-travel) | `BEGIN`, `COMMIT`, `ROLLBACK`, `USE BRANCH`, `USE MAIN`, `CREATE BRANCH`, `DROP BRANCH`, `MERGE BRANCH`, `BRANCH DELTA`, `BRANCH SURVIVORS`, `BRANCH AFTER`, `COMPARE BRANCH`, `NEAREST BRANCH`, `DIFF`, `AT GENERATION`, `AS OF`, `HISTORY`, `SHOW BRANCHES` |
 | [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `DROP VIEW`, `VIEW`, `SHOW VIEWS` |
@@ -239,7 +240,9 @@ DOCUMENT @Patient:'asha-rao' '{"insurance": {"plan": "gold", "id": 77}}';
 delete = "DELETE" ref ;
 ```
 
-Removes the catalog record, properties and embedding of the atom.
+Removes the catalog record, properties and embedding of the atom. An atom that has revisions is refused; use
+[`PURGE`](#memory-documents) to remove it together with its revisions and sections. Revisions and sections themselves
+cannot be deleted or changed.
 
 ```sql
 INSERT NODE Lab 'tmp' {name: 'Temp'} AS $t;
@@ -772,6 +775,50 @@ EMBED @Drug:'warfarin' TEXT 'anticoagulant blood thinner that prevents clots';
 EMBED @Drug:'sertraline' VECTOR [0.1, 0.9, 0.2] MODEL 'custom-3d';
 -- embedded 3-dimensional vector with custom-3d
 MATCH NODE d:Drug WHERE d SIMILAR TO 'blood clot prevention' TOP 2 RETURN d.name;
+```
+
+## Memory documents
+
+```ebnf
+revise       = "REVISE" ref "MARKDOWN" string { revise_option } [ "AS" variable ] ;
+revise_option = "VALID" "FROM" instant | "VALID" "TO" instant
+              | "SOURCES" "(" ref { "," ref } ")" | "NOTE" string ;
+revisions    = "REVISIONS" "OF" ref ;
+revision_of  = "REVISION" "OF" ref [ "NUMBER" integer | [ "VALID" "AT" instant ] [ "RECORDED" "AT" instant ] ]
+               [ "AS" variable ] ;
+sections_of  = "SECTIONS" "OF" ref ;
+section      = "SECTION" ref ;
+purge        = "PURGE" ref ;
+instant      = integer | string ;
+```
+
+Any node can hold Markdown revisions. `REVISE` stores a new immutable revision, numbered from 1, splits it into
+sections at its headings and returns `revision, number, sections, recorded_at, valid_from`. A revision is valid from
+`VALID FROM` (default: the time it was recorded) until `VALID TO` (default: open). `SOURCES` names up to 16 evidence
+records or readable atoms the revision came from, and `NOTE` is up to 200 characters.
+
+`REVISIONS OF` lists every revision of a node. `REVISION OF` returns one revision with its Markdown: the latest by
+default, the given `NUMBER`, the revision in force at `VALID AT` as far as the database knew at `RECORDED AT`, or with
+only `RECORDED AT`, the latest revision recorded by then. Instants are milliseconds or ISO-8601 strings.
+
+`SECTIONS OF` takes a revision, or a node for its latest revision, and lists `section, ordinal, level, path, anchor,
+bytes`. `SECTION` returns one section with its text. Sections are atoms of the system type `$Section`, so hyperedges
+can name them as members; revisions are atoms of `$Revision`. Both are visible exactly when their node is.
+
+`PURGE` removes a node with all its revisions and sections, deletes hyperedges left with no members, and erases the
+stored Markdown and the node's large property values from the payload files. It runs on the main branch only.
+See [memory](memory.md).
+
+```sql
+INSERT NODE Note 'claimsbay' AS $n;
+REVISE $n MARKDOWN '# ClaimsBay
+## Decision
+Move claims storage to HStore.
+' SOURCES ($meeting) NOTE 'after the 12 May review' AS $r;
+SECTIONS OF $r;
+REVISION OF $n VALID AT '2026-06-01' RECORDED AT '2026-06-15';
+PURGE $n;
+-- purged @131: 1 revisions, 2 sections
 ```
 
 ## Evidence, state and signals

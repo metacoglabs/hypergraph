@@ -75,6 +75,35 @@ class PermissionsTest {
     }
 
     @Test
+    void revisionsAndSectionsFollowTheirDocumentsType() {
+        admin.executeAll("""
+                REVISE $p MARKDOWN '# Chart
+                A-1 history
+                ' AS $r;
+                REVISE $d MARKDOWN '# Bio
+                Ada
+                ' AS $s;
+                """);
+        String chart = cell(admin.execute("SECTIONS OF $r")).split(" ")[0];
+        String bio = cell(admin.execute("SECTIONS OF $s")).split(" ")[0];
+        try (Session clerk = login("clerk", "clerk-password")) {
+            assertThrows(HStoreException.class, () -> clerk.execute("REVISIONS OF @" + id("p")));
+            assertThrows(HStoreException.class, () -> clerk.execute("SECTION " + chart));
+            admin.execute("GRANT READ ON TYPE Patient TO clerk");
+            assertEquals(1, clerk.execute("REVISIONS OF @" + id("p")).rows().size());
+            assertEquals("A-1 history\n", clerk.execute("SECTION " + chart).rows().getFirst().get(5).render().substring(8));
+            assertThrows(HStoreException.class, () -> clerk.execute("SECTION " + bio));
+            assertThrows(HStoreException.class, () -> clerk.execute("SECTIONS OF @" + id("s")));
+            assertEquals("1", cell(clerk.execute("MATCH NODE n RETURN count(*)")));
+            assertThrows(HStoreException.class, () -> clerk.execute("REVISE @" + id("p") + " MARKDOWN 'x'"));
+            admin.execute("GRANT WRITE ON TYPE Patient TO clerk");
+            clerk.execute("REVISE @" + id("p") + " MARKDOWN 'x'");
+            assertEquals(2, clerk.execute("REVISIONS OF @" + id("p")).rows().size());
+            assertThrows(HStoreException.class, () -> clerk.execute("PURGE @" + id("d")));
+        }
+    }
+
+    @Test
     void roleNoneSeesOnlyGrantedTypes() {
         try (Session clerk = login("clerk", "clerk-password")) {
             String denied = assertThrows(HStoreException.InvalidSchema.class, () -> clerk.execute("MATCH NODE n:Patient RETURN n")).getMessage();

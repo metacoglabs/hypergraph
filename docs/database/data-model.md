@@ -331,8 +331,8 @@ transaction, so symbols survive the caller's rollback; this is harmless because 
 
 ## Extension slot map
 
-`HypergraphDatabase.extensionSlots()` registers the database slots with the engine (ids ≥ 32,
-`EngineSlots.FIRST_EXTENSION_SLOT`):
+`HypergraphDatabase.extensionSlots()` registers the database slots with the engine. Their ids start at 32; the engine's own
+slots use 1 to 8.
 
 | Slot | Name | Kind | Schema id | Defined in |
 |---|---|---|---|---|
@@ -356,6 +356,13 @@ transaction, so symbols survive the caller's rollback; this is harmless because 
 | 49 | `signature-names` | derived | 87 | `retrieve/SignatureSlots.java` |
 | 53 | `validity-endpoints` | derived | 96/97/98 | `temporal/ValiditySlots.java` |
 | 56 | `child-edges` | derived | 104/105 | `hora/NestingSlots.java` |
+| 57 | `revisions` | primary | 113 | `memory/MemorySlots.java` |
+| 58 | `sections` | primary | 114 | `memory/MemorySlots.java` |
+| 59 | `documents` | primary | 115 | `memory/MemorySlots.java` |
+| 67 | `erasures` | primary | 116 | `memory/MemorySlots.java` |
+| 75 | `grants` | primary | 110 | `security/Access.java` |
+| 76 | `user-options` | primary | 111 | `security/Access.java` |
+| 77 | `tenant-options` | primary | 112 | `security/Access.java` |
 
 Derived slots are rebuilt by derivations (`PropertyIndexing`, `Signals.INDEXING`, `ValidityIndexing`, `SignatureIndexing`, `NestingIndexing`) inside the writing
 transaction; they are never written directly by API calls.

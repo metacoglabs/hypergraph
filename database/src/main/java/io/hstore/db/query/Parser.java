@@ -42,6 +42,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.function.Supplier;
 
@@ -404,6 +405,27 @@ public final class Parser {
         }
         if (accept("MOTIF")) {
             return motif();
+        }
+        if (accept("REVISE")) {
+            return revise();
+        }
+        if (accept("REVISIONS")) {
+            expect("OF");
+            return new Statement.Revisions(ref());
+        }
+        if (accept("REVISION")) {
+            expect("OF");
+            return revisionOf();
+        }
+        if (accept("SECTIONS")) {
+            expect("OF");
+            return new Statement.SectionsOf(ref());
+        }
+        if (accept("SECTION")) {
+            return new Statement.ShowSection(ref());
+        }
+        if (accept("PURGE")) {
+            return new Statement.Purge(ref());
         }
         if (accept("SIMILAR")) {
             return similar();
@@ -873,6 +895,61 @@ public final class Parser {
             expectSymbol(")");
         }
         return new Statement.InsertEdge(type, properties, members, binding());
+    }
+
+    private Statement revise() {
+        Ref document = ref();
+        expect("MARKDOWN");
+        String markdown = string();
+        OptionalLong validFrom = OptionalLong.empty();
+        long validTo = Long.MAX_VALUE;
+        List<Ref> sources = new ArrayList<>();
+        String note = "";
+        while (true) {
+            if (accept("VALID")) {
+                if (accept("FROM")) {
+                    validFrom = OptionalLong.of(instant());
+                } else {
+                    expect("TO");
+                    validTo = instant();
+                }
+            } else if (accept("SOURCES")) {
+                expectSymbol("(");
+                do {
+                    sources.add(ref());
+                } while (acceptSymbol(","));
+                expectSymbol(")");
+            } else if (accept("NOTE")) {
+                note = string();
+            } else {
+                break;
+            }
+        }
+        return new Statement.Revise(document, markdown, validFrom, validTo, sources, note, binding());
+    }
+
+    private Statement revisionOf() {
+        Ref document = ref();
+        OptionalInt number = OptionalInt.empty();
+        OptionalLong validAt = OptionalLong.empty();
+        OptionalLong recordedAt = OptionalLong.empty();
+        if (accept("NUMBER")) {
+            long value = longValue();
+            if (value < 1 || value > Integer.MAX_VALUE) {
+                throw error("revision numbers start at 1");
+            }
+            number = OptionalInt.of((int) value);
+        } else {
+            if (accept("VALID")) {
+                expect("AT");
+                validAt = OptionalLong.of(instant());
+            }
+            if (accept("RECORDED")) {
+                expect("AT");
+                recordedAt = OptionalLong.of(instant());
+            }
+        }
+        return new Statement.RevisionOf(document, number, validAt, recordedAt, binding());
     }
 
     private Statement qualify() {

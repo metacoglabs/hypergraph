@@ -5,6 +5,10 @@ package io.hstore.db;
 
 import io.hstore.db.hora.Nesting;
 import io.hstore.db.hora.NestingSlots;
+import io.hstore.db.memory.Documents;
+import io.hstore.db.memory.MemorySlots;
+import io.hstore.db.memory.Revision;
+import io.hstore.db.memory.Section;
 import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertyIndex;
@@ -36,6 +40,7 @@ import io.hstore.engine.txn.IncidentEdge;
 import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.View;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -94,7 +99,15 @@ public sealed class Reader permits Writer {
     }
 
     public boolean admits(AtomRecord record) {
-        return record.tenant() == tenant() && readable(record.type());
+        if (record.tenant() != tenant()) {
+            return false;
+        }
+        Documents.Types memory = database.memoryTypes();
+        if (memory.contains(record.type())) {
+            return Documents.owner(record).stream().mapToObj(view::atom).flatMap(Optional::stream)
+                    .anyMatch(owner -> !memory.contains(owner.type()) && admits(owner));
+        }
+        return readable(record.type());
     }
 
     public boolean readable(int type) {
@@ -129,6 +142,53 @@ public sealed class Reader permits Writer {
 
     public boolean owns(long atom) {
         return onlyDefaultTenant() || visible(atom);
+    }
+
+    public List<Revision> revisions(long document) {
+        return visible(document) ? Documents.revisions(view, database.memoryTypes(), tenant(), document) : List.of();
+    }
+
+    public Optional<Revision> revision(long id) {
+        return view.get(MemorySlots.REVISIONS, id).filter(found -> found.tenant() == tenant() && visible(found.document()));
+    }
+
+    public Optional<Revision> revision(long document, int number) {
+        return visible(document) ? Documents.revision(view, database.memoryTypes(), tenant(), document, number) : Optional.empty();
+    }
+
+    public Optional<Revision> latestRevision(long document) {
+        return visible(document)
+                ? Documents.head(view, tenant(), document).flatMap(head -> view.get(MemorySlots.REVISIONS, head.latest()))
+                : Optional.empty();
+    }
+
+    public Optional<Revision> documentAt(long document, long validTime, long recordedAsOf) {
+        return Documents.at(revisions(document), validTime, recordedAsOf);
+    }
+
+    public List<Section> sections(long revision) {
+        return revision(revision).map(found -> Documents.sections(view, database.memoryTypes(), tenant(), found)).orElse(List.of());
+    }
+
+    public Optional<Section> section(long id) {
+        return view.get(MemorySlots.SECTIONS, id).filter(found -> found.tenant() == tenant() && visible(found.document()));
+    }
+
+    public List<String> headingPath(Section section) {
+        return section(section.id()).map(found -> Documents.path(view, database.memoryTypes(), tenant(), found)).orElse(List.of());
+    }
+
+    public String markdown(Revision revision) {
+        Revision stored = revision(revision.id()).orElseThrow(() -> HStoreException.invalid("revision " + revision.id() + " does not exist"));
+        return database.payloads().readText(stored.payload());
+    }
+
+    public String sectionText(Section section) {
+        Section stored = section(section.id()).orElseThrow(() -> HStoreException.invalid("section " + section.id() + " does not exist"));
+        Revision revision = view.get(MemorySlots.REVISIONS, stored.revision())
+                .orElseThrow(() -> HStoreException.invalid("section " + section.id() + " has no revision"));
+        byte[] bytes = database.payloads().read(revision.payload());
+        return new String(bytes, stored.start(), stored.end() - stored.start(), StandardCharsets.UTF_8);
     }
 
     public View engineView() {

@@ -5,6 +5,10 @@ package io.hstore.db.temporal;
 
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.Reader;
+import io.hstore.db.memory.DocumentHead;
+import io.hstore.db.memory.Documents;
+import io.hstore.db.memory.MemorySlots;
+import io.hstore.db.memory.Revision;
 import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertySlots;
@@ -46,7 +50,8 @@ public final class BranchMerge {
                           long propertyChanges, List<Conflict> conflicts) {
     }
 
-    private record Side(List<Temporal.Delta> topology, Map<Long, Map<Integer, Optional<Property>>> properties) {
+    private record Side(List<Temporal.Delta> topology, Map<Long, Map<Integer, Optional<Property>>> properties,
+                        Map<Long, Optional<DocumentHead>> documents) {
 
         Set<Long> deleted() {
             return topology.stream().filter(delta -> delta instanceof Temporal.Delta.AtomDeleted)
@@ -65,6 +70,7 @@ public final class BranchMerge {
     }
 
     private static final int REPORTED_CONFLICTS = 20;
+    private static final String REVISIONS = "revisions";
 
     private BranchMerge() {
     }
@@ -96,7 +102,9 @@ public final class BranchMerge {
                 List<Conflict> conflicts = conflicts(changes, side(database.reader(base), writer, base, writer.engineView()));
                 requireMergeable(branch, conflicts, policy);
                 Set<Conflict> skipped = policy == Policy.TARGET ? new HashSet<>(conflicts) : Set.of();
-                return apply(writer.transaction(), database.reader(head), changes, skipped, source, target, conflicts);
+                Outcome applied = apply(writer.transaction(), database.reader(head), changes, skipped, source, target, conflicts);
+                copyRevisions(writer.transaction(), head, database.memoryTypes(), changes.documents());
+                return applied;
             }
         });
         database.engine().markMerged(source);
@@ -104,6 +112,12 @@ public final class BranchMerge {
     }
 
     private static void requireMergeable(Branch branch, List<Conflict> conflicts, Policy policy) {
+        List<Conflict> revised = conflicts.stream().filter(conflict -> conflict.kind().equals(REVISIONS)).toList();
+        if (!revised.isEmpty()) {
+            throw HStoreException.conflict("merging " + branch.name() + " is refused: both sides added revisions to "
+                    + revised.stream().limit(REPORTED_CONFLICTS).map(conflict -> "@" + conflict.atom()).collect(Collectors.joining(", "))
+                    + "; append those revisions on one side only");
+        }
         if (!conflicts.isEmpty() && policy == Policy.FAIL) {
             throw HStoreException.conflict("merging " + branch.name() + " conflicts on " + conflicts.size() + " keys: "
                     + conflicts.stream().limit(REPORTED_CONFLICTS).map(Conflict::toString).collect(Collectors.joining(", ")));
@@ -134,7 +148,14 @@ public final class BranchMerge {
                 properties.put(delta.key(), changed);
             }
         });
-        return new Side(topology, properties);
+        Map<Long, Optional<DocumentHead>> documents = new HashMap<>();
+        TreeDiff.diff(base.scan(MemorySlots.DOCUMENTS), head.scan(MemorySlots.DOCUMENTS)).forEach(delta -> documents.put(delta.key(),
+                switch (delta) {
+                    case TreeDiff.Delta.Added<DocumentHead>(long _, DocumentHead added) -> Optional.of(added);
+                    case TreeDiff.Delta.Removed<DocumentHead> _ -> Optional.<DocumentHead>empty();
+                    case TreeDiff.Delta.Changed<DocumentHead>(long _, DocumentHead _, DocumentHead now) -> Optional.of(now);
+                }));
+        return new Side(topology, properties, documents);
     }
 
     private static List<Conflict> conflicts(Side incoming, Side local) {
@@ -163,6 +184,8 @@ public final class BranchMerge {
                 }
             }
         }
+        incoming.documents().keySet().stream().filter(document -> local.documents().containsKey(document) || localDeleted.contains(document))
+                .sorted().forEach(document -> conflicts.add(new Conflict(REVISIONS, document, 0)));
         incoming.properties().forEach((owner, keys) -> {
             Map<Integer, Optional<Property>> theirs = local.properties().getOrDefault(owner, Map.of());
             keys.forEach((key, value) -> {
@@ -175,6 +198,19 @@ public final class BranchMerge {
             }
         });
         return conflicts;
+    }
+
+    private static void copyRevisions(Transaction txn, View head, Documents.Types types, Map<Long, Optional<DocumentHead>> documents) {
+        documents.forEach((document, state) -> state.ifPresent(found -> {
+            for (Revision revision : Documents.revisions(head, types, found.tenant(), document)) {
+                if (txn.get(MemorySlots.REVISIONS, revision.id()).isEmpty()) {
+                    txn.put(MemorySlots.REVISIONS, revision.id(), revision);
+                    Documents.sections(head, types, found.tenant(), revision)
+                            .forEach(section -> txn.put(MemorySlots.SECTIONS, section.id(), section));
+                }
+            }
+            txn.put(MemorySlots.DOCUMENTS, document, found);
+        }));
     }
 
     private static int phase(Temporal.Delta delta) {

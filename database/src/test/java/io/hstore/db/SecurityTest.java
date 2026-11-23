@@ -546,6 +546,44 @@ class SecurityTest {
     }
 
     @Test
+    void documentsStayInsideTheTenant() {
+        try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass");
+             Session auditor = login("auditor", "readonly")) {
+            alice.executeAll("""
+                    INSERT NODE Patient 'p1' {mrn: 'A-1'} AS $p;
+                    REVISE $p MARKDOWN '# Visit
+                    notes
+                    ' AS $r;
+                    """);
+            bob.executeAll("""
+                    INSERT NODE Patient 'b1' {mrn: 'B-1'} AS $b;
+                    INSERT EDGE Encounter MEMBERS ($b AS patient) AS $e;
+                    """);
+            long patient = alice.variables().get("p");
+            long revision = alice.variables().get("r");
+            long section = Long.parseLong(cell(alice.execute("SECTIONS OF $r")).split(" ")[0].substring(1));
+            long bobEdge = bob.variables().get("e");
+            for (String probe : List.of("REVISIONS OF @" + patient, "REVISION OF @" + patient, "SECTIONS OF @" + revision, "SECTION @" + section,
+                    "REVISE @" + patient + " MARKDOWN 'x'", "PURGE @" + patient, "INSERT EDGE Encounter MEMBERS (@" + section + " AS patient)",
+                    "REVISE $b MARKDOWN 'x' SOURCES (@" + patient + ")")) {
+                assertThrows(HStoreException.class, () -> bob.execute(probe), probe);
+            }
+            database.write(writer -> {
+                writer.transaction().upsert(bobEdge, section, _ -> Incidence.of(section));
+                return null;
+            });
+            assertFalse(bob.execute("MEMBERS OF $e").rows().toString().contains("@" + section), "planted member leaked");
+            assertEquals(1, auditor.execute("REVISIONS OF @" + patient).rows().size());
+            assertThrows(HStoreException.class, () -> auditor.execute("REVISE @" + patient + " MARKDOWN 'x'"));
+            assertThrows(HStoreException.class, () -> auditor.execute("PURGE @" + patient));
+            assertThrows(HStoreException.class, () -> alice.execute("REVISE $p MARKDOWN '# A\n# B\n# C\n'"));
+            assertEquals(1, alice.execute("REVISIONS OF $p").rows().size());
+            alice.execute("PURGE $p");
+            alice.execute("INSERT NODE Patient 'p2' {mrn: 'A-2'} AS $q");
+        }
+    }
+
+    @Test
     void expansionValuesIgnoreOtherTenantsMembers() {
         try (Session alice = login("alice", "s3cret-pass"); Session bob = login("bob", "hunter2-pass")) {
             alice.executeAll("""

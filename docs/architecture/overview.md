@@ -248,7 +248,7 @@ semantic/state                           53 B  persisted HNSW index state (datab
 
 | Path | Owner | Format |
 |---|---|---|
-| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=9` (reverse-index postings with validity and the retrieval indexes in slots 47 to 49, 53 and 56, leaf records framed by length, commits logged as key changes and tree pages written at checkpoints, page numbers resolved through a page directory, reference counts per page, small member trees inline in their edge record) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
+| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=10` (memory documents in slots 57 to 59 and 67, reverse-index postings with validity and the retrieval indexes in slots 47 to 49, 53 and 56, leaf records framed by length, commits logged as key changes and tree pages written at checkpoints, page numbers resolved through a page directory, reference counts per page, small member trees inline in their edge record) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
 | `LOCK` | `StorageEngine.open` | An exclusive OS file lock. A second process gets `database ... is opened by another process`. |
 | `catalog/generations/%016x.cat` | `CatalogStore.publish` | `int magic 0x54414348`, `int crc32c(payload)`, `long length`, then the `CatalogImage` payload. Written to `*.tmp`, fsynced, atomically renamed, and the directory fsynced. The three newest files are kept. |
 | `catalog/manifest` | `CatalogStore` | The file name of the latest `.cat`, written durably the same way. |

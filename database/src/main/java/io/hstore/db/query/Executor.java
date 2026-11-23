@@ -22,6 +22,10 @@ import io.hstore.db.hora.Hora;
 import io.hstore.db.hora.Pattern;
 import io.hstore.db.hora.PatternMatcher;
 import io.hstore.db.hora.SwapSampler;
+import io.hstore.db.memory.Documents;
+import io.hstore.db.memory.Revision;
+import io.hstore.db.memory.RevisionSpec;
+import io.hstore.db.memory.Section;
 import io.hstore.db.query.Ast.Expr;
 import io.hstore.db.query.Ast.MemberClause;
 import io.hstore.db.query.Ast.Statement;
@@ -299,6 +303,25 @@ final class Executor {
             case Statement.BindState state -> write(writer -> {
                 StateBindings.bind(writer, session.resolve(writer, state.atom()), state.schema(), state.value(), state.validity());
                 return QueryResult.message("state bound");
+            });
+            case Statement.Revise revise -> write(writer -> {
+                long document = session.resolve(writer, revise.document());
+                List<Long> sources = revise.sources().stream().map(ref -> session.resolve(writer, ref)).toList();
+                Revision revision = writer.appendRevision(document, revise.markdown(),
+                        new RevisionSpec(revise.validFrom(), revise.validTo(), sources, revise.note()));
+                revise.bind().ifPresent(name -> session.bind(name, revision.id()));
+                return table(List.of("revision", "number", "sections", "recorded_at", "valid_from"), Stream.of(List.of(atomCell(writer, revision.id()),
+                        QueryResult.number(revision.number()), QueryResult.number(revision.sections()), instant(revision.recordedAt()),
+                        instant(revision.validFrom()))));
+            });
+            case Statement.Revisions(Ast.Ref document) -> read(reader -> revisions(reader, session.resolve(reader, document)));
+            case Statement.RevisionOf of -> read(reader -> revisionOf(reader, of));
+            case Statement.SectionsOf(Ast.Ref target) -> read(reader -> sectionsOf(reader, session.resolve(reader, target)));
+            case Statement.ShowSection(Ast.Ref ref) -> read(reader -> showSection(reader, session.resolve(reader, ref)));
+            case Statement.Purge(Ast.Ref document) -> write(writer -> {
+                long id = session.resolve(writer, document);
+                Documents.Purged purged = writer.purge(id);
+                return QueryResult.message("purged @" + id + ": " + purged.revisions() + " revisions, " + purged.sections() + " sections");
             });
             case Statement.Delete(Ast.Ref atom) -> write(writer -> {
                 long id = session.resolve(writer, atom);
@@ -1649,6 +1672,58 @@ final class Executor {
 
     private QueryResult memberList(Reader reader, LongStream members) {
         return table(List.of("member"), members.mapToObj(member -> List.of(atomCell(reader, member))));
+    }
+
+    private static Cell instant(long value) {
+        return value == Long.MAX_VALUE || value == Long.MIN_VALUE ? QueryResult.scalar(new Value.Null()) : QueryResult.scalar(new Value.Int(value));
+    }
+
+    private QueryResult revisions(Reader reader, long document) {
+        reader.require(document);
+        return table(List.of("number", "revision", "recorded_at", "valid_from", "valid_to", "bytes", "sections", "author", "note", "sources"),
+                reader.revisions(document).stream().map(revision -> List.of(QueryResult.number(revision.number()), atomCell(reader, revision.id()),
+                        instant(revision.recordedAt()), instant(revision.validFrom()), instant(revision.validTo()),
+                        QueryResult.number(revision.length()), QueryResult.number(revision.sections()), QueryResult.text(revision.author()),
+                        QueryResult.text(revision.note()),
+                        (Cell) new Cell.Items(revision.sources().stream().map(source -> atomCell(reader, source)).toList()))));
+    }
+
+    private QueryResult revisionOf(Reader reader, Statement.RevisionOf of) {
+        long document = session.resolve(reader, of.document());
+        reader.require(document);
+        Optional<Revision> found;
+        if (of.number().isPresent()) {
+            found = reader.revision(document, of.number().getAsInt());
+        } else if (of.validAt().isPresent()) {
+            found = reader.documentAt(document, of.validAt().getAsLong(), of.recordedAt().orElse(Long.MAX_VALUE));
+        } else if (of.recordedAt().isPresent()) {
+            long recorded = of.recordedAt().getAsLong();
+            found = reader.revisions(document).stream().filter(revision -> revision.recordedAt() <= recorded).reduce((first, second) -> second);
+        } else {
+            found = reader.latestRevision(document);
+        }
+        found.ifPresent(revision -> of.bind().ifPresent(name -> session.bind(name, revision.id())));
+        return table(List.of("revision", "number", "valid_from", "valid_to", "recorded_at", "markdown"), found.stream()
+                .map(revision -> List.of(atomCell(reader, revision.id()), QueryResult.number(revision.number()), instant(revision.validFrom()),
+                        instant(revision.validTo()), instant(revision.recordedAt()), QueryResult.text(reader.markdown(revision)))));
+    }
+
+    private QueryResult sectionsOf(Reader reader, long target) {
+        reader.require(target);
+        Optional<Revision> revision = reader.revision(target).or(() -> reader.latestRevision(target));
+        List<Section> sections = revision.map(found -> reader.sections(found.id())).orElse(List.of());
+        return table(List.of("section", "ordinal", "level", "path", "anchor", "bytes"), sections.stream()
+                .map(section -> List.of(atomCell(reader, section.id()), QueryResult.number(section.ordinal()), QueryResult.number(section.level()),
+                        QueryResult.text(String.join(" / ", reader.headingPath(section))), QueryResult.text(section.anchor()),
+                        QueryResult.number(section.end() - section.start()))));
+    }
+
+    private QueryResult showSection(Reader reader, long id) {
+        Section section = reader.section(id).orElseThrow(() -> HStoreException.invalid("@" + id + " is not a section you can read"));
+        return table(List.of("section", "document", "revision", "path", "anchor", "text"), Stream.of(List.of(atomCell(reader, section.id()),
+                atomCell(reader, section.document()), atomCell(reader, section.revision()),
+                QueryResult.text(String.join(" / ", reader.headingPath(section))), QueryResult.text(section.anchor()),
+                QueryResult.text(reader.sectionText(section)))));
     }
 
     private QueryResult traceProvenance(Reader reader, long assertion, int depth) {

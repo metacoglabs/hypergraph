@@ -58,7 +58,8 @@ final class StatementLogger {
                  Statement.OverlapJoin _, Statement.Closure _, Statement.PatternQuery _, Statement.Expand _, Statement.History _,
                  Statement.Stats _, Statement.ShowTypes _, Statement.ShowBranches _, Statement.ShowViews _, Statement.ShowView _,
                  Statement.ShowTenants _, Statement.ShowUsers _, Statement.WhoAmI _, Statement.DiffBranches _,
-                 Statement.DiffGenerations _, Statement.ResolveSignals _, Statement.Trace _, Statement.ShowGrants _ -> Category.READ;
+                 Statement.DiffGenerations _, Statement.ResolveSignals _, Statement.Trace _, Statement.ShowGrants _,
+                 Statement.Revisions _, Statement.RevisionOf _, Statement.SectionsOf _, Statement.ShowSection _ -> Category.READ;
             default -> Category.MOD;
         };
     }

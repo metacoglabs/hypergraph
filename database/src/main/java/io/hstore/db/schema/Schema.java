@@ -64,6 +64,21 @@ public final class Schema {
         return type;
     }
 
+    public TypeDef defineSystem(Transaction txn, String name, AtomKind kind) {
+        if (!name.startsWith("$")) {
+            throw HStoreException.invalid("system type names start with $: " + name);
+        }
+        Optional<TypeDef> existing = type(txn, name);
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        int id = txn.scan(SchemaSlots.TYPES).last().map(entry -> (int) entry.key() + 1).orElse(1);
+        TypeDef type = new TypeDef(id, name, kind, List.of(), List.of(), List.of(), 1);
+        txn.merge(SchemaSlots.TYPE_NAMES, SchemaSlots.nameKey(name), Optional::isEmpty, _ -> Optional.of(new TypeName(name, id)));
+        txn.merge(SchemaSlots.TYPES, id, Optional::isEmpty, _ -> Optional.of(type));
+        return type;
+    }
+
     public TypeDef alter(Transaction txn, TypeDef updated) {
         TypeDef current = require(txn, updated.id());
         if (current.kind() != updated.kind() || !current.name().equals(updated.name())) {
