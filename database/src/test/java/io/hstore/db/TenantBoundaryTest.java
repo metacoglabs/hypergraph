@@ -33,6 +33,7 @@ class TenantBoundaryTest {
             entry("io/hstore/db/hora/SwapSampler.java", "SAMPLE writes a new branch, for global admins only"),
             entry("io/hstore/db/temporal/Temporal.java", "DIFF over whole generations, for global admins only"),
             entry("io/hstore/db/temporal/BranchMerge.java", "branch merges, for global admins only"),
+            entry("io/hstore/db/temporal/BranchRetrieval.java", "branch deltas, comparisons and distances, for global admins only"),
             entry("io/hstore/db/temporal/Transitions.java", "TRANSITIONS reads retained generations and the change feed, and keeps an edge or member only when its stamped tenant is the reader's"),
             entry("io/hstore/db/view/MaterializedViews.java", "view maintenance, filtered by the view's tenant"));
 

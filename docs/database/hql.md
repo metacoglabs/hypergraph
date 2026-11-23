@@ -84,7 +84,7 @@ Values and their storage are described in [data model](data-model.md#values).
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
-| [Transactions, branches, time](#transactions-branches-and-time-travel) | `BEGIN`, `COMMIT`, `ROLLBACK`, `USE BRANCH`, `USE MAIN`, `CREATE BRANCH`, `DROP BRANCH`, `MERGE BRANCH`, `DIFF`, `AT GENERATION`, `AS OF`, `HISTORY`, `SHOW BRANCHES` |
+| [Transactions, branches, time](#transactions-branches-and-time-travel) | `BEGIN`, `COMMIT`, `ROLLBACK`, `USE BRANCH`, `USE MAIN`, `CREATE BRANCH`, `DROP BRANCH`, `MERGE BRANCH`, `BRANCH DELTA`, `BRANCH SURVIVORS`, `BRANCH AFTER`, `COMPARE BRANCH`, `NEAREST BRANCH`, `DIFF`, `AT GENERATION`, `AS OF`, `HISTORY`, `SHOW BRANCHES` |
 | [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `DROP VIEW`, `VIEW`, `SHOW VIEWS` |
 | [Tenancy](#tenancy-and-users) | `CREATE TENANT`, `ALTER TENANT`, `SHOW TENANTS`, `CREATE USER`, `ALTER USER`, `DROP USER`, `SHOW USERS`, `USE TENANT`, `AUTHENTICATE` |
 | [Session](#session-and-output) | `WHOAMI`, `FORMAT` |
@@ -713,6 +713,24 @@ Session semantics (`Session`):
 - `MERGE BRANCH s` defaults the target to the branch's parent; merging a branch marks it merged and it disappears
   from `SHOW BRANCHES`. `DIFF` lists topology changes only (`created`, `deleted`, `added`, `removed`, `updated`
   members), not property changes.
+- Branch retrieval, for global admins (the grammar is below). `BRANCH DELTA b` lists what `b` changed since its fork
+  (or since `SINCE GENERATION g`): one row per incidence, atom or property, with its value before and after.
+  `BRANCH SURVIVORS b` lists the entries of `b`'s head untouched since the fork. `COMPARE BRANCH b AND c` classifies
+  every entry either branch changed since their common ancestor as `ONLY_LEFT`, `ONLY_RIGHT`, `BOTH_SAME` or
+  `BOTH_DIFFERENT`. `NEAREST BRANCH TO b` ranks other active branches by the number of differing entries. `BRANCH
+  AFTER b GENERATION g` lists later commits on `b` within `WINDOW` generations (default 1,000) that touched an atom
+  commit `g` touched; it shows what came after, not what was caused. How they are answered is in
+  [evidence and time](evidence-and-temporal.md#branch-retrieval).
+
+```ebnf
+branch_delta     = "BRANCH" "DELTA" identifier [ "SINCE" "GENERATION" integer ] [ scope ] [ "LIMIT" integer ] ;
+branch_survivors = "BRANCH" "SURVIVORS" identifier [ scope ] [ "LIMIT" integer ] ;
+branch_after     = "BRANCH" "AFTER" identifier "GENERATION" integer [ "WINDOW" integer ] [ "LIMIT" integer ] ;
+compare_branch   = "COMPARE" "BRANCH" identifier "AND" identifier [ scope ] [ "LIMIT" integer ] ;
+nearest_branch   = "NEAREST" "BRANCH" "TO" identifier [ "AMONG" "(" identifier { "," identifier } ")" ] [ scope ] "TOP" integer ;
+scope            = "SCOPE" ( "INCIDENCES" | "TYPE" identifier | "AROUND" ref ) ;
+```
+
 - `HISTORY LIMIT n` replays the change feed from generation `last - n` (default 20), so it shows the commits among
   the last `n` generations; commits that changed nothing are not in the feed. Columns:
   `generation, txn, time, branch, members, slots`.

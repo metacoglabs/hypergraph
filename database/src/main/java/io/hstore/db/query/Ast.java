@@ -111,6 +111,20 @@ public final class Ast {
                         List<Projection> projections, Optional<Expr> orderBy, boolean descending, OptionalLong limit) {
     }
 
+    public sealed interface BranchScope {
+        record Everything() implements BranchScope {
+        }
+
+        record Incidences() implements BranchScope {
+        }
+
+        record OfType(String type) implements BranchScope {
+        }
+
+        record Around(Ref atom) implements BranchScope {
+        }
+    }
+
     public record StructuralVertex(String name, Optional<String> type) {
     }
 
@@ -314,6 +328,21 @@ public final class Ast {
 
         record Members(Ref edge, Optional<String> role, Optional<WeightRange> weight, Optional<Expr> validAt,
                        Optional<EvidencePolicy> policy, OptionalLong limit) implements Statement {
+        }
+
+        record BranchDelta(String branch, OptionalLong since, BranchScope scope, OptionalLong limit) implements Statement {
+        }
+
+        record BranchSurvivors(String branch, BranchScope scope, OptionalLong limit) implements Statement {
+        }
+
+        record CompareBranches(String left, String right, BranchScope scope, OptionalLong limit) implements Statement {
+        }
+
+        record NearestBranch(String target, List<String> among, BranchScope scope, int top) implements Statement {
+        }
+
+        record BranchAfter(String branch, long generation, long window, OptionalLong limit) implements Statement {
         }
 
         record Transitions(String variable, Optional<String> type, Instant from, Instant to, boolean appeared, boolean members,

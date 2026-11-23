@@ -8,6 +8,7 @@ import io.hstore.db.evidence.EvidencePolicy;
 import io.hstore.db.hora.Field;
 import io.hstore.db.hora.Pattern;
 import io.hstore.db.hora.Reducer;
+import io.hstore.db.query.Ast.BranchScope;
 import io.hstore.db.query.Ast.Comparison;
 import io.hstore.db.query.Ast.Expr;
 import io.hstore.db.query.Ast.MemberClause;
@@ -348,6 +349,60 @@ public final class Parser {
             Optional<Expr> validAt = validAt();
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
             return new Statement.Members(edge, role, weight, validAt, policy, limit());
+        }
+        if (peekWord("BRANCH") && peekWordAt(1, "DELTA", "SURVIVORS", "AFTER")) {
+            expect("BRANCH");
+            if (accept("DELTA")) {
+                String branch = identifier();
+                OptionalLong since = OptionalLong.empty();
+                if (accept("SINCE")) {
+                    expect("GENERATION");
+                    since = OptionalLong.of(longValue());
+                }
+                return new Statement.BranchDelta(branch, since, branchScope(), limit());
+            }
+            if (accept("SURVIVORS")) {
+                return new Statement.BranchSurvivors(identifier(), branchScope(), limit());
+            }
+            expect("AFTER");
+            String branch = identifier();
+            expect("GENERATION");
+            long generation = longValue();
+            long window = 1_000;
+            if (accept("WINDOW")) {
+                if (peek().is("-")) {
+                    throw HStoreException.invalid("WINDOW must not be negative");
+                }
+                window = longValue();
+            }
+            return new Statement.BranchAfter(branch, generation, window, limit());
+        }
+        if (accept("COMPARE")) {
+            expect("BRANCH");
+            String left = identifier();
+            expect("AND");
+            String right = identifier();
+            return new Statement.CompareBranches(left, right, branchScope(), limit());
+        }
+        if (accept("NEAREST")) {
+            expect("BRANCH");
+            expect("TO");
+            String target = identifier();
+            List<String> among = new ArrayList<>();
+            if (accept("AMONG")) {
+                expectSymbol("(");
+                do {
+                    among.add(identifier());
+                } while (acceptSymbol(","));
+                expectSymbol(")");
+            }
+            BranchScope scope = branchScope();
+            expect("TOP");
+            long top = longValue();
+            if (top < 1 || top > 1_000) {
+                throw HStoreException.invalid("TOP must be between 1 and 1000");
+            }
+            return new Statement.NearestBranch(target, List.copyOf(among), scope, (int) top);
         }
         if (accept("TRANSITIONS")) {
             expect("EDGE");
@@ -1254,6 +1309,20 @@ public final class Parser {
         return token.text();
     }
 
+    private BranchScope branchScope() {
+        if (!accept("SCOPE")) {
+            return new BranchScope.Everything();
+        }
+        if (accept("INCIDENCES")) {
+            return new BranchScope.Incidences();
+        }
+        if (accept("TYPE")) {
+            return new BranchScope.OfType(identifier());
+        }
+        expect("AROUND");
+        return new BranchScope.Around(ref());
+    }
+
     private Statement.StructuralMatch structuralMatch() {
         List<Ast.StructuralEdge> edges = new ArrayList<>();
         do {
@@ -1345,6 +1414,15 @@ public final class Parser {
 
     private Token peek() {
         return tokens.get(index);
+    }
+
+    private boolean peekWord(String word) {
+        return peek().is(word);
+    }
+
+    private boolean peekWordAt(int ahead, String... words) {
+        Token token = peek(ahead);
+        return java.util.Arrays.stream(words).anyMatch(token::is);
     }
 
     private Token peek(int ahead) {
