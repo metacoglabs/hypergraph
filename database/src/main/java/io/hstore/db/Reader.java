@@ -165,6 +165,14 @@ public sealed class Reader permits Writer {
                 .filter(this::owns);
     }
 
+    public OptionalInt typeOf(long atom) {
+        return view.atom(atom).filter(this::admits).map(record -> OptionalInt.of(record.type())).orElse(OptionalInt.empty());
+    }
+
+    public boolean edgeAtom(long atom) {
+        return view.atom(atom).filter(this::admits).map(record -> record instanceof AtomRecord.EdgeRecord).orElse(false);
+    }
+
     public LongStream validityEndpoints(int edgeType, int side, long lowExclusive, long highInclusive) {
         return ValidityIndex.edges(view, tenant(), edgeType, side, lowExclusive, highInclusive);
     }
