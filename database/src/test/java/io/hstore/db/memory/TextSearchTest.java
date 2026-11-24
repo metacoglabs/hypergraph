@@ -18,9 +18,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -174,6 +178,37 @@ class TextSearchTest {
         assertEquals(before, searches());
         database.close();
         database = reopen();
+        assertEquals(before, searches());
+    }
+
+    @Test
+    void aRebuildThatFailsLeavesTheIndexOfItsTransactionAlone() throws IOException {
+        revise("Note", "a", "# Storage\nClaims stay on Postgres.\n");
+        revise("Note", "b", "# Zoo\nZebra claims here.\n");
+        Map<String, List<TextIndex.Hit>> before = searches();
+        database.close();
+        byte[] marker = "Zebra claims".getBytes(StandardCharsets.UTF_8);
+        boolean flipped = false;
+        try (var files = Files.list(directory.resolve("payload"))) {
+            for (Path file : files.toList()) {
+                byte[] bytes = Files.readAllBytes(file);
+                for (int i = 0; i + marker.length <= bytes.length && !flipped; i++) {
+                    if (Arrays.equals(bytes, i, i + marker.length, marker, 0, marker.length)) {
+                        bytes[i] = 'z';
+                        Files.write(file, bytes);
+                        flipped = true;
+                    }
+                }
+            }
+        }
+        assertTrue(flipped);
+        database = reopen();
+        try (Transaction txn = database.engine().begin(database.options().transaction())) {
+            Writer writer = database.writer(txn);
+            assertThrows(HStoreException.class, writer::rebuildTextIndex);
+            writer.node("Note", "c");
+            database.commit(txn);
+        }
         assertEquals(before, searches());
     }
 
