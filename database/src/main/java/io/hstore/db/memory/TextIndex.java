@@ -164,12 +164,22 @@ public final class TextIndex {
         }
 
         public int rebuild(Workspace workspace) {
-            workspace.replace(INDEX, Tree.empty(INDEX.schema(), workspace.source()));
-            workspace.replace(STATS, Tree.empty(STATS.schema(), workspace.source()));
-            workspace.replace(REVISION_SECTIONS, Tree.empty(REVISION_SECTIONS.schema(), workspace.source()));
-            List<Section> sections = workspace.tree(MemorySlots.SECTIONS).values().toList();
-            sections.forEach(section -> add(workspace, section));
-            return sections.size();
+            Tree<Postings<Posting>> index = workspace.tree(INDEX);
+            Tree<Stat> stats = workspace.tree(STATS);
+            Tree<Postings<Marker>> revisions = workspace.tree(REVISION_SECTIONS);
+            try {
+                workspace.replace(INDEX, Tree.empty(INDEX.schema(), workspace.source()));
+                workspace.replace(STATS, Tree.empty(STATS.schema(), workspace.source()));
+                workspace.replace(REVISION_SECTIONS, Tree.empty(REVISION_SECTIONS.schema(), workspace.source()));
+                List<Section> sections = workspace.tree(MemorySlots.SECTIONS).values().toList();
+                sections.forEach(section -> add(workspace, section));
+                return sections.size();
+            } catch (RuntimeException failed) {
+                workspace.replace(INDEX, index);
+                workspace.replace(STATS, stats);
+                workspace.replace(REVISION_SECTIONS, revisions);
+                throw failed;
+            }
         }
 
         @Override

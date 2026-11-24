@@ -5,6 +5,7 @@ package io.hstore.db.memory;
 
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
+import io.hstore.db.Writer;
 import io.hstore.db.evidence.Evidence;
 import io.hstore.db.evidence.Provenance;
 import io.hstore.db.schema.AtomKind;
@@ -14,6 +15,7 @@ import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.txn.Durability;
 import io.hstore.engine.txn.IncidentEdge;
 import io.hstore.engine.txn.Transaction;
@@ -386,6 +388,23 @@ class DocumentTest {
         assertTrue(payloadsContain("ASYNC-marker"));
         database.engine().checkpoint();
         assertFalse(payloadsContain("ASYNC-marker"));
+    }
+
+    @Test
+    void erasedMarkdownIsNotIndexedFromTheTermCache() {
+        database.close();
+        directory = directory.resolve("cached");
+        database = HypergraphDatabase.open(directory, DatabaseOptions.defaults()
+                .withEngine(EngineOptions.defaults().withPageSize(4096).withDurability(Durability.ASYNC)));
+        database.write(writer -> writer.defineNode("Note", List.of()));
+        long doc = database.write(writer -> writer.node("Note", "secret"));
+        database.write(writer -> writer.appendRevision(doc, "# Secret\nzebra crossing\n", RevisionSpec.DEFAULT));
+        int old = database.engine().createBranch("old", Branch.MAIN).id();
+        database.write(writer -> writer.purge(doc));
+        database.write(database.options().transaction().onBranch(old), Writer::rebuildTextIndex);
+        database.engine().checkpoint();
+        database.write(database.options().transaction().onBranch(old), Writer::rebuildTextIndex);
+        assertEquals(List.of(), database.read(old, reader -> reader.searchText("zebra", TextIndex.Options.top(5).withHistory())));
     }
 
     private boolean payloadsContain(String marker) throws IOException {
