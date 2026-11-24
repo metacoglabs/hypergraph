@@ -150,8 +150,8 @@ docker run -d --name hstore \
   ghcr.io/metacoglabs/hypergraph:0.1.0
 ```
 
-While the repository is private, run `docker login ghcr.io` first with a token that has `read:packages`. To
-build the image yourself instead, run `docker build -t hstore .` and use `hstore` as the image name.
+The package is private, so run `docker login ghcr.io` first with a token that has `read:packages`. To build
+the image yourself instead, run `docker build -t hstore .` and use `hstore` as the image name.
 
 * Open **http://localhost:7480** and sign in as `admin` / `change-me` to use HStore Studio.
 * Open a shell over the wire protocol: `docker exec -it hstore hstore connect 127.0.0.1:7432`.
@@ -160,6 +160,10 @@ build the image yourself instead, run `docker build -t hstore .` and use `hstore
 `HSTORE_PASSWORD=<password> docker compose up -d` does the same with the repository's
 [`docker-compose.yml`](docker-compose.yml), which publishes both ports on localhost only. See
 [operations/docker.md](docs/operations/docker.md) for every option.
+
+To keep Markdown memory for another project, copy [`examples/memory`](examples/memory): a Compose file and a
+small Python client for storing documents as revisions, searching them and asking `RETRIEVE` questions. See
+[memory from another repository](docs/operations/docker.md#memory-from-another-repository).
 
 ## A taste of HQL
 

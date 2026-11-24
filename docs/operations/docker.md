@@ -33,8 +33,7 @@ Releases are published as `ghcr.io/metacoglabs/hypergraph`, for linux/amd64 and 
 | `latest` | the newest release |
 | `0.1.0-amd64`, `0.1.0-arm64` | the single-architecture images behind `0.1.0` |
 
-While the repository is private, the package is private too: `docker login ghcr.io` with a personal access token
-that has `read:packages`. The examples on this page use the name `hstore`, which is what `docker build -t hstore .`
+The package is private: `docker login ghcr.io` with a personal access token that has `read:packages`. The examples on this page use the name `hstore`, which is what `docker build -t hstore .`
 produces. Substitute the registry name to use a released image.
 
 ## Image layout
@@ -212,6 +211,38 @@ docker compose up -d
 docker compose exec hstore hstore connect 127.0.0.1:7432      # HSTORE_USER is set, no prompt
 docker compose down            # keeps the volume; add -v to delete the data
 ```
+
+## Memory from another repository
+
+[`examples/memory`](../../examples/memory) is a starting point for a project that keeps Markdown memory in HStore.
+Copy the folder into the other repository. It holds a Compose file, an `.env.example`, sample documents and
+`hstore_memory`, a Python client that needs only the standard library and talks to the server over the Studio HTTP
+API on port 7480.
+
+```
+cp .env.example .env              # set HSTORE_PASSWORD; HSTORE_IMAGE and HSTORE_TAG pick the image
+docker compose up -d --wait
+export HSTORE_URL=http://127.0.0.1:7480 HSTORE_USER=admin HSTORE_PASSWORD='<the password>'
+python3 -m hstore_memory ingest ./notes
+python3 -m hstore_memory search "storage decision"
+python3 -m hstore_memory retrieve "where do we keep notes?"
+```
+
+`Memory.remember(key, markdown)` stores a new revision of the document with that key and creates the node the first
+time; each heading starts a section, and each section gets a vector unless `embed=False`. `search` is BM25 over the
+latest revisions (`history=True` for all of them), `retrieve` runs `RETRIEVE`, `forget` runs `PURGE`, and
+`client.execute(script)` runs any HQL. From other languages, `POST /api/login` with `{"user", "password"}` and then
+`POST /api/query` with `{"script"}`, keeping the session cookie and sending the header `X-HStore-Studio: 1` on every
+POST. The reply has one frame per statement with `columns`, `rows` and `message`, or `error`, and stops at the first
+error.
+
+The default encoder is `hashing`, which matches words rather than meaning. Set `HSTORE_EMBEDDING_PROVIDER`
+(`openai` or `ollama`), `HSTORE_EMBEDDING_URL`, `HSTORE_EMBEDDING_MODEL`, `HSTORE_EMBEDDING_DIMENSIONS` and
+`HSTORE_EMBEDDING_API_KEY` in `.env` before storing documents for semantic retrieval.
+
+`./smoke.sh` starts a throwaway stack on ports 17532 and 17580, stores the sample documents, and checks search, a
+new revision, history, retrieval, `REBUILD TEXT INDEX`, a restart and a purge before removing the stack and its
+volume.
 
 ## Building the image
 
