@@ -66,18 +66,25 @@ public final class Parser {
     }
 
     public static List<Sourced> sourced(String source) {
-        Parser parser = new Parser(source);
+        try {
+            return new Parser(source).statements(source);
+        } catch (StackOverflowError deep) {
+            throw HStoreException.invalid("statement is nested too deeply to parse");
+        }
+    }
+
+    private List<Sourced> statements(String source) {
         List<Sourced> statements = new ArrayList<>();
-        while (!parser.atEnd()) {
-            if (parser.acceptSymbol(";")) {
+        while (!atEnd()) {
+            if (acceptSymbol(";")) {
                 continue;
             }
-            int start = parser.peek().position();
-            Statement statement = parser.statement();
-            int end = parser.atEnd() ? source.length() : parser.peek().position();
+            int start = peek().position();
+            Statement statement = statement();
+            int end = atEnd() ? source.length() : peek().position();
             statements.add(new Sourced(statement, source.substring(start, Math.max(start, end)).strip()));
-            if (!parser.atEnd()) {
-                parser.expectSymbol(";");
+            if (!atEnd()) {
+                expectSymbol(";");
             }
         }
         return statements;
@@ -1148,10 +1155,14 @@ public final class Parser {
         return accept("NOT") ? new Expr.Not(nested(this::negation)) : predicate();
     }
 
-    private Expr nested(Supplier<Expr> parse) {
+    private void deeper() {
         if (++nesting > MAX_NESTING) {
             throw error("expression nested deeper than " + MAX_NESTING + " levels");
         }
+    }
+
+    private Expr nested(Supplier<Expr> parse) {
+        deeper();
         try {
             return parse.get();
         } finally {
@@ -1229,21 +1240,27 @@ public final class Parser {
     }
 
     private Expr additive() {
-        Expr left = multiplicative();
-        while (peek().is("+") || peek().is("-")) {
-            char op = next().text().charAt(0);
-            left = new Expr.Arithmetic(op, left, multiplicative());
-        }
-        return left;
+        return chain(this::multiplicative, "+", "-");
     }
 
     private Expr multiplicative() {
-        Expr left = primary();
-        while (peek().is("*") || peek().is("/")) {
-            char op = next().text().charAt(0);
-            left = new Expr.Arithmetic(op, left, primary());
+        return chain(this::primary, "*", "/");
+    }
+
+    private Expr chain(Supplier<Expr> operand, String first, String second) {
+        Expr left = operand.get();
+        int links = 0;
+        try {
+            while (peek().is(first) || peek().is(second)) {
+                deeper();
+                links++;
+                char op = next().text().charAt(0);
+                left = new Expr.Arithmetic(op, left, operand.get());
+            }
+            return left;
+        } finally {
+            nesting -= links;
         }
-        return left;
     }
 
     private Expr primary() {
@@ -1268,7 +1285,7 @@ public final class Parser {
             List<Expr> arguments = new ArrayList<>();
             if (!peek().is(")")) {
                 do {
-                    arguments.add(expression());
+                    arguments.add(nested(this::expression));
                 } while (acceptSymbol(","));
             }
             expectSymbol(")");
