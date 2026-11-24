@@ -6,13 +6,12 @@ package io.hstore.db.memory;
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.Reader;
-import io.hstore.db.Writer;
 import io.hstore.db.hora.Budget;
+import io.hstore.db.security.Principal;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.tree.Tree;
-import io.hstore.engine.txn.Transaction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -173,7 +172,7 @@ class TextSearchTest {
         });
         assertEquals(List.of(), database.read(reader -> reader.searchText("claims", TextIndex.Options.top(20))));
         assertEquals(1, database.read(reader -> reader.searchText("ghost", TextIndex.Options.top(20))).size());
-        int rebuilt = database.write(Writer::rebuildTextIndex);
+        int rebuilt = database.rebuildTextIndex(Branch.MAIN, Principal.SYSTEM);
         assertEquals(5, rebuilt);
         assertEquals(before, searches());
         database.close();
@@ -182,7 +181,7 @@ class TextSearchTest {
     }
 
     @Test
-    void aRebuildThatFailsLeavesTheIndexOfItsTransactionAlone() throws IOException {
+    void aRebuildOfUnreadableMarkdownFailsAndLeavesTheIndexAlone() throws IOException {
         revise("Note", "a", "# Storage\nClaims stay on Postgres.\n");
         revise("Note", "b", "# Zoo\nZebra claims here.\n");
         Map<String, List<TextIndex.Hit>> before = searches();
@@ -203,38 +202,9 @@ class TextSearchTest {
         }
         assertTrue(flipped);
         database = reopen();
-        try (Transaction txn = database.engine().begin(database.options().transaction())) {
-            Writer writer = database.writer(txn);
-            assertThrows(HStoreException.class, writer::rebuildTextIndex);
-            writer.node("Note", "c");
-            database.commit(txn);
-        }
+        assertThrows(HStoreException.class, () -> database.rebuildTextIndex(Branch.MAIN, Principal.SYSTEM));
+        database.write(writer -> writer.node("Note", "c"));
         assertEquals(before, searches());
-    }
-
-    @Test
-    void aRebuildRacingANewRevisionEndsWithTheIndexOfAFreshRebuild() {
-        for (boolean rebuildFirst : new boolean[] {true, false}) {
-            String key = rebuildFirst ? "first" : "second";
-            revise("Note", "a", "# Storage\nClaims stay on Postgres.\n");
-            long node = database.write(writer -> writer.node("Log", key));
-            Transaction rebuild = database.engine().begin(database.options().transaction());
-            Transaction revision = database.engine().begin(database.options().transaction());
-            try {
-                database.writer(rebuild).rebuildTextIndex();
-                database.writer(revision).appendRevision(node, "# Race\nZebra claims " + key + ".\n", RevisionSpec.DEFAULT);
-                database.commit(rebuildFirst ? rebuild : revision);
-                database.commit(rebuildFirst ? revision : rebuild);
-            } finally {
-                rebuild.close();
-                revision.close();
-            }
-            Map<String, List<TextIndex.Hit>> raced = searches();
-            assertEquals(1, database.read(reader -> reader.searchText("zebra " + key, TextIndex.Options.top(5))).stream()
-                    .filter(hit -> hit.document() == node).count());
-            database.write(Writer::rebuildTextIndex);
-            assertEquals(raced, searches());
-        }
     }
 
     @Test

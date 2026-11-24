@@ -14,7 +14,6 @@ import io.hstore.engine.index.Postings;
 import io.hstore.engine.tree.EntryMeasure;
 import io.hstore.engine.tree.FingerprintMode;
 import io.hstore.engine.tree.Hashing;
-import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeSchema;
 import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.txn.Derivation;
@@ -143,7 +142,7 @@ public final class TextIndex {
         private record Span(long payload, int start, int end) {
         }
 
-        private record Terms(Map<String, Integer> counts, int length) {
+        record Terms(Map<String, Integer> counts, int length) {
         }
 
         private final Supplier<PayloadStore> payloads;
@@ -161,25 +160,6 @@ public final class TextIndex {
                 cachedBytes -= dropped.length;
             }
             terms.keySet().removeIf(span -> span.payload() == payload);
-        }
-
-        public int rebuild(Workspace workspace) {
-            Tree<Postings<Posting>> index = workspace.tree(INDEX);
-            Tree<Stat> stats = workspace.tree(STATS);
-            Tree<Postings<Marker>> revisions = workspace.tree(REVISION_SECTIONS);
-            try {
-                workspace.replace(INDEX, Tree.empty(INDEX.schema(), workspace.source()));
-                workspace.replace(STATS, Tree.empty(STATS.schema(), workspace.source()));
-                workspace.replace(REVISION_SECTIONS, Tree.empty(REVISION_SECTIONS.schema(), workspace.source()));
-                List<Section> sections = workspace.tree(MemorySlots.SECTIONS).values().toList();
-                sections.forEach(section -> add(workspace, section));
-                return sections.size();
-            } catch (RuntimeException failed) {
-                workspace.replace(INDEX, index);
-                workspace.replace(STATS, stats);
-                workspace.replace(REVISION_SECTIONS, revisions);
-                throw failed;
-            }
         }
 
         @Override
@@ -214,7 +194,7 @@ public final class TextIndex {
                     .toList();
         }
 
-        private static boolean current(Workspace workspace, Section section) {
+        static boolean current(Workspace workspace, Section section) {
             return workspace.get(MemorySlots.DOCUMENTS, section.document()).map(head -> head.latest() == section.revision()).orElse(false);
         }
 
@@ -273,7 +253,7 @@ public final class TextIndex {
             });
         }
 
-        private Optional<Terms> terms(Workspace workspace, Section section) {
+        Optional<Terms> terms(Workspace workspace, Section section) {
             Optional<Revision> revision = workspace.get(MemorySlots.REVISIONS, section.revision());
             if (revision.isEmpty()) {
                 return Optional.empty();

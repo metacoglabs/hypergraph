@@ -5,7 +5,6 @@ package io.hstore.db.memory;
 
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
-import io.hstore.db.Writer;
 import io.hstore.db.evidence.Evidence;
 import io.hstore.db.evidence.Provenance;
 import io.hstore.db.schema.AtomKind;
@@ -14,6 +13,7 @@ import io.hstore.db.security.Security;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.engine.EngineOptions;
+import io.hstore.db.security.Principal;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.txn.Durability;
@@ -401,9 +401,9 @@ class DocumentTest {
         database.write(writer -> writer.appendRevision(doc, "# Secret\nzebra crossing\n", RevisionSpec.DEFAULT));
         int old = database.engine().createBranch("old", Branch.MAIN).id();
         database.write(writer -> writer.purge(doc));
-        database.write(database.options().transaction().onBranch(old), Writer::rebuildTextIndex);
+        database.rebuildTextIndex(old, Principal.SYSTEM);
         database.engine().checkpoint();
-        database.write(database.options().transaction().onBranch(old), Writer::rebuildTextIndex);
+        database.rebuildTextIndex(old, Principal.SYSTEM);
         assertEquals(List.of(), database.read(old, reader -> reader.searchText("zebra", TextIndex.Options.top(5).withHistory())));
     }
 

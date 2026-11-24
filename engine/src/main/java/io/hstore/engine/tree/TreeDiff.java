@@ -15,6 +15,9 @@ import java.util.stream.Stream;
 
 public final class TreeDiff {
 
+    private static final int SEARCH_NODES = 64;
+    private static final int NODES_PER_DELTA = 16;
+
     public sealed interface Delta<V> {
         long key();
 
@@ -37,6 +40,20 @@ public final class TreeDiff {
 
     public static <V> Stream<Delta<V>> diff(Tree<V> before, Tree<V> after, long low, long high) {
         return Tree.stream(new Walker<>(before, after, low, high)).map(Entry::value);
+    }
+
+    public static <V> Optional<List<Delta<V>>> bounded(Tree<V> before, Tree<V> after, int maxDeltas) {
+        Walker<V> walker = new Walker<>(before, after, Long.MIN_VALUE, Long.MAX_VALUE);
+        List<Delta<V>> found = new ArrayList<>();
+        walker.budget = SEARCH_NODES + NODES_PER_DELTA;
+        while (walker.hasNext()) {
+            found.add(walker.next().value());
+            if (found.size() > maxDeltas) {
+                return Optional.empty();
+            }
+            walker.budget = SEARCH_NODES + NODES_PER_DELTA * (found.size() + 1L);
+        }
+        return walker.exhausted ? Optional.empty() : Optional.of(found);
     }
 
     public static <V> boolean sameContent(Tree<V> a, Tree<V> b) {
@@ -160,6 +177,9 @@ public final class TreeDiff {
         private final Deque<Item> left = new ArrayDeque<>();
         private final Deque<Item> right = new ArrayDeque<>();
         private Delta<V> pending;
+        private long budget = Long.MAX_VALUE;
+        private long expansions;
+        private boolean exhausted;
 
         Walker(Tree<V> before, Tree<V> after, long low, long high) {
             this.before = before;
@@ -178,6 +198,10 @@ public final class TreeDiff {
         @Override
         public boolean hasNext() {
             while (pending == null && (!left.isEmpty() || !right.isEmpty())) {
+                if (expansions > budget) {
+                    exhausted = true;
+                    return false;
+                }
                 pending = step();
             }
             return pending != null;
@@ -306,6 +330,7 @@ public final class TreeDiff {
         }
 
         private void expand(Deque<Item> side, Tree<V> tree) {
+            expansions++;
             Item.Subtree subtree = (Item.Subtree) side.pop();
             switch (tree.node(subtree.ref())) {
                 case Leaf leaf -> {

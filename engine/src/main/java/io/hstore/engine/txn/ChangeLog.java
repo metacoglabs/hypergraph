@@ -16,6 +16,7 @@ import io.hstore.engine.tree.WriteScope;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.TreeSet;
 
 public final class ChangeLog {
@@ -77,14 +78,13 @@ public final class ChangeLog {
             Ref.write(out, durable.of(pending, schema));
             return;
         }
-        List<TreeDiff.Delta<V>> deltas = TreeDiff.diff(new Tree<>(schema, source, base), new Tree<>(schema, source, after))
-                .limit(MAX_DELTA + 1)
-                .toList();
-        if (deltas.size() > MAX_DELTA) {
+        Optional<List<TreeDiff.Delta<V>>> bounded = TreeDiff.bounded(new Tree<>(schema, source, base), new Tree<>(schema, source, after), MAX_DELTA);
+        if (bounded.isEmpty()) {
             out.putByte(ROOT);
             Ref.write(out, durable.of(pending, schema));
             return;
         }
+        List<TreeDiff.Delta<V>> deltas = bounded.get();
         out.putByte(DELTA).putVarInt(deltas.size());
         for (TreeDiff.Delta<V> delta : deltas) {
             out.putLong(delta.key());

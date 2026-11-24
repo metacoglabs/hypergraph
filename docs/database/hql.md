@@ -1124,7 +1124,7 @@ checkpoint    = "CHECKPOINT" ;                                     (* ADMIN *)
 checkpoint_at = "CHECKPOINT" "AT" ( "AUTO" | number unit ) ;       (* ADMIN *)
 unit          = "B" | "KB" | "MB" | "GB" | "TB" | "KiB" | "MiB" | "GiB" | "TiB" ;   (* any case *)
 compact       = "COMPACT" ;                                        (* ADMIN *)
-rebuild_text  = "REBUILD" "TEXT" "INDEX" ;                         (* ADMIN *)
+rebuild_text  = "REBUILD" "TEXT" "INDEX" ;                         (* ADMIN, not inside BEGIN *)
 stats         = "STATS" ;                                          (* ADMIN *)
 ```
 

@@ -163,6 +163,10 @@ public final class Workspace {
         return base;
     }
 
+    public Workspace scratch(RootVector roots, Derivation derivation) {
+        return new Workspace(source, scope, List.of(derivation), roots, EdgeGuard.NONE, replaying);
+    }
+
     public List<MemberChange> memberChanges() {
         return memberChanges;
     }

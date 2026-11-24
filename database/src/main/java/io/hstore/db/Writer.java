@@ -458,13 +458,6 @@ public final class Writer extends Reader {
         txn.delete(atom);
     }
 
-    public int rebuildTextIndex() {
-        principal().requireGlobal();
-        int[] sections = new int[1];
-        txn.apply("rebuild text index", workspace -> sections[0] = database.textIndexing().rebuild(workspace));
-        return sections[0];
-    }
-
     public Revision appendRevision(long document, String markdown, RevisionSpec spec) {
         principal().requireWrite();
         Atom target = requireWritable(document);

@@ -526,7 +526,12 @@ final class Executor {
                 var report = database().engine().compact();
                 yield QueryResult.message("compacted segments " + report.compacted() + " at generation " + report.generation());
             }
-            case Statement.RebuildTextIndex _ -> write(writer -> QueryResult.message("rebuilt the text index from " + writer.rebuildTextIndex() + " sections"));
+            case Statement.RebuildTextIndex _ -> {
+                if (session.inTransaction() || session.generation().isPresent()) {
+                    throw HStoreException.invalid("REBUILD TEXT INDEX runs on its own, outside BEGIN and AT");
+                }
+                yield QueryResult.message("rebuilt the text index from " + database().rebuildTextIndex(session.branch(), session.principal()) + " sections");
+            }
             case Statement.Begin _, Statement.Commit _, Statement.Rollback _, Statement.UseBranch _, Statement.At _, Statement.AsOf _,
                  Statement.UseTenant _, Statement.Authenticate _, Statement.WhoAmI _, Statement.SetFormat _ ->
                     session.execute(statement);
