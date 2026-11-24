@@ -66,18 +66,25 @@ public final class Parser {
     }
 
     public static List<Sourced> sourced(String source) {
-        Parser parser = new Parser(source);
+        try {
+            return new Parser(source).statements(source);
+        } catch (StackOverflowError deep) {
+            throw HStoreException.invalid("statement is nested too deeply to parse");
+        }
+    }
+
+    private List<Sourced> statements(String source) {
         List<Sourced> statements = new ArrayList<>();
-        while (!parser.atEnd()) {
-            if (parser.acceptSymbol(";")) {
+        while (!atEnd()) {
+            if (acceptSymbol(";")) {
                 continue;
             }
-            int start = parser.peek().position();
-            Statement statement = parser.statement();
-            int end = parser.atEnd() ? source.length() : parser.peek().position();
+            int start = peek().position();
+            Statement statement = statement();
+            int end = atEnd() ? source.length() : peek().position();
             statements.add(new Sourced(statement, source.substring(start, Math.max(start, end)).strip()));
-            if (!parser.atEnd()) {
-                parser.expectSymbol(";");
+            if (!atEnd()) {
+                expectSymbol(";");
             }
         }
         return statements;
