@@ -89,7 +89,7 @@ Values and their storage are described in [data model](data-model.md#values).
 | [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `DROP VIEW`, `VIEW`, `SHOW VIEWS` |
 | [Tenancy](#tenancy-and-users) | `CREATE TENANT`, `ALTER TENANT`, `SHOW TENANTS`, `CREATE USER`, `ALTER USER`, `DROP USER`, `SHOW USERS`, `USE TENANT`, `AUTHENTICATE` |
 | [Session](#session-and-output) | `WHOAMI`, `FORMAT` |
-| [Maintenance](#maintenance) | `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT`, `STATS` |
+| [Maintenance](#maintenance) | `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT`, `REBUILD TEXT INDEX`, `STATS` |
 
 Statements marked **ADMIN** are rejected for non-admin principals before execution. Users, tenants listings and
 views (`CREATE/ALTER/DROP USER`, `SHOW USERS`, `SHOW TENANTS`, `CREATE/REFRESH VIEW`, `VIEW`) accept an admin of
@@ -1093,6 +1093,7 @@ checkpoint    = "CHECKPOINT" ;                                     (* ADMIN *)
 checkpoint_at = "CHECKPOINT" "AT" ( "AUTO" | number unit ) ;       (* ADMIN *)
 unit          = "B" | "KB" | "MB" | "GB" | "TB" | "KiB" | "MiB" | "GiB" | "TiB" ;   (* any case *)
 compact       = "COMPACT" ;                                        (* ADMIN *)
+rebuild_text  = "REBUILD" "TEXT" "INDEX" ;                         (* ADMIN *)
 stats         = "STATS" ;                                          (* ADMIN *)
 ```
 
@@ -1102,6 +1103,7 @@ CHECKPOINT AT 64MB;      -- checkpoint after 67108864 bytes of log, set by CHECK
 CHECKPOINT AT 1 gb;      -- checkpoint after 1073741824 bytes of log, set by CHECKPOINT AT
 CHECKPOINT AT AUTO;      -- checkpoint after 2097152 bytes of log, sized from the store
 COMPACT;                 -- compacted segments [] at generation 246
+REBUILD TEXT INDEX;      -- rebuilt the text index from 1204 sections
 STATS;
 ```
 

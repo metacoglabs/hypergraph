@@ -524,5 +524,8 @@ public final class Ast {
 
         record Compact() implements Statement {
         }
+
+        record RebuildTextIndex() implements Statement {
+        }
     }
 }

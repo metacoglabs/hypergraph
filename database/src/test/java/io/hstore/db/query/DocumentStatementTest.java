@@ -135,6 +135,15 @@ class DocumentStatementTest {
     }
 
     @Test
+    void textIndexRebuildKeepsSearchResults() {
+        List<List<String>> before = session.execute("SEARCH TEXT 'HStore joins postgres' HISTORY TOP 5").rows().stream()
+                .map(row -> row.stream().map(QueryResult.Cell::render).toList()).toList();
+        assertEquals("rebuilt the text index from 4 sections", session.execute("REBUILD TEXT INDEX").message());
+        assertEquals(before, session.execute("SEARCH TEXT 'HStore joins postgres' HISTORY TOP 5").rows().stream()
+                .map(row -> row.stream().map(QueryResult.Cell::render).toList()).toList());
+    }
+
+    @Test
     void textSearchAndVectorsWork() {
         QueryResult hits = session.execute("SEARCH TEXT 'HStore joins' TOP 5");
         assertEquals(List.of("Plan", "Plan / Why"), column(hits, "path"));

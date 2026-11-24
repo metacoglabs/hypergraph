@@ -14,6 +14,7 @@ import io.hstore.engine.index.Postings;
 import io.hstore.engine.tree.EntryMeasure;
 import io.hstore.engine.tree.FingerprintMode;
 import io.hstore.engine.tree.Hashing;
+import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeSchema;
 import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.txn.Derivation;
@@ -160,6 +161,15 @@ public final class TextIndex {
                 cachedBytes -= dropped.length;
             }
             terms.keySet().removeIf(span -> span.payload() == payload);
+        }
+
+        public int rebuild(Workspace workspace) {
+            workspace.replace(INDEX, Tree.empty(INDEX.schema(), workspace.source()));
+            workspace.replace(STATS, Tree.empty(STATS.schema(), workspace.source()));
+            workspace.replace(REVISION_SECTIONS, Tree.empty(REVISION_SECTIONS.schema(), workspace.source()));
+            List<Section> sections = workspace.tree(MemorySlots.SECTIONS).values().toList();
+            sections.forEach(section -> add(workspace, section));
+            return sections.size();
         }
 
         @Override
