@@ -81,6 +81,10 @@ checked on every posting. Each term has two posting lists: one for every revisio
 revisions, which moves when a node gets a new revision. A search without `HISTORY` reads only the second list, so its
 cost does not grow with the number of old revisions. Each posting read counts against the statement's row budget.
 
+`REBUILD TEXT INDEX`, or `Writer.rebuildTextIndex()`, throws away the postings and statistics of the current branch
+and indexes every stored section again, for all tenants, in one transaction. Use it after an upgrade that changes how
+text is split into terms. It needs an administrator of the default tenant.
+
 Because `N` and `df` count every section of the tenant, a user limited by type grants can, by watching the score of a
 section they may read, learn roughly how many sections they may not read contain a term.
 

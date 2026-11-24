@@ -6,9 +6,12 @@ package io.hstore.db.memory;
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.Reader;
+import io.hstore.db.Writer;
 import io.hstore.db.hora.Budget;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
+import io.hstore.engine.catalog.Branch;
+import io.hstore.engine.tree.Tree;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,6 +25,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 
@@ -133,6 +137,43 @@ class TextSearchTest {
         assertEquals(List.of("hstore", "日本"), Tokenizer.tokens("HStore日本"));
         assertEquals(List.of("中"), Tokenizer.tokens("中"));
         assertEquals(List.of("cafe", "δελτα", "ёж", "йод"), Tokenizer.tokens("Café δέλτα ёж йод"));
+    }
+
+    private Map<String, List<TextIndex.Hit>> searches() {
+        Map<String, List<TextIndex.Hit>> results = new LinkedHashMap<>();
+        for (String query : List.of("claims", "postgres hstore", "alice budget", "ghost")) {
+            results.put(query, database.read(reader -> reader.searchText(query, TextIndex.Options.top(20))));
+            results.put(query + " history", database.read(reader -> reader.searchText(query, TextIndex.Options.top(20).withHistory())));
+        }
+        return results;
+    }
+
+    @Test
+    void rebuildingTheTextIndexRegeneratesItFromStoredRevisions() {
+        revise("Note", "a", "# Storage\nClaims stay on Postgres.\n## Owner\nAlice owns the budget.\n");
+        revise("Note", "a", "# Storage\nClaims move to HStore.\n");
+        revise("Note", "b", "# Budget\nAlice and Bob review the claims budget.\n");
+        revise("Log", "c", "# Ops\nPostgres backups run nightly.\n");
+        Map<String, List<TextIndex.Hit>> before = searches();
+        assertTrue(before.get("claims").size() >= 2, before.toString());
+        assertEquals(List.of(), before.get("ghost"));
+        long section = before.get("claims").getFirst().section();
+        database.engine().transactions().system(Branch.MAIN, workspace -> {
+            TextIndex.Posting ghost = new TextIndex.Posting(3, TextIndex.fingerprint("ghost"));
+            long term = TextIndex.termKey(0, "ghost");
+            var postings = TextIndex.POSTINGS.add(Tree.empty(TextIndex.INDEX.schema(), workspace.source()), workspace.scope(), term, section, ghost);
+            workspace.replace(TextIndex.INDEX, TextIndex.POSTINGS.add(postings, workspace.scope(), TextIndex.currentKey(term), section, ghost));
+            workspace.write(TextIndex.STATS, TextIndex.totalKey(0), _ -> Optional.of(new TextIndex.Stat(1, 1, 1, 1)));
+            return null;
+        });
+        assertEquals(List.of(), database.read(reader -> reader.searchText("claims", TextIndex.Options.top(20))));
+        assertEquals(1, database.read(reader -> reader.searchText("ghost", TextIndex.Options.top(20))).size());
+        int rebuilt = database.write(Writer::rebuildTextIndex);
+        assertEquals(5, rebuilt);
+        assertEquals(before, searches());
+        database.close();
+        database = reopen();
+        assertEquals(before, searches());
     }
 
     @Test

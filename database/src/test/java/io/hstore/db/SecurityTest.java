@@ -605,6 +605,10 @@ class SecurityTest {
             assertEquals(1, alice.execute("NEAREST VECTORS TO 'zebra patient summary' TOP 10").rows().size());
             assertThrows(HStoreException.class, () -> bob.execute("EMBED @" + patient + " VIEW 'x' TEXT 'y'"));
             assertThrows(HStoreException.class, () -> bob.execute("VECTORS OF @" + patient));
+            assertThrows(HStoreException.class, () -> alice.execute("REBUILD TEXT INDEX"));
+            assertThrows(HStoreException.class, () -> bob.execute("REBUILD TEXT INDEX"));
+            assertTrue(admin.execute("REBUILD TEXT INDEX").message().contains("2 sections"));
+            assertEquals(before, bob.execute("SEARCH TEXT 'zebra' TOP 10").rows().getFirst().get(3).render());
         }
     }
 

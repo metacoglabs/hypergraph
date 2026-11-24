@@ -428,6 +428,10 @@ public final class Parser {
             return revise();
         }
         if (accept("REBUILD")) {
+            if (accept("TEXT")) {
+                expect("INDEX");
+                return new Statement.RebuildTextIndex();
+            }
             expect("HIERARCHY");
             return new Statement.RebuildHierarchy(identifier());
         }
