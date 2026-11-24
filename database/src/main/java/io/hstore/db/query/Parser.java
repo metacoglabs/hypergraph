@@ -840,6 +840,11 @@ public final class Parser {
         if (accept("COMPACT")) {
             return new Statement.Compact();
         }
+        if (accept("REBUILD")) {
+            expect("TEXT");
+            expect("INDEX");
+            return new Statement.RebuildTextIndex();
+        }
         throw error("unknown statement");
     }
 

@@ -524,6 +524,7 @@ final class Executor {
                 var report = database().engine().compact();
                 yield QueryResult.message("compacted segments " + report.compacted() + " at generation " + report.generation());
             }
+            case Statement.RebuildTextIndex _ -> write(writer -> QueryResult.message("rebuilt the text index from " + writer.rebuildTextIndex() + " sections"));
             case Statement.Begin _, Statement.Commit _, Statement.Rollback _, Statement.UseBranch _, Statement.At _, Statement.AsOf _,
                  Statement.UseTenant _, Statement.Authenticate _, Statement.WhoAmI _, Statement.SetFormat _ ->
                     session.execute(statement);
@@ -537,7 +538,7 @@ final class Executor {
             case Statement.CreateBranch _, Statement.DropBranch _, Statement.MergeBranch _, Statement.ShowBranches _, Statement.Sample _,
                  Statement.BranchDelta _, Statement.BranchSurvivors _, Statement.CompareBranches _, Statement.NearestBranch _, Statement.BranchAfter _,
                  Statement.DiffGenerations _, Statement.DiffBranches _, Statement.History _, Statement.CreateTenant _, Statement.AlterTenant _,
-                 Statement.CreateType _, Statement.CreateIndex _, Statement.CreateJsonIndex _ -> true;
+                 Statement.CreateType _, Statement.CreateIndex _, Statement.CreateJsonIndex _, Statement.RebuildTextIndex _ -> true;
             default -> false;
         };
     }
