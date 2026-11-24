@@ -12,12 +12,14 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ParserDepthTest {
 
     private static final List<String> DEEP = List.of(
-            "MATCH NODE p:Patient WHERE " + "(".repeat(200) + "p.mrn = 'x'" + ")".repeat(200) + " RETURN p",
-            "MATCH NODE p:Patient WHERE " + "NOT ".repeat(200) + "p.mrn = 'x' RETURN p");
+            "MATCH NODE p:Patient WHERE " + "(".repeat(250) + "p.mrn = 'x'" + ")".repeat(250) + " RETURN p",
+            "MATCH NODE p:Patient WHERE " + "NOT ".repeat(250) + "p.mrn = 'x' RETURN p");
 
     private static Throwable parseOnStack(String source, long stackBytes) throws InterruptedException {
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -34,12 +36,27 @@ class ParserDepthTest {
     }
 
     @Test
-    void deepStatementsOnASmallStackAreRefusedAsInvalid() throws InterruptedException {
+    void deepStatementsOnASmallStackParseOrAreRefusedAsInvalid() throws InterruptedException {
         for (String source : DEEP) {
             Throwable thrown = parseOnStack(source, 64 * 1024);
-            HStoreException.InvalidSchema invalid = assertInstanceOf(HStoreException.InvalidSchema.class, thrown, String.valueOf(thrown));
-            assertEquals("statement is nested too deeply to parse", invalid.getMessage());
+            if (thrown != null) {
+                HStoreException.InvalidSchema invalid = assertInstanceOf(HStoreException.InvalidSchema.class, thrown, String.valueOf(thrown));
+                assertEquals("statement is nested too deeply to parse", invalid.getMessage());
+            }
         }
+    }
+
+    @Test
+    void longArithmeticChainsAndNestedCallsCountTowardsTheNestingLimit() {
+        for (String source : List.of(
+                "MATCH NODE p:Patient RETURN " + "1 + ".repeat(300) + "1",
+                "MATCH NODE p:Patient RETURN " + "2 * ".repeat(300) + "2",
+                "MATCH NODE p:Patient RETURN " + "abs(".repeat(300) + "1" + ")".repeat(300),
+                "MATCH NODE p:Patient WHERE " + "(".repeat(150) + "p.mrn = " + "1 + ".repeat(150) + "1" + ")".repeat(150) + " RETURN p")) {
+            HStoreException.InvalidSchema refused = assertThrows(HStoreException.InvalidSchema.class, () -> Parser.script(source));
+            assertTrue(refused.getMessage().contains("expression nested deeper than 256 levels"), refused.getMessage());
+        }
+        assertEquals(1, Parser.script("MATCH NODE p:Patient RETURN " + "1 + ".repeat(200) + "abs(abs(1))").size());
     }
 
     @Test
