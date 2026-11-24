@@ -47,13 +47,14 @@ class ParserDepthTest {
     }
 
     @Test
-    void longArithmeticChainsAndNestedCallsCountTowardsTheNestingLimit() {
+    void longArithmeticChainsAndNestedCallsCountTowardsTheNestingLimit() throws InterruptedException {
         for (String source : List.of(
                 "MATCH NODE p:Patient RETURN " + "1 + ".repeat(300) + "1",
                 "MATCH NODE p:Patient RETURN " + "2 * ".repeat(300) + "2",
                 "MATCH NODE p:Patient RETURN " + "abs(".repeat(300) + "1" + ")".repeat(300),
                 "MATCH NODE p:Patient WHERE " + "(".repeat(150) + "p.mrn = " + "1 + ".repeat(150) + "1" + ")".repeat(150) + " RETURN p")) {
-            HStoreException.InvalidSchema refused = assertThrows(HStoreException.InvalidSchema.class, () -> Parser.script(source));
+            Throwable refused = parseOnStack(source, 8L * 1024 * 1024);
+            assertInstanceOf(HStoreException.InvalidSchema.class, refused);
             assertTrue(refused.getMessage().contains("expression nested deeper than 256 levels"), refused.getMessage());
         }
         assertEquals(1, Parser.script("MATCH NODE p:Patient RETURN " + "1 + ".repeat(200) + "abs(abs(1))").size());
