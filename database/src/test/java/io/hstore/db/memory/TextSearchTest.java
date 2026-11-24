@@ -12,6 +12,7 @@ import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.tree.Tree;
+import io.hstore.engine.txn.Transaction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -174,6 +175,31 @@ class TextSearchTest {
         database.close();
         database = reopen();
         assertEquals(before, searches());
+    }
+
+    @Test
+    void aRebuildRacingANewRevisionEndsWithTheIndexOfAFreshRebuild() {
+        for (boolean rebuildFirst : new boolean[] {true, false}) {
+            String key = rebuildFirst ? "first" : "second";
+            revise("Note", "a", "# Storage\nClaims stay on Postgres.\n");
+            long node = database.write(writer -> writer.node("Log", key));
+            Transaction rebuild = database.engine().begin(database.options().transaction());
+            Transaction revision = database.engine().begin(database.options().transaction());
+            try {
+                database.writer(rebuild).rebuildTextIndex();
+                database.writer(revision).appendRevision(node, "# Race\nZebra claims " + key + ".\n", RevisionSpec.DEFAULT);
+                database.commit(rebuildFirst ? rebuild : revision);
+                database.commit(rebuildFirst ? revision : rebuild);
+            } finally {
+                rebuild.close();
+                revision.close();
+            }
+            Map<String, List<TextIndex.Hit>> raced = searches();
+            assertEquals(1, database.read(reader -> reader.searchText("zebra " + key, TextIndex.Options.top(5))).stream()
+                    .filter(hit -> hit.document() == node).count());
+            database.write(Writer::rebuildTextIndex);
+            assertEquals(raced, searches());
+        }
     }
 
     @Test
