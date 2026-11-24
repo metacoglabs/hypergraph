@@ -162,7 +162,10 @@ public final class HypergraphDatabase implements AutoCloseable {
             return;
         }
         try {
-            pending.forEach(entry -> payloads.erase(entry.key()));
+            pending.forEach(entry -> {
+                payloads.erase(entry.key());
+                textIndexing.forget(entry.key());
+            });
         } catch (RuntimeException failure) {
             LOG.log(System.Logger.Level.WARNING, "could not erase purged payloads; the next checkpoint or open tries again", failure);
             return;

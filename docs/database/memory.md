@@ -83,7 +83,12 @@ cost does not grow with the number of old revisions. Each posting read counts ag
 
 `REBUILD TEXT INDEX`, or `Writer.rebuildTextIndex()`, throws away the postings and statistics of the current branch
 and indexes every stored section again, for all tenants, in one transaction. Use it after an upgrade that changes how
-text is split into terms. It needs an administrator of the default tenant.
+text is split into terms. It needs an administrator of the default tenant. If a stored revision cannot be read, the
+rebuild fails, names the payload, and leaves the index as it was.
+
+The new index is built in memory and written at commit, so the heap must hold it and the transaction page budget must
+allow it. If another transaction indexes text while the rebuild runs, the rebuild is redone at commit on top of that
+change, and other commits wait until it finishes. Run it when writes are quiet.
 
 Because `N` and `df` count every section of the tenant, a user limited by type grants can, by watching the score of a
 section they may read, learn roughly how many sections they may not read contain a term.
