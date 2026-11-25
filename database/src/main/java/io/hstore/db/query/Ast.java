@@ -352,6 +352,10 @@ public final class Ast {
         record VectorsOf(Ref owner) implements Statement {
         }
 
+        record Retrieve(String text, List<Ref> anchors, List<String> resolveIn, List<String> types, OptionalLong validAt, OptionalLong recordedAt,
+                        Optional<EvidencePolicy> policy, Optional<String> hierarchy, boolean history, int top) implements Statement {
+        }
+
         record CreateHierarchy(String name, String model, String view, Optional<String> type, int fanout, int capacity, boolean continuous)
                 implements Statement {
         }
@@ -453,7 +457,13 @@ public final class Ast {
 
         record Diffuse(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
                        Optional<Expr> validAt, Optional<EvidencePolicy> policy, double alpha, double epsilon, OptionalLong reads, long top,
-                       long edges) implements Statement {
+                       long edges, Optional<Validity> during, boolean confidence) implements Statement {
+
+            public Diffuse(List<DiffuseSeed> seeds, List<DiffuseType> through, List<RoleFactor> exit, List<RoleFactor> entry,
+                           Optional<Expr> validAt, Optional<EvidencePolicy> policy, double alpha, double epsilon, OptionalLong reads, long top,
+                           long edges) {
+                this(seeds, through, exit, entry, validAt, policy, alpha, epsilon, reads, top, edges, Optional.empty(), false);
+            }
         }
 
         record Refine(List<Ref> roots, Optional<String> rootType, List<RefineLevel> levels, Optional<String> leafType,

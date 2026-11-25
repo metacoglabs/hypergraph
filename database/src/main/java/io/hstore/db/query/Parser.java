@@ -37,7 +37,9 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -477,6 +479,9 @@ public final class Parser {
         if (accept("ROUTE")) {
             return route();
         }
+        if (accept("RETRIEVE")) {
+            return retrieve();
+        }
         if (accept("SEARCH")) {
             expect("TEXT");
             String query = string();
@@ -583,8 +588,21 @@ public final class Parser {
             }
             List<Ast.RoleFactor> exit = accept("EXIT") ? roleFactors() : List.of();
             List<Ast.RoleFactor> entry = accept("ENTER") ? roleFactors() : List.of();
-            Optional<Expr> validAt = validAt();
+            Optional<Expr> validAt = Optional.empty();
+            Optional<Validity> during = Optional.empty();
+            if (peek().is("VALID") && peek(1).is("DURING")) {
+                index += 2;
+                during = Optional.of(interval());
+            } else {
+                validAt = validAt();
+            }
             Optional<EvidencePolicy> policy = accept("POLICY") ? Optional.of(policy()) : Optional.empty();
+            boolean confidence = false;
+            if (accept("WEIGHTED")) {
+                expect("BY");
+                expect("CONFIDENCE");
+                confidence = true;
+            }
             double alpha = accept("ALPHA") ? number().doubleValue() : 0.2;
             double epsilon = 1e-4;
             OptionalLong reads = OptionalLong.empty();
@@ -604,7 +622,8 @@ public final class Parser {
             if (top < 0 || top > 10_000 || edges < 0 || edges > 10_000) {
                 throw HStoreException.invalid("TOP and EDGES must be between 0 and 10000");
             }
-            return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, reads, top, edges);
+            return new Statement.Diffuse(List.copyOf(seeds), List.copyOf(through), exit, entry, validAt, policy, alpha, epsilon, reads, top, edges,
+                    during, confidence);
         }
         if (accept("REFINE")) {
             expect("FROM");
@@ -1032,6 +1051,69 @@ public final class Parser {
             }
         }
         return new Statement.Revise(document, markdown, validFrom, validTo, sources, note, embed, binding());
+    }
+
+    private Statement retrieve() {
+        String text = string();
+        List<Ref> anchors = new ArrayList<>();
+        List<String> resolveIn = new ArrayList<>();
+        List<String> types = new ArrayList<>();
+        OptionalLong validAt = OptionalLong.empty();
+        OptionalLong recordedAt = OptionalLong.empty();
+        Optional<EvidencePolicy> policy = Optional.empty();
+        Optional<String> hierarchy = Optional.empty();
+        boolean history = false;
+        int top = 10;
+        Set<String> seen = new HashSet<>();
+        while (true) {
+            String option = peek().text().toUpperCase(Locale.ROOT);
+            if (Set.of("ANCHORS", "RESOLVE", "IN", "VALID", "RECORDED", "POLICY", "THROUGH", "HISTORY", "TOP").contains(option) && !seen.add(option)) {
+                throw error("RETRIEVE takes " + option + " at most once");
+            }
+            if (accept("ANCHORS")) {
+                expectSymbol("(");
+                do {
+                    anchors.add(ref());
+                } while (acceptSymbol(","));
+                expectSymbol(")");
+            } else if (accept("RESOLVE")) {
+                expect("IN");
+                resolveIn.addAll(typeList());
+            } else if (accept("IN")) {
+                types.addAll(typeList());
+            } else if (accept("VALID")) {
+                expect("AT");
+                validAt = OptionalLong.of(instant());
+            } else if (accept("RECORDED")) {
+                expect("AT");
+                recordedAt = OptionalLong.of(instant());
+            } else if (accept("POLICY")) {
+                policy = Optional.of(policy());
+            } else if (accept("THROUGH")) {
+                expect("HIERARCHY");
+                hierarchy = Optional.of(identifier());
+            } else if (accept("HISTORY")) {
+                history = true;
+            } else if (peek().is("TOP")) {
+                top = top(10);
+                if (top > 100) {
+                    throw error("RETRIEVE returns at most 100 hits");
+                }
+            } else {
+                break;
+            }
+        }
+        return new Statement.Retrieve(text, anchors, resolveIn, types, validAt, recordedAt, policy, hierarchy, history, top);
+    }
+
+    private List<String> typeList() {
+        List<String> names = new ArrayList<>();
+        expectSymbol("(");
+        do {
+            names.add(identifierOrString());
+        } while (acceptSymbol(","));
+        expectSymbol(")");
+        return names;
     }
 
     private Statement route() {

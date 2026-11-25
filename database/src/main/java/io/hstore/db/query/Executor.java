@@ -26,6 +26,7 @@ import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.Hierarchies;
 import io.hstore.db.memory.Hierarchy;
 import io.hstore.db.memory.Region;
+import io.hstore.db.memory.Retrieval;
 import io.hstore.db.memory.Revision;
 import io.hstore.db.memory.Router;
 import io.hstore.db.memory.RevisionSpec;
@@ -368,6 +369,7 @@ final class Executor {
                 return QueryResult.message(reference.vectors().size() + " reference vectors stored for region " + reference.region());
             });
             case Statement.Route route -> read(reader -> route(reader, route));
+            case Statement.Retrieve retrieve -> read(reader -> retrieve(reader, retrieve));
             case Statement.RevisionOf of -> read(reader -> revisionOf(reader, of));
             case Statement.SectionsOf(Ast.Ref target) -> read(reader -> sectionsOf(reader, session.resolve(reader, target)));
             case Statement.ShowSection(Ast.Ref ref) -> read(reader -> showSection(reader, session.resolve(reader, ref)));
@@ -1291,6 +1293,10 @@ final class Executor {
                 lines.add(String.format(java.util.Locale.ROOT, "local push with alpha %.3g and epsilon %.3g: at most %.0f incidence reads",
                         diffuse.alpha(), diffuse.epsilon(), reads));
                 lines.add("the residual bounds the total error of the scores and is reported with the rows");
+                diffuse.during().ifPresent(during -> lines.add("memberships valid at some time in [" + during.from() + ", " + during.to() + ")"));
+                if (diffuse.confidence()) {
+                    lines.add("membership weights multiplied by their assertion's confidence");
+                }
             }
             case Statement.ExpandFrom expansion -> {
                 lines.add("family associative  exact best-first under the chain value, top " + expansion.top());
@@ -1375,8 +1381,12 @@ final class Executor {
         Map<String, Double> entry = factorMap(statement.entry(), "ENTER");
         OptionalLong validAt = statement.validAt().map(expr -> OptionalLong.of((long) evaluator.value(expr, Map.of()).number()
                 .orElseThrow(() -> HStoreException.invalid("VALID AT needs a number or a timestamp")))).orElse(OptionalLong.empty());
+        if (statement.during().isPresent()) {
+            validAt = OptionalLong.of(statement.during().get().from());
+        }
         Diffusion.Model model = new Diffusion.Model(types, typeWeights, new Diffusion.RoleFactors(exit, entry), validAt,
-                statement.policy().orElse(EvidencePolicy.ANY));
+                statement.during().map(during -> OptionalLong.of(during.to())).orElse(OptionalLong.empty()),
+                statement.policy().orElse(EvidencePolicy.ANY), statement.confidence());
         Diffusion.Result result = Hora.on(reader).diffuse(seeds, model,
                 new Diffusion.Params(statement.alpha(), statement.epsilon(), (int) statement.top(), (int) statement.edges()),
                 (statement.reads().isPresent() ? budget().withRows(statement.reads().getAsLong()) : budget()).start());
@@ -1749,6 +1759,29 @@ final class Executor {
                 .sorted(Comparator.comparingInt(Region::level).reversed().thenComparingLong(Region::id))
                 .map(region -> List.of(QueryResult.number(region.id()), QueryResult.number(region.parent()), QueryResult.number(region.level()),
                         QueryResult.number(region.count()), QueryResult.number(Hierarchies.children(reader, region.id()).size()))));
+    }
+
+    private QueryResult retrieve(Reader reader, Statement.Retrieve statement) {
+        List<Long> anchors = statement.anchors().stream().map(ref -> session.resolve(reader, ref)).toList();
+        Retrieval.Query query = Retrieval.Query.of(statement.text()).withAnchors(anchors).resolvingIn(Set.copyOf(statement.resolveIn()))
+                .inTypes(Set.copyOf(statement.types())).withValidAt(statement.validAt()).withRecordedAt(statement.recordedAt())
+                .withPolicy(statement.policy().orElse(EvidencePolicy.ANY)).inHierarchy(statement.hierarchy()).withHistory(statement.history())
+                .limit(statement.top());
+        Retrieval.Result result = reader.retrieve(query, budget().start());
+        QueryResult rows = table(List.of("section", "document", "revision", "score", "lexical", "semantic", "structural", "temporal", "provenance",
+                "current", "later", "path", "evidence", "heading", "text"), result.hits().stream().map(hit -> List.of(atomCell(reader, hit.section()),
+                atomCell(reader, hit.document()), atomCell(reader, hit.revision()), QueryResult.number(hit.score()), QueryResult.number(hit.lexical()),
+                QueryResult.number(hit.semantic()), QueryResult.number(hit.structural()), QueryResult.number(hit.temporal()),
+                QueryResult.number(hit.provenance()), QueryResult.text(hit.current() ? "yes" : "no"),
+                (Cell) new Cell.Items(hit.later().stream().map(id -> atomCell(reader, id)).toList()),
+                (Cell) new Cell.Items(hit.path().stream().map(id -> atomCell(reader, id)).toList()),
+                (Cell) new Cell.Items(hit.evidence().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
+                QueryResult.text(String.join(" / ", hit.heading())), QueryResult.text(hit.text()))));
+        String anchorText = result.anchors().isEmpty() ? "no anchors" : "anchors " + result.anchors().stream().map(id -> "@" + id)
+                .collect(java.util.stream.Collectors.joining(", "));
+        List<String> parts = new ArrayList<>(List.of(result.hits().size() + " hits", anchorText));
+        parts.addAll(result.notes());
+        return new QueryResult(rows.columns(), rows.rows(), String.join("; ", parts), rows.trace());
     }
 
     private QueryResult route(Reader reader, Statement.Route route) {

@@ -83,7 +83,7 @@ Values and their storage are described in [data model](data-model.md#values).
 | [Queries](#queries) | `MATCH`, `EXPLAIN`, `FUSE`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `MOTIFS`, `MOTIF`, `SIMILAR TO`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
-| [Memory documents](#memory-documents) | `REVISE`, `REVISIONS OF`, `REVISION OF`, `SECTIONS OF`, `SECTION`, `PURGE`, `SEARCH TEXT`, `EMBED … VIEW`, `VECTORS OF`, `NEAREST VECTORS`, `CREATE HIERARCHY`, `REFRESH HIERARCHY`, `REBUILD HIERARCHY`, `DROP HIERARCHY`, `SHOW HIERARCHIES`, `REGIONS OF HIERARCHY`, `CALIBRATE HIERARCHY`, `REFERENCE REGION`, `ROUTE` |
+| [Memory documents](#memory-documents) | `RETRIEVE`, `REVISE`, `REVISIONS OF`, `REVISION OF`, `SECTIONS OF`, `SECTION`, `PURGE`, `SEARCH TEXT`, `EMBED … VIEW`, `VECTORS OF`, `NEAREST VECTORS`, `CREATE HIERARCHY`, `REFRESH HIERARCHY`, `REBUILD HIERARCHY`, `DROP HIERARCHY`, `SHOW HIERARCHIES`, `REGIONS OF HIERARCHY`, `CALIBRATE HIERARCHY`, `REFERENCE REGION`, `ROUTE` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
 | [Transactions, branches, time](#transactions-branches-and-time-travel) | `BEGIN`, `COMMIT`, `ROLLBACK`, `USE BRANCH`, `USE MAIN`, `CREATE BRANCH`, `DROP BRANCH`, `MERGE BRANCH`, `BRANCH DELTA`, `BRANCH SURVIVORS`, `BRANCH AFTER`, `COMPARE BRANCH`, `NEAREST BRANCH`, `DIFF`, `AT GENERATION`, `AS OF`, `HISTORY`, `SHOW BRANCHES` |
 | [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `DROP VIEW`, `VIEW`, `SHOW VIEWS` |
@@ -468,8 +468,8 @@ Seed weights lie in `(0, 1]`, factors and `MIN` in `[0, 1]`. Columns: `edge, val
 ```ebnf
 diffuse = "DIFFUSE" "FROM" ref [ "WEIGHT" number ] { "," ref [ "WEIGHT" number ] }
           [ "THROUGH" identifier [ ( "WEIGHT" | "FACTOR" ) number ] { "," identifier [ ( "WEIGHT" | "FACTOR" ) number ] } ]
-          [ "EXIT" factors ] [ "ENTER" factors ] [ "VALID" "AT" additive ] [ "POLICY" policy ]
-          [ "ALPHA" number ] [ "EPSILON" number | "READS" integer ] "TOP" integer [ "EDGES" integer ] ;
+          [ "EXIT" factors ] [ "ENTER" factors ] [ "VALID" "AT" additive | "VALID" "DURING" interval ] [ "POLICY" policy ]
+          [ "WEIGHTED" "BY" "CONFIDENCE" ] [ "ALPHA" number ] [ "EPSILON" number | "READS" integer ] "TOP" integer [ "EDGES" integer ] ;
 factors = "(" identifier number { "," identifier number } ")" ;
 ```
 
@@ -794,6 +794,9 @@ embed_view   = "EMBED" ref "VIEW" string ( "TEXT" string | "VECTOR" "[" number {
 vectors_of   = "VECTORS" "OF" ref ;
 nearest      = "NEAREST" "VECTORS" "TO" ( string | "[" number { "," number } "]" "MODEL" ( identifier | string ) )
                [ "VIEW" string ] [ "HISTORY" ] [ "TOP" integer ] ;
+retrieve     = "RETRIEVE" string { "ANCHORS" "(" ref { "," ref } ")" | "RESOLVE" "IN" "(" type_name { "," type_name } ")"
+               | "IN" "(" type_name { "," type_name } ")" | "VALID" "AT" instant | "RECORDED" "AT" instant
+               | "POLICY" policy | "THROUGH" "HIERARCHY" identifier | "HISTORY" | "TOP" integer } ;
 create_hier  = "CREATE" "HIERARCHY" identifier "ON" "MODEL" ( identifier | string ) "VIEW" string [ "OF" type_name ]
                [ "FANOUT" integer ] [ "LEAVES" integer ] [ "CONTINUOUS" ] ;                     (* tenant ADMIN *)
 hier_admin   = ( "REBUILD" | "DROP" ) "HIERARCHY" identifier ;                                    (* tenant ADMIN *)
@@ -835,6 +838,13 @@ the given `VECTOR`. An atom holds any number of views, one vector per view and m
 it. `REVISE … EMBED` stores a `content` vector for every section. `VECTORS OF` lists an atom's vectors and
 `NEAREST VECTORS TO` searches them, optionally in one view, returning `owner, view, distance, vector`; vectors of
 older revisions' sections are left out unless `HISTORY` is given.
+
+`RETRIEVE` answers a question with sections of memory documents: it runs `SEARCH TEXT`, a vector search (or `ROUTE`
+with `THROUGH HIERARCHY`) and a diffusion from the anchors, fuses the three rankings, resolves each section to the
+revision in force, attaches evidence and picks a set of at most `TOP` (default 10, at most 100) sections that covers
+the question. It returns `section, document, revision, score, lexical, semantic, structural, temporal, provenance,
+current, later, path, evidence, heading, text`; the message lists the anchors used. See
+[memory](memory.md#unified-retrieval).
 
 `CREATE HIERARCHY` groups the sections that have a vector in a model and view into nested regions (`FANOUT` children
 per region, default 16; `LEAVES` sections per lowest region, default 64), `REFRESH`, `REBUILD` and `DROP` maintain it,

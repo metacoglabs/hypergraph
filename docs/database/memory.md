@@ -112,6 +112,13 @@ Deleting an atom drops its vectors; purging a node erases the vectors of the nod
 including versions still in the history window. `MERGE BRANCH` copies the vectors of the revisions and sections it
 copies, and drops the vectors of atoms the branch deleted.
 
+## Diffusion over time and confidence
+
+`DIFFUSE … VALID DURING [a, b)` walks only memberships whose validity overlaps the interval, where `VALID AT t` keeps
+those valid at one instant. `WEIGHTED BY CONFIDENCE` multiplies the weight of every membership by the confidence of
+its qualifier, 1 when it has none, on both sides of each hyperedge, so inferred or doubtful links carry less of the
+walk. See [HORA](hora.md#diffusion).
+
 ## Region hierarchy
 
 A hierarchy groups the sections of a tenant into nested regions, so a query can be routed down to a few regions
@@ -167,6 +174,52 @@ setting references and `REGIONS OF HIERARCHY` need an admin of the tenant; refre
 that finds the change feed no longer covers the hierarchy rebuilds it; routing and `SHOW HIERARCHIES` need a reader.
 Counts in `SHOW HIERARCHIES` are left empty for users limited by type grants, since they include sections of every
 type. `RECALL` charges every section of the hierarchy to the statement's budget before it ranks them.
+
+## Unified retrieval
+
+`Reader.retrieve(query, meter)` and `RETRIEVE` answer a question from memory documents in one call; the code is
+`memory/Retrieval.java`. A query has text, optional anchor atoms, types to resolve anchors in, types of documents to
+search, a valid time and a recorded time, an evidence policy, an optional hierarchy, a history switch and a limit.
+
+1. **Anchors.** The given atoms, plus atoms of the `RESOLVE IN` types whose key equals a run of one to three words of
+   the question, as written or lower-cased. "Alice" resolves to `@Person:'alice'`.
+2. **Lexical.** `SEARCH TEXT` over the question, at most 50 sections or five times the limit. With a valid or
+   recorded time, or `HISTORY`, every revision is searched, so text that was in force then is found by its own words.
+3. **Semantic.** The nearest `content` vectors of sections to the question's encoding, or a `ROUTE` through the named
+   hierarchy, keeping only sections of the requested types.
+4. **Structural.** A personalised walk (`DIFFUSE`) over every hyperedge type, weighted by assertion confidence,
+   restricted to memberships valid at the valid time when one is given and to assertions the policy admits. It
+   starts from the anchors, or without anchors from the ten best sections of the first two lists, which are then left
+   out of its list. A section linked to an anchor by a hyperedge is found even when it shares no words with the
+   question.
+5. **Fusion.** The lists are combined by reciprocal rank.
+6. **Time.** Each candidate is moved to the same section, by anchor, in the revision of its node that is in force: the
+   one `REVISION OF … VALID AT … RECORDED AT …` would return for the requested times, now and everything recorded when
+   none are given, or the latest revision when no revision is valid now. With a requested time, a section that did
+   not exist then is dropped; without one it is kept and marked not current. With `HISTORY` sections stay in their
+   own revision.
+7. **Reranking.** A configured `Reranker` (`DatabaseOptions.withReranker`, a cross-encoder or any other scorer run
+   outside the database) reorders the best 30 candidates by the text that will be returned, and its order decides. A
+   reranker that fails is skipped with a note.
+8. **Evidence.** A hit lists the revision's sources and the evidence of qualifiers on the memberships the policy
+   admits, keeping only records the user may read. Memberships count for the section and for the same section, by
+   anchor, in every earlier revision of its node, since hyperedges usually point at the revision where a fact was
+   first written. `provenance` is 1 when the revision names a source and otherwise the highest admitted confidence.
+   `path` is an anchor, a hyperedge holding it and the section.
+9. **Coverage.** When there are more candidates than the limit, the best candidate is kept and the rest are chosen
+   with the evidence selection of `SELECT EVIDENCE`: relevance plus 1.5 times the share of the question's words and
+   anchors a section adds, each word weighted by how rarely the candidates contain it.
+
+A hit is `current` when its revision is the one in force at the requested time (now by default) and, if the section or
+its earlier versions belong to hyperedges, at least one of those memberships is valid then. A decision recorded in May whose membership ended
+in June is therefore returned with `current = no` once a later decision replaced it. `later` lists the revisions of
+the same node valid from a later time than the hit's revision in which that section changed or disappeared: what
+changed afterward.
+
+Each stage gets a share of the statement's row budget and the time left: a fifth for the text search, a quarter of
+the rest for the vector search, half of what remains for the walk and the rest for assembling hits. A stage that runs
+out keeps what it found and adds a note to the result, so a tight budget gives a smaller answer instead of an error. Every hit
+carries its heading path and its Markdown.
 
 ## Fusion
 
