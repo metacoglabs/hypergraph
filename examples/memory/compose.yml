@@ -1,0 +1,22 @@
+services:
+  hstore:
+    image: ${HSTORE_IMAGE:-hstore}:${HSTORE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${HSTORE_BIND:-127.0.0.1}:${HSTORE_WIRE_PORT:-7432}:7432"
+      - "${HSTORE_BIND:-127.0.0.1}:${HSTORE_HTTP_PORT:-7480}:7480"
+    environment:
+      HSTORE_USER: ${HSTORE_USER:-admin}
+      HSTORE_PASSWORD: ${HSTORE_PASSWORD:?set HSTORE_PASSWORD in .env}
+      HSTORE_EMBEDDING_PROVIDER: ${HSTORE_EMBEDDING_PROVIDER:-hashing}
+      HSTORE_EMBEDDING_URL: ${HSTORE_EMBEDDING_URL:-}
+      HSTORE_EMBEDDING_MODEL: ${HSTORE_EMBEDDING_MODEL:-}
+      HSTORE_EMBEDDING_DIMENSIONS: ${HSTORE_EMBEDDING_DIMENSIONS:-256}
+      HSTORE_EMBEDDING_API_KEY: ${HSTORE_EMBEDDING_API_KEY:-}
+      HSTORE_LOG_STATEMENT: ${HSTORE_LOG_STATEMENT:-ddl}
+    volumes:
+      - hstore-data:/var/lib/hstore/data
+    stop_grace_period: 30s
+
+volumes:
+  hstore-data:
