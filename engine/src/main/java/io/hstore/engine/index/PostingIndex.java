@@ -8,6 +8,7 @@ import io.hstore.engine.tree.Entry;
 import io.hstore.engine.tree.EntryMeasure;
 import io.hstore.engine.tree.FingerprintMode;
 import io.hstore.engine.tree.Hashing;
+import io.hstore.engine.tree.NodeSource;
 import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeSchema;
@@ -179,15 +180,86 @@ public final class PostingIndex<P> {
             keys[at] = posting;
             values.add(at, value);
         }
+        return settle(index.source(), scope, keys, values);
+    }
+
+    private Postings<P> settle(NodeSource source, WriteScope scope, long[] keys, List<P> values) {
         Postings.Inline<P> grown = codec.inline(keys, values);
-        if (keys.length <= inlineLimit && directory.codec().maxSize(grown) <= index.source().layout().maxValueBytes() / 2) {
+        if (keys.length <= inlineLimit && directory.codec().maxSize(grown) <= source.layout().maxValueBytes() / 2) {
             return grown;
         }
-        BulkBuilder<P> builder = Tree.empty(postings, index.source()).builder(scope);
+        BulkBuilder<P> builder = Tree.empty(postings, source).builder(scope);
         for (int i = 0; i < keys.length; i++) {
             builder.add(keys[i], values.get(i));
         }
         return new Postings.Promoted<>(builder.build().root());
+    }
+
+    public Bulk bulk(NodeSource source, WriteScope scope) {
+        return new Bulk(source, scope);
+    }
+
+    public final class Bulk {
+
+        private final NodeSource source;
+        private final WriteScope scope;
+        private final BulkBuilder<Postings<P>> keys;
+        private final long[] held = new long[inlineLimit];
+        private final List<P> values = new ArrayList<>(inlineLimit);
+        private BulkBuilder<P> promoted;
+        private boolean open;
+        private long key;
+        private long last;
+
+        private Bulk(NodeSource source, WriteScope scope) {
+            this.source = source;
+            this.scope = scope;
+            this.keys = Tree.empty(directory, source).builder(scope);
+        }
+
+        public Bulk add(long key, long posting, P value) {
+            if (open && (key < this.key || key == this.key && posting <= last)) {
+                throw new IllegalArgumentException("bulk postings must ascend: (" + key + ", " + posting + ") after (" + this.key + ", " + last + ")");
+            }
+            if (open && key != this.key) {
+                close();
+            }
+            open = true;
+            this.key = key;
+            last = posting;
+            if (promoted != null) {
+                promoted.add(posting, value);
+            } else if (values.size() < inlineLimit) {
+                held[values.size()] = posting;
+                values.add(value);
+            } else {
+                promoted = Tree.empty(postings, source).builder(scope);
+                for (int i = 0; i < values.size(); i++) {
+                    promoted.add(held[i], values.get(i));
+                }
+                promoted.add(posting, value);
+                values.clear();
+            }
+            return this;
+        }
+
+        public Tree<Postings<P>> build() {
+            if (open) {
+                close();
+                open = false;
+            }
+            return keys.build();
+        }
+
+        private void close() {
+            if (promoted != null) {
+                keys.add(key, new Postings.Promoted<>(promoted.build().root()));
+                promoted = null;
+            } else {
+                keys.add(key, settle(source, scope, Arrays.copyOf(held, values.size()), List.copyOf(values)));
+                values.clear();
+            }
+        }
     }
 
     private Optional<Postings<P>> removeInline(Postings.Inline<P> inline, long posting) {

@@ -81,14 +81,27 @@ checked on every posting. Each term has two posting lists: one for every revisio
 revisions, which moves when a node gets a new revision. A search without `HISTORY` reads only the second list, so its
 cost does not grow with the number of old revisions. Each posting read counts against the statement's row budget.
 
-`REBUILD TEXT INDEX`, or `Writer.rebuildTextIndex()`, throws away the postings and statistics of the current branch
-and indexes every stored section again, for all tenants, in one transaction. Use it after an upgrade that changes how
-text is split into terms. It needs an administrator of the default tenant. If a stored revision cannot be read, the
-rebuild fails, names the payload, and leaves the index as it was.
+`REBUILD TEXT INDEX`, or `HypergraphDatabase.rebuildTextIndex(branch, principal)`, throws away the postings and
+statistics of a branch and indexes every stored section again, for all tenants. Use it after an upgrade that changes
+how text is split into terms. It needs an administrator of the default tenant and runs on its own: it is refused
+inside `BEGIN` and on a generation pinned with `AT`. If a stored revision cannot be read, the rebuild fails, names the
+payload, and leaves the index as it was.
 
-The new index is built in memory and written at commit, so the heap must hold it and the transaction page budget must
-allow it. If another transaction indexes text while the rebuild runs, the rebuild is redone at commit on top of that
-change, and other commits wait until it finishes. Run it when writes are quiet.
+The rebuild reads the sections of one snapshot once. It turns them into postings and statistics, sorts them in
+batches of 524,288, and writes each sorted batch to a file under `scratch/` in the database directory. It then
+merges the files, at most 128 at a time, into new trees whose pages go to disk as they fill. Memory therefore holds
+one batch and the merge buffers, plus a small reference per page written; the transaction page quota does not apply,
+and a large index costs disk and time rather than heap. Writes go on while it runs. When the build is done, the
+rebuild compares the sections, revisions and documents of its snapshot with the latest ones and applies the
+difference to the new index, up to eight times, until little is left. Only the last difference is applied at commit,
+so other commits wait for that and not for the build; if writes keep coming faster than the rebuild catches up, that
+last difference can still be large. The commit records the new trees by their roots instead of comparing them with
+the old index.
+
+Payloads purged during a rebuild are erased after it ends, because the rebuild may still need their text to remove
+their postings. With asynchronous durability they are erased at the first checkpoint after that. The snapshot stays
+pinned for the whole rebuild, so pages it holds are not reclaimed until then, and files left in `scratch/` by a
+crash are deleted when the database next opens.
 
 Because `N` and `df` count every section of the tenant, a user limited by type grants can, by watching the score of a
 section they may read, learn roughly how many sections they may not read contain a term.

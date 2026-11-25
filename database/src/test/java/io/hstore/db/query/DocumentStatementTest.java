@@ -144,6 +144,15 @@ class DocumentStatementTest {
     }
 
     @Test
+    void textIndexRebuildRunsOnlyOnItsOwn() {
+        session.execute("BEGIN");
+        HStoreException.InvalidSchema refused = assertThrows(HStoreException.InvalidSchema.class, () -> session.execute("REBUILD TEXT INDEX"));
+        assertEquals("REBUILD TEXT INDEX runs on its own, outside BEGIN and AT", refused.getMessage());
+        session.execute("ROLLBACK");
+        assertEquals("rebuilt the text index from 4 sections", session.execute("REBUILD TEXT INDEX").message());
+    }
+
+    @Test
     void textSearchAndVectorsWork() {
         QueryResult hits = session.execute("SEARCH TEXT 'HStore joins' TOP 5");
         assertEquals(List.of("Plan", "Plan / Why"), column(hits, "path"));

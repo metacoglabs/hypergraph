@@ -12,6 +12,7 @@ import io.hstore.db.schema.SchemaSlots;
 import io.hstore.db.security.Principal;
 import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.Erasure;
+import io.hstore.db.memory.TextRebuild;
 import io.hstore.db.memory.Hierarchies;
 import io.hstore.db.memory.HierarchySlots;
 import io.hstore.db.memory.MemorySlots;
@@ -46,10 +47,13 @@ import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.Transaction;
 import io.hstore.engine.txn.TxnOptions;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -57,9 +61,12 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 public final class HypergraphDatabase implements AutoCloseable {
@@ -73,6 +80,7 @@ public final class HypergraphDatabase implements AutoCloseable {
 
     private final DatabaseOptions options;
     private final PayloadStore payloads;
+    private final Path scratch;
     private final StorageEngine engine;
     private final Schema schema;
     private final SemanticPlane semantic;
@@ -84,6 +92,8 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final Map<Integer, Integer> tenantConnections = new ConcurrentHashMap<>();
     private final byte[] scramSecret;
     private final Map<String, Long> legacyWarnings = new ConcurrentHashMap<>();
+    private final ReentrantReadWriteLock erasureGate = new ReentrantReadWriteLock();
+    private final AtomicLong deferredErasures = new AtomicLong(-1);
     private final Set<Transaction> purging = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     private final Map<Transaction, List<Long>> unsettled = Collections.synchronizedMap(new WeakHashMap<>());
     private final TextIndex.Indexing textIndexing;
@@ -91,6 +101,7 @@ public final class HypergraphDatabase implements AutoCloseable {
 
     private HypergraphDatabase(Path directory, DatabaseOptions options) {
         this.options = options;
+        this.scratch = emptied(directory.resolve("scratch"));
         this.payloads = PayloadStore.open(directory.resolve("payload"));
         AtomicReference<Schema> schemaHolder = new AtomicReference<>();
         this.textIndexing = TextIndex.indexing(() -> payloads);
@@ -131,6 +142,27 @@ public final class HypergraphDatabase implements AutoCloseable {
         unsettled.computeIfAbsent(txn, _ -> Collections.synchronizedList(new ArrayList<>())).add(payload);
     }
 
+    private static Path emptied(Path directory) {
+        try {
+            if (Files.isDirectory(directory)) {
+                try (Stream<Path> left = Files.walk(directory)) {
+                    for (Path path : left.sorted(Comparator.reverseOrder()).toList()) {
+                        if (!path.equals(directory)) {
+                            Files.delete(path);
+                        }
+                    }
+                }
+            }
+            return Files.createDirectories(directory);
+        } catch (IOException failure) {
+            throw HStoreException.io("cannot prepare the scratch directory " + directory, failure);
+        }
+    }
+
+    public Path scratchDirectory() {
+        return scratch;
+    }
+
     public TextIndex.Indexing textIndexing() {
         return textIndexing;
     }
@@ -154,7 +186,43 @@ public final class HypergraphDatabase implements AutoCloseable {
         finishErasures(Long.MAX_VALUE);
     }
 
+    public <T> T deferringErasures(Supplier<T> work) {
+        erasureGate.readLock().lock();
+        try {
+            return work.get();
+        } finally {
+            erasureGate.readLock().unlock();
+            long waiting = deferredErasures.getAndSet(-1);
+            if (waiting >= 0) {
+                try {
+                    finishErasures(waiting);
+                } catch (RuntimeException failure) {
+                    deferredErasures.accumulateAndGet(waiting, Math::max);
+                    LOG.log(System.Logger.Level.WARNING, "could not erase purged payloads after a text index rebuild; the next checkpoint tries again", failure);
+                }
+            }
+        }
+    }
+
+    public int rebuildTextIndex(int branch, Principal principal) {
+        principal.requireGlobal();
+        return TextRebuild.run(this, branch).sections();
+    }
+
     private void finishErasures(long durableGeneration) {
+        if (!erasureGate.writeLock().tryLock()) {
+            deferredErasures.accumulateAndGet(durableGeneration, Math::max);
+            LOG.log(System.Logger.Level.DEBUG, "purged payloads are erased once the running text index rebuild ends");
+            return;
+        }
+        try {
+            eraseDurable(durableGeneration);
+        } finally {
+            erasureGate.writeLock().unlock();
+        }
+    }
+
+    private void eraseDurable(long durableGeneration) {
         List<Entry<Erasure>> pending;
         try (Snapshot snapshot = durableGeneration == Long.MAX_VALUE ? engine.snapshot() : engine.snapshotAt(durableGeneration, Branch.MAIN)) {
             pending = snapshot.scan(MemorySlots.ERASURES).stream().toList();
