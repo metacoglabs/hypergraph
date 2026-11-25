@@ -285,6 +285,16 @@ public final class Parser {
         }
         if (accept("EMBED")) {
             Ref atom = ref();
+            if (accept("VIEW")) {
+                String view = string();
+                if (accept("TEXT")) {
+                    return new Statement.EmbedView(atom, view, Optional.of(string()), Optional.empty(), Optional.empty());
+                }
+                expect("VECTOR");
+                float[] values = vector();
+                expect("MODEL");
+                return new Statement.EmbedView(atom, view, Optional.empty(), Optional.of(values), Optional.of(identifierOrString()));
+            }
             if (accept("TEXT")) {
                 return new Statement.EmbedText(atom, string());
             }
@@ -415,6 +425,22 @@ public final class Parser {
         }
         if (accept("REVISE")) {
             return revise();
+        }
+        if (accept("SEARCH")) {
+            expect("TEXT");
+            String query = string();
+            List<String> types = new ArrayList<>();
+            if (accept("IN")) {
+                do {
+                    types.add(identifierOrString());
+                } while (acceptSymbol(","));
+            }
+            boolean history = accept("HISTORY");
+            return new Statement.SearchText(query, types, history, top(10));
+        }
+        if (accept("VECTORS")) {
+            expect("OF");
+            return new Statement.VectorsOf(ref());
         }
         if (accept("REVISIONS")) {
             expect("OF");
@@ -605,6 +631,9 @@ public final class Parser {
             return new Statement.CompareBranches(left, right, branchScope(), limit());
         }
         if (accept("NEAREST")) {
+            if (accept("VECTORS")) {
+                return nearestVectors();
+            }
             expect("BRANCH");
             expect("TO");
             String target = identifier();
@@ -768,6 +797,11 @@ public final class Parser {
         if (accept("COMPACT")) {
             return new Statement.Compact();
         }
+        if (accept("REBUILD")) {
+            expect("TEXT");
+            expect("INDEX");
+            return new Statement.RebuildTextIndex();
+        }
         throw error("unknown statement");
     }
 
@@ -912,6 +946,7 @@ public final class Parser {
         long validTo = Long.MAX_VALUE;
         List<Ref> sources = new ArrayList<>();
         String note = "";
+        boolean embed = false;
         while (true) {
             if (accept("VALID")) {
                 if (accept("FROM")) {
@@ -928,11 +963,41 @@ public final class Parser {
                 expectSymbol(")");
             } else if (accept("NOTE")) {
                 note = string();
+            } else if (accept("EMBED")) {
+                embed = true;
             } else {
                 break;
             }
         }
-        return new Statement.Revise(document, markdown, validFrom, validTo, sources, note, binding());
+        return new Statement.Revise(document, markdown, validFrom, validTo, sources, note, embed, binding());
+    }
+
+    private Statement nearestVectors() {
+        expect("TO");
+        Optional<String> text = Optional.empty();
+        Optional<float[]> values = Optional.empty();
+        Optional<String> model = Optional.empty();
+        if (peek().kind() == Token.Kind.STRING) {
+            text = Optional.of(string());
+        } else {
+            values = Optional.of(vector());
+            expect("MODEL");
+            model = Optional.of(identifierOrString());
+        }
+        Optional<String> view = accept("VIEW") ? Optional.of(string()) : Optional.empty();
+        boolean history = accept("HISTORY");
+        return new Statement.NearestVectors(text, values, model, view, history, top(10));
+    }
+
+    private int top(int fallback) {
+        if (!accept("TOP")) {
+            return fallback;
+        }
+        long value = longValue();
+        if (value < 1 || value > 1000) {
+            throw error("TOP must be between 1 and 1000");
+        }
+        return (int) value;
     }
 
     private Statement revisionOf() {

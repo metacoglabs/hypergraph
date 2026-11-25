@@ -59,7 +59,8 @@ final class StatementLogger {
                  Statement.Stats _, Statement.ShowTypes _, Statement.ShowBranches _, Statement.ShowViews _, Statement.ShowView _,
                  Statement.ShowTenants _, Statement.ShowUsers _, Statement.WhoAmI _, Statement.DiffBranches _,
                  Statement.DiffGenerations _, Statement.ResolveSignals _, Statement.Trace _, Statement.ShowGrants _,
-                 Statement.Revisions _, Statement.RevisionOf _, Statement.SectionsOf _, Statement.ShowSection _ -> Category.READ;
+                 Statement.Revisions _, Statement.RevisionOf _, Statement.SectionsOf _, Statement.ShowSection _,
+                 Statement.SearchText _, Statement.VectorsOf _, Statement.NearestVectors _ -> Category.READ;
             default -> Category.MOD;
         };
     }

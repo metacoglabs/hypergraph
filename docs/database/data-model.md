@@ -359,12 +359,17 @@ slots use 1 to 8.
 | 57 | `revisions` | primary | 113 | `memory/MemorySlots.java` |
 | 58 | `sections` | primary | 114 | `memory/MemorySlots.java` |
 | 59 | `documents` | primary | 115 | `memory/MemorySlots.java` |
+| 60 | `vectors` | primary | 121 | `memory/VectorRecord.java` |
+| 61 | `owner-vectors` | derived | 122/123 | `memory/VectorRecord.java` |
+| 62 | `text-index` | derived | 117/118 | `memory/TextIndex.java` |
+| 63 | `text-stats` | derived | 119 | `memory/TextIndex.java` |
 | 67 | `erasures` | primary | 116 | `memory/MemorySlots.java` |
 | 75 | `grants` | primary | 110 | `security/Access.java` |
 | 76 | `user-options` | primary | 111 | `security/Access.java` |
 | 77 | `tenant-options` | primary | 112 | `security/Access.java` |
 
-Derived slots are rebuilt by derivations (`PropertyIndexing`, `Signals.INDEXING`, `ValidityIndexing`, `SignatureIndexing`, `NestingIndexing`) inside the writing
+Derived slots are rebuilt by derivations (`PropertyIndexing`, `Signals.INDEXING`, `ValidityIndexing`, `SignatureIndexing`, `NestingIndexing`,
+`TextIndex.indexing`, `VectorRecord.INDEXING`) inside the writing
 transaction; they are never written directly by API calls.
 
 ## Java API

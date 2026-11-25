@@ -9,6 +9,9 @@ import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.MemorySlots;
 import io.hstore.db.memory.Revision;
 import io.hstore.db.memory.Section;
+import io.hstore.db.memory.TextIndex;
+import io.hstore.db.memory.VectorRecord;
+import io.hstore.db.hora.Budget;
 import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertyIndex;
@@ -53,6 +56,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongConsumer;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
@@ -189,6 +193,45 @@ public sealed class Reader permits Writer {
                 .orElseThrow(() -> HStoreException.invalid("section " + section.id() + " has no revision"));
         byte[] bytes = database.payloads().read(revision.payload());
         return new String(bytes, stored.start(), stored.end() - stored.start(), StandardCharsets.UTF_8);
+    }
+
+    public List<TextIndex.Hit> searchText(String query, TextIndex.Options options) {
+        return searchText(query, options, Budget.DEFAULT.start());
+    }
+
+    public List<TextIndex.Hit> searchText(String query, TextIndex.Options options, Budget.Meter meter) {
+        Set<Integer> types = options.types().stream().map(name -> requireReadableType(name).id()).collect(Collectors.toSet());
+        return TextIndex.search(view, tenant(), query, options, section -> view.atom(section.document())
+                .filter(this::admits)
+                .filter(record -> types.isEmpty() || types.contains(record.type()))
+                .isPresent(), meter);
+    }
+
+    public List<VectorRecord> vectors(long owner) {
+        return visible(owner) ? VectorRecord.ofOwner(view, owner).stream().filter(record -> record.tenant() == tenant()).toList() : List.of();
+    }
+
+    public List<VectorRecord.Hit> nearestVectors(String model, float[] query, int k, Optional<String> vectorView, boolean history,
+                                                 SemanticPlane.Consistency consistency, Budget.Meter meter) {
+        OptionalInt id = database.semantic().existingModel(model);
+        if (id.isEmpty()) {
+            return List.of();
+        }
+        Documents.Types memory = database.memoryTypes();
+        Map<Long, Boolean> latest = new HashMap<>();
+        return database.semantic().nearestVectors(view, id.getAsInt(), query, k, consistency, record -> record.tenant() == tenant()
+                && vectorView.map(record.view()::equals).orElse(true) && visible(record.owner())
+                && (history || latest.computeIfAbsent(record.owner(), owner -> current(memory, owner))), meter);
+    }
+
+    private boolean current(Documents.Types memory, long owner) {
+        Optional<AtomRecord> record = view.atom(owner);
+        if (record.isEmpty() || !memory.contains(record.get().type())) {
+            return true;
+        }
+        long revision = view.get(MemorySlots.SECTIONS, owner).map(Section::revision).orElse(owner);
+        return Documents.owner(record.get()).stream()
+                .anyMatch(document -> Documents.head(view, tenant(), document).map(head -> head.latest() == revision).orElse(false));
     }
 
     public View engineView() {

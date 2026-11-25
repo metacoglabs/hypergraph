@@ -94,6 +94,9 @@ class PermissionsTest {
             assertEquals("A-1 history\n", clerk.execute("SECTION " + chart).rows().getFirst().get(5).render().substring(8));
             assertThrows(HStoreException.class, () -> clerk.execute("SECTION " + bio));
             assertThrows(HStoreException.class, () -> clerk.execute("SECTIONS OF @" + id("s")));
+            assertEquals(1, clerk.execute("SEARCH TEXT 'history Ada'").rows().size());
+            assertEquals(2, admin.execute("SEARCH TEXT 'history Ada'").rows().size());
+            assertThrows(HStoreException.class, () -> clerk.execute("SEARCH TEXT 'Ada' IN Doctor"));
             assertEquals("1", cell(clerk.execute("MATCH NODE n RETURN count(*)")));
             assertThrows(HStoreException.class, () -> clerk.execute("REVISE @" + id("p") + " MARKDOWN 'x'"));
             admin.execute("GRANT WRITE ON TYPE Patient TO clerk");

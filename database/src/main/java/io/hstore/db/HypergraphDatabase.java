@@ -13,6 +13,8 @@ import io.hstore.db.security.Principal;
 import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.Erasure;
 import io.hstore.db.memory.MemorySlots;
+import io.hstore.db.memory.TextIndex;
+import io.hstore.db.memory.VectorRecord;
 import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
 import io.hstore.db.security.Access;
@@ -80,15 +82,18 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final byte[] scramSecret;
     private final Map<String, Long> legacyWarnings = new ConcurrentHashMap<>();
     private final Set<Transaction> purging = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
-    private final Map<Transaction, List<long[]>> unsettled = Collections.synchronizedMap(new WeakHashMap<>());
+    private final Map<Transaction, List<Long>> unsettled = Collections.synchronizedMap(new WeakHashMap<>());
+    private final TextIndex.Indexing textIndexing;
     private volatile Documents.Types memoryTypes = Documents.Types.NONE;
 
     private HypergraphDatabase(Path directory, DatabaseOptions options) {
         this.options = options;
         this.payloads = PayloadStore.open(directory.resolve("payload"));
         AtomicReference<Schema> schemaHolder = new AtomicReference<>();
+        this.textIndexing = TextIndex.indexing(() -> payloads);
         List<Derivation> derivations = List.of(new PropertyIndexing(schemaHolder::get, () -> payloads), Signals.INDEXING,
-                ValidityIndexing.INSTANCE, SignatureIndexing.INSTANCE, NestingIndexing.INSTANCE);
+                ValidityIndexing.INSTANCE, SignatureIndexing.INSTANCE, NestingIndexing.INSTANCE, textIndexing,
+                VectorRecord.INDEXING);
         this.engine = StorageEngine.open(directory, options.engine().withExtensions(extensionSlots(), derivations));
         this.schema = new Schema(engine.dictionary());
         schemaHolder.set(schema);
@@ -118,20 +123,25 @@ public final class HypergraphDatabase implements AutoCloseable {
         purging.add(txn);
     }
 
-    void unsettled(Transaction txn, long payload, int tenant, long bytes) {
-        unsettled.computeIfAbsent(txn, _ -> Collections.synchronizedList(new ArrayList<>())).add(new long[]{payload, tenant, bytes});
+    void unsettled(Transaction txn, long payload) {
+        unsettled.computeIfAbsent(txn, _ -> Collections.synchronizedList(new ArrayList<>())).add(payload);
+    }
+
+    public TextIndex.Indexing textIndexing() {
+        return textIndexing;
     }
 
     public void abandon(Transaction txn) {
-        List<long[]> written = unsettled.remove(txn);
+        List<Long> written = unsettled.remove(txn);
         if (written == null) {
             return;
         }
-        for (long[] payload : written) {
+        for (long payload : written) {
             try {
-                payloads.erase(payload[0]);
+                payloads.erase(payload);
+                textIndexing.forget(payload);
             } catch (RuntimeException failure) {
-                LOG.log(System.Logger.Level.WARNING, "could not erase the Markdown of an abandoned revision", failure);
+                LOG.log(System.Logger.Level.WARNING, "could not erase a payload written by an abandoned transaction", failure);
             }
         }
     }
@@ -152,7 +162,10 @@ public final class HypergraphDatabase implements AutoCloseable {
             return;
         }
         try {
-            pending.forEach(entry -> payloads.erase(entry.key()));
+            pending.forEach(entry -> {
+                payloads.erase(entry.key());
+                textIndexing.forget(entry.key());
+            });
         } catch (RuntimeException failure) {
             LOG.log(System.Logger.Level.WARNING, "could not erase purged payloads; the next checkpoint or open tries again", failure);
             return;
@@ -286,7 +299,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     public static List<Slot<?>> extensionSlots() {
         return Stream.of(SchemaSlots.ALL, PropertySlots.ALL, List.<Slot<?>>of(Embedding.EMBEDDINGS),
                         Provenance.SLOTS, StateBindings.SLOTS, Signals.SLOTS, MaterializedViews.SLOTS, Security.SLOTS,
-                        ValiditySlots.SLOTS, SignatureSlots.SLOTS, NestingSlots.SLOTS, MemorySlots.SLOTS)
+                        ValiditySlots.SLOTS, SignatureSlots.SLOTS, NestingSlots.SLOTS, MemorySlots.SLOTS, TextIndex.SLOTS, VectorRecord.SLOTS)
                 .flatMap(List::stream)
                 .toList();
     }

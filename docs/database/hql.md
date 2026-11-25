@@ -83,13 +83,13 @@ Values and their storage are described in [data model](data-model.md#values).
 | [Queries](#queries) | `MATCH`, `EXPLAIN`, `FUSE`, `RANK`, `SELECT EVIDENCE`, `HYPERMATCH`, `MOTIFS`, `MOTIF`, `SIMILAR TO`, `DIFFUSE`, `EXPAND FROM`, `REFINE`, `TRANSITIONS`, `MEMBERS OF`, `INCIDENT TO`, `DESCRIBE`, set algebra |
 | [HORA](#hora-operators) | `GATHER`, `REDUCE`, `SCATTER`, `PROPAGATE`, `NEIGHBORS`, `OVERLAP JOIN`, `CLOSURE`, `EXPAND`, `PATTERN`, `SAMPLE` |
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
-| [Memory documents](#memory-documents) | `REVISE`, `REVISIONS OF`, `REVISION OF`, `SECTIONS OF`, `SECTION`, `PURGE` |
+| [Memory documents](#memory-documents) | `REVISE`, `REVISIONS OF`, `REVISION OF`, `SECTIONS OF`, `SECTION`, `PURGE`, `SEARCH TEXT`, `EMBED … VIEW`, `VECTORS OF`, `NEAREST VECTORS` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
 | [Transactions, branches, time](#transactions-branches-and-time-travel) | `BEGIN`, `COMMIT`, `ROLLBACK`, `USE BRANCH`, `USE MAIN`, `CREATE BRANCH`, `DROP BRANCH`, `MERGE BRANCH`, `BRANCH DELTA`, `BRANCH SURVIVORS`, `BRANCH AFTER`, `COMPARE BRANCH`, `NEAREST BRANCH`, `DIFF`, `AT GENERATION`, `AS OF`, `HISTORY`, `SHOW BRANCHES` |
 | [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `DROP VIEW`, `VIEW`, `SHOW VIEWS` |
 | [Tenancy](#tenancy-and-users) | `CREATE TENANT`, `ALTER TENANT`, `SHOW TENANTS`, `CREATE USER`, `ALTER USER`, `DROP USER`, `SHOW USERS`, `USE TENANT`, `AUTHENTICATE` |
 | [Session](#session-and-output) | `WHOAMI`, `FORMAT` |
-| [Maintenance](#maintenance) | `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT`, `STATS` |
+| [Maintenance](#maintenance) | `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT`, `REBUILD TEXT INDEX`, `STATS` |
 
 Statements marked **ADMIN** are rejected for non-admin principals before execution. Users, tenants listings and
 views (`CREATE/ALTER/DROP USER`, `SHOW USERS`, `SHOW TENANTS`, `CREATE/REFRESH VIEW`, `VIEW`) accept an admin of
@@ -782,13 +782,18 @@ MATCH NODE d:Drug WHERE d SIMILAR TO 'blood clot prevention' TOP 2 RETURN d.name
 ```ebnf
 revise       = "REVISE" ref "MARKDOWN" string { revise_option } [ "AS" variable ] ;
 revise_option = "VALID" "FROM" instant | "VALID" "TO" instant
-              | "SOURCES" "(" ref { "," ref } ")" | "NOTE" string ;
+              | "SOURCES" "(" ref { "," ref } ")" | "NOTE" string | "EMBED" ;
 revisions    = "REVISIONS" "OF" ref ;
 revision_of  = "REVISION" "OF" ref [ "NUMBER" integer | [ "VALID" "AT" instant ] [ "RECORDED" "AT" instant ] ]
                [ "AS" variable ] ;
 sections_of  = "SECTIONS" "OF" ref ;
 section      = "SECTION" ref ;
 purge        = "PURGE" ref ;
+search_text  = "SEARCH" "TEXT" string [ "IN" type_name { "," type_name } ] [ "HISTORY" ] [ "TOP" integer ] ;
+embed_view   = "EMBED" ref "VIEW" string ( "TEXT" string | "VECTOR" "[" number { "," number } "]" "MODEL" ( identifier | string ) ) ;
+vectors_of   = "VECTORS" "OF" ref ;
+nearest      = "NEAREST" "VECTORS" "TO" ( string | "[" number { "," number } "]" "MODEL" ( identifier | string ) )
+               [ "VIEW" string ] [ "HISTORY" ] [ "TOP" integer ] ;
 instant      = integer | string ;
 ```
 
@@ -807,6 +812,17 @@ can name them as members; revisions are atoms of `$Revision`. Both are visible e
 
 `PURGE` removes a node with all its revisions and sections, deletes hyperedges left with no members, and erases the
 stored Markdown and the node's large property values from the payload files. It runs on the main branch only.
+
+`SEARCH TEXT` ranks the sections of the latest revisions by BM25 and returns `section, document, revision, score,
+path, terms` (`TOP` defaults to 10, at most 1000). `IN` keeps sections of nodes of the listed types, and `HISTORY`
+searches every revision. Exact technical terms such as `Reader.retrieve` or `PR-123` are indexed whole as well as in
+parts, so they rank above texts that only contain the parts.
+
+`EMBED … VIEW` stores a vector under a named view of an atom, encoding `TEXT` with the configured encoder or taking
+the given `VECTOR`. An atom holds any number of views, one vector per view and model; storing a view again replaces
+it. `REVISE … EMBED` stores a `content` vector for every section. `VECTORS OF` lists an atom's vectors and
+`NEAREST VECTORS TO` searches them, optionally in one view, returning `owner, view, distance, vector`; vectors of
+older revisions' sections are left out unless `HISTORY` is given.
 See [memory](memory.md).
 
 ```sql
@@ -817,6 +833,9 @@ Move claims storage to HStore.
 ' SOURCES ($meeting) NOTE 'after the 12 May review' AS $r;
 SECTIONS OF $r;
 REVISION OF $n VALID AT '2026-06-01' RECORDED AT '2026-06-15';
+SEARCH TEXT 'HStore decision' IN Note TOP 5;
+EMBED $n VIEW 'decisions' TEXT 'move claims storage to HStore';
+NEAREST VECTORS TO 'where do claims live' VIEW 'decisions' TOP 3;
 PURGE $n;
 -- purged @131: 1 revisions, 2 sections
 ```
@@ -1074,6 +1093,7 @@ checkpoint    = "CHECKPOINT" ;                                     (* ADMIN *)
 checkpoint_at = "CHECKPOINT" "AT" ( "AUTO" | number unit ) ;       (* ADMIN *)
 unit          = "B" | "KB" | "MB" | "GB" | "TB" | "KiB" | "MiB" | "GiB" | "TiB" ;   (* any case *)
 compact       = "COMPACT" ;                                        (* ADMIN *)
+rebuild_text  = "REBUILD" "TEXT" "INDEX" ;                         (* ADMIN *)
 stats         = "STATS" ;                                          (* ADMIN *)
 ```
 
@@ -1083,6 +1103,7 @@ CHECKPOINT AT 64MB;      -- checkpoint after 67108864 bytes of log, set by CHECK
 CHECKPOINT AT 1 gb;      -- checkpoint after 1073741824 bytes of log, set by CHECKPOINT AT
 CHECKPOINT AT AUTO;      -- checkpoint after 2097152 bytes of log, sized from the store
 COMPACT;                 -- compacted segments [] at generation 246
+REBUILD TEXT INDEX;      -- rebuilt the text index from 1204 sections
 STATS;
 ```
 

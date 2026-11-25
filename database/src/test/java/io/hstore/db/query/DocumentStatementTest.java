@@ -104,7 +104,7 @@ class DocumentStatementTest {
                 USE BRANCH draft;
                 REVISE $doc MARKDOWN '# Plan
                 Use HStore everywhere.
-                ' AS $r3;
+                ' EMBED AS $r3;
                 """);
         assertEquals(List.of("1", "2", "3"), column(session.execute("REVISIONS OF $doc"), "number"));
         assertThrows(HStoreException.class, () -> session.execute("PURGE $doc"));
@@ -114,6 +114,8 @@ class DocumentStatementTest {
         assertEquals(List.of("1", "2", "3"), column(session.execute("REVISIONS OF $doc"), "number"));
         assertTrue(column(session.execute("REVISION OF $doc"), "markdown").getFirst().contains("everywhere"));
         assertEquals(List.of("plan"), column(session.execute("SECTIONS OF $r3"), "anchor"));
+        String merged = column(session.execute("SECTIONS OF $r3"), "section").getFirst().split(" ")[0];
+        assertEquals(List.of("content"), column(session.execute("VECTORS OF " + merged), "view"));
     }
 
     @Test
@@ -130,6 +132,39 @@ class DocumentStatementTest {
             assertTrue(refused.getMessage().contains("revisions"), refused.getMessage());
         }
         assertEquals(List.of("main side"), column(session.execute("REVISION OF $doc"), "markdown"));
+    }
+
+    @Test
+    void textIndexRebuildKeepsSearchResults() {
+        List<List<String>> before = session.execute("SEARCH TEXT 'HStore joins postgres' HISTORY TOP 5").rows().stream()
+                .map(row -> row.stream().map(QueryResult.Cell::render).toList()).toList();
+        assertEquals("rebuilt the text index from 4 sections", session.execute("REBUILD TEXT INDEX").message());
+        assertEquals(before, session.execute("SEARCH TEXT 'HStore joins postgres' HISTORY TOP 5").rows().stream()
+                .map(row -> row.stream().map(QueryResult.Cell::render).toList()).toList());
+    }
+
+    @Test
+    void textSearchAndVectorsWork() {
+        QueryResult hits = session.execute("SEARCH TEXT 'HStore joins' TOP 5");
+        assertEquals(List.of("Plan", "Plan / Why"), column(hits, "path"));
+        assertEquals(List.of(), session.execute("SEARCH TEXT 'postgres'").rows());
+        assertEquals(List.of("Plan"), column(session.execute("SEARCH TEXT 'postgres' HISTORY"), "path"));
+        assertEquals(List.of(), session.execute("SEARCH TEXT 'joins' IN Person").rows());
+        assertEquals(1, session.execute("SEARCH TEXT 'joins' IN Note").rows().size());
+        assertEquals(List.of(), session.execute("SEARCH TEXT '...'").rows());
+        session.execute("REVISE $doc MARKDOWN '# Plan\nUse HStore.\n' EMBED AS $r3");
+        String plan = column(session.execute("SECTIONS OF $r3"), "section").getFirst().split(" ")[0];
+        assertEquals(List.of("content"), column(session.execute("VECTORS OF " + plan), "view"));
+        session.execute("EMBED $alice VIEW 'people' TEXT 'Alice leads ClaimsBay'");
+        session.execute("EMBED $alice VIEW 'raw' VECTOR [1, 0, 0] MODEL 'toy'");
+        assertEquals(List.of("people", "raw"), column(session.execute("VECTORS OF $alice"), "view"));
+        assertEquals(List.of(id("alice")), column(session.execute("NEAREST VECTORS TO 'Alice leads ClaimsBay' VIEW 'people' TOP 1"), "owner")
+                .stream().map(cell -> cell.split(" ")[0]).toList());
+        assertEquals(List.of(id("alice")), column(session.execute("NEAREST VECTORS TO [0.9, 0.1, 0] MODEL 'toy'"), "owner")
+                .stream().map(cell -> cell.split(" ")[0]).toList());
+        assertEquals(List.of(), session.execute("NEAREST VECTORS TO [1, 0] MODEL 'unknown'").rows());
+        assertThrows(HStoreException.class, () -> session.execute("SEARCH TEXT 'x' TOP 0"));
+        assertThrows(HStoreException.class, () -> session.execute("EMBED $alice VIEW 'bad view' TEXT 'x'"));
     }
 
     @Test
