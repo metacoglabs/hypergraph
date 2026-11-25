@@ -23,7 +23,11 @@ import io.hstore.db.hora.Pattern;
 import io.hstore.db.hora.PatternMatcher;
 import io.hstore.db.hora.SwapSampler;
 import io.hstore.db.memory.Documents;
+import io.hstore.db.memory.Hierarchies;
+import io.hstore.db.memory.Hierarchy;
+import io.hstore.db.memory.Region;
 import io.hstore.db.memory.Revision;
+import io.hstore.db.memory.Router;
 import io.hstore.db.memory.RevisionSpec;
 import io.hstore.db.memory.Section;
 import io.hstore.db.memory.TextIndex;
@@ -88,6 +92,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -335,6 +340,34 @@ final class Executor {
                                 QueryResult.text(modelName(record.model())), QueryResult.number(record.dimensions()))));
             });
             case Statement.NearestVectors nearest -> read(reader -> nearestVectors(reader, nearest));
+            case Statement.CreateHierarchy create -> write(writer -> {
+                Hierarchy made = Hierarchies.create(writer, new Hierarchies.Spec(create.name(), create.model(), create.view(), create.type(),
+                        create.fanout(), create.capacity(), create.continuous()));
+                return QueryResult.message("hierarchy " + made.name() + " built over " + made.leaves() + " sections");
+            });
+            case Statement.RefreshHierarchy(String name) -> write(writer -> {
+                Hierarchy refreshed = Hierarchies.refresh(writer, name);
+                return QueryResult.message("hierarchy " + name + " holds " + refreshed.leaves() + " sections at generation " + refreshed.generation());
+            });
+            case Statement.RebuildHierarchy(String name) -> write(writer -> {
+                Hierarchy rebuilt = Hierarchies.rebuild(writer, name);
+                return QueryResult.message("hierarchy " + name + " rebuilt over " + rebuilt.leaves() + " sections");
+            });
+            case Statement.DropHierarchy(String name) -> write(writer -> {
+                Hierarchies.drop(writer, name);
+                return QueryResult.message("hierarchy " + name + " dropped");
+            });
+            case Statement.ShowHierarchies _ -> read(this::showHierarchies);
+            case Statement.RegionsOf(String name) -> read(reader -> regionsOf(reader, name));
+            case Statement.CalibrateHierarchy calibrate -> write(writer -> {
+                Hierarchy calibrated = Hierarchies.calibrate(writer, calibrate.name(), calibrate.temperature(), calibrate.levels());
+                return QueryResult.message("hierarchy " + calibrated.name() + " router version " + calibrated.version());
+            });
+            case Statement.ReferenceRegion reference -> write(writer -> {
+                Hierarchies.references(writer, reference.hierarchy(), reference.region(), reference.vectors());
+                return QueryResult.message(reference.vectors().size() + " reference vectors stored for region " + reference.region());
+            });
+            case Statement.Route route -> read(reader -> route(reader, route));
             case Statement.RevisionOf of -> read(reader -> revisionOf(reader, of));
             case Statement.SectionsOf(Ast.Ref target) -> read(reader -> sectionsOf(reader, session.resolve(reader, target)));
             case Statement.ShowSection(Ast.Ref ref) -> read(reader -> showSection(reader, session.resolve(reader, ref)));
@@ -514,7 +547,9 @@ final class Executor {
         return switch (statement) {
             case Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.ShowTenants _, Statement.ShowUsers _,
                  Statement.Grant _, Statement.Revoke _,
-                 Statement.CreateView _, Statement.CreateMotifView _, Statement.RefreshView _, Statement.DropView _, Statement.ShowView _ -> true;
+                 Statement.CreateView _, Statement.CreateMotifView _, Statement.RefreshView _, Statement.DropView _, Statement.ShowView _,
+                 Statement.CreateHierarchy _, Statement.RebuildHierarchy _, Statement.DropHierarchy _, Statement.CalibrateHierarchy _,
+                 Statement.ReferenceRegion _, Statement.RegionsOf _ -> true;
             default -> false;
         };
     }
@@ -1693,6 +1728,56 @@ final class Executor {
 
     private QueryResult memberList(Reader reader, LongStream members) {
         return table(List.of("member"), members.mapToObj(member -> List.of(atomCell(reader, member))));
+    }
+
+    private QueryResult showHierarchies(Reader reader) {
+        long current = database().engine().transactions().current().id();
+        boolean counts = reader.principal().role().readsEveryType();
+        return table(List.of("name", "model", "view", "type", "leaves", "regions", "fanout", "leaves_per_region", "continuous", "generation", "behind"),
+                Hierarchies.list(reader).stream().map(hierarchy -> List.of(QueryResult.text(hierarchy.name()), QueryResult.text(modelName(hierarchy.model())),
+                        QueryResult.text(hierarchy.view()), QueryResult.text(hierarchy.type() == 0 || !reader.readable(hierarchy.type()) ? ""
+                                : reader.schema().require(reader.engineView(), hierarchy.type()).name()),
+                        counts ? QueryResult.number(hierarchy.leaves()) : QueryResult.text(""),
+                        counts ? QueryResult.number(Hierarchies.regions(reader, hierarchy).size()) : QueryResult.text(""),
+                        QueryResult.number(hierarchy.fanout()), QueryResult.number(hierarchy.capacity()), QueryResult.text(hierarchy.continuous() ? "yes" : "no"),
+                        QueryResult.number(hierarchy.generation()), QueryResult.number(Math.max(0, current - hierarchy.generation())))));
+    }
+
+    private QueryResult regionsOf(Reader reader, String name) {
+        Hierarchy hierarchy = Hierarchies.find(reader, name).orElseThrow(() -> HStoreException.invalid("hierarchy '" + name + "' does not exist"));
+        return table(List.of("region", "parent", "level", "leaves", "children"), Hierarchies.regions(reader, hierarchy).stream()
+                .sorted(Comparator.comparingInt(Region::level).reversed().thenComparingLong(Region::id))
+                .map(region -> List.of(QueryResult.number(region.id()), QueryResult.number(region.parent()), QueryResult.number(region.level()),
+                        QueryResult.number(region.count()), QueryResult.number(Hierarchies.children(reader, region.id()).size()))));
+    }
+
+    private QueryResult route(Reader reader, Statement.Route route) {
+        Hierarchy hierarchy = Hierarchies.find(reader, route.hierarchy())
+                .orElseThrow(() -> HStoreException.invalid("hierarchy '" + route.hierarchy() + "' does not exist"));
+        float[] query;
+        if (route.text().isPresent()) {
+            Encoder.Encoded encoded = database().semantic().encoder().encode(route.text().get());
+            if (!encoded.model().equals(modelName(hierarchy.model()))) {
+                throw HStoreException.invalid("hierarchy " + hierarchy.name() + " uses model " + modelName(hierarchy.model())
+                        + " but the encoder produces " + encoded.model() + "; route with a vector");
+            }
+            query = encoded.vector();
+        } else {
+            query = route.vector().orElseThrow();
+        }
+        Router.Policy policy = new Router.Policy(route.mass(), route.min(), route.max(), route.depth(), route.regions(),
+                route.temperature().orElse(Double.NaN), route.fallback(), route.top(), route.recall());
+        Router.Result result = Hierarchies.route(reader, hierarchy.name(), query, policy, budget().start());
+        Router.Stats stats = result.stats();
+        String summary = String.format(Locale.ROOT, "regions scored %d, expanded %d, leaves examined %d, entropy %.2f, mass %.2f, fallback %s%s",
+                stats.regionsScored(), stats.regionsExpanded(), stats.leavesExamined(), stats.entropy(), stats.mass(), stats.fallback() ? "yes" : "no",
+                stats.recall().isPresent() ? String.format(Locale.ROOT, ", recall %.2f", stats.recall().getAsDouble()) : "");
+        QueryResult rows = table(List.of("section", "document", "score", "probability", "path"), result.leaves().stream().map(leaf -> {
+            Section section = reader.section(leaf.id()).orElseThrow();
+            return List.of(atomCell(reader, leaf.id()), atomCell(reader, section.document()), QueryResult.number(leaf.score()),
+                    QueryResult.number(leaf.probability()), QueryResult.text(String.join(" / ", reader.headingPath(section))));
+        }));
+        return new QueryResult(rows.columns(), rows.rows(), summary, rows.trace());
     }
 
     private String modelName(int model) {

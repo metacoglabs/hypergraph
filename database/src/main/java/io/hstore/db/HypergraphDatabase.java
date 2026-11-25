@@ -12,6 +12,8 @@ import io.hstore.db.schema.SchemaSlots;
 import io.hstore.db.security.Principal;
 import io.hstore.db.memory.Documents;
 import io.hstore.db.memory.Erasure;
+import io.hstore.db.memory.Hierarchies;
+import io.hstore.db.memory.HierarchySlots;
 import io.hstore.db.memory.MemorySlots;
 import io.hstore.db.memory.TextIndex;
 import io.hstore.db.memory.VectorRecord;
@@ -76,6 +78,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final SemanticPlane semantic;
     private final Statistics statistics;
     private final MaterializedViews views;
+    private final AutoCloseable hierarchies;
     private final SignIns signIns = new SignIns();
     private final Map<String, Integer> connections = new ConcurrentHashMap<>();
     private final Map<Integer, Integer> tenantConnections = new ConcurrentHashMap<>();
@@ -93,7 +96,7 @@ public final class HypergraphDatabase implements AutoCloseable {
         this.textIndexing = TextIndex.indexing(() -> payloads);
         List<Derivation> derivations = List.of(new PropertyIndexing(schemaHolder::get, () -> payloads), Signals.INDEXING,
                 ValidityIndexing.INSTANCE, SignatureIndexing.INSTANCE, NestingIndexing.INSTANCE, textIndexing,
-                VectorRecord.INDEXING);
+                VectorRecord.INDEXING, HierarchySlots.INDEXING);
         this.engine = StorageEngine.open(directory, options.engine().withExtensions(extensionSlots(), derivations));
         this.schema = new Schema(engine.dictionary());
         schemaHolder.set(schema);
@@ -103,6 +106,7 @@ public final class HypergraphDatabase implements AutoCloseable {
         engine.onCheckpointed(this::finishErasures);
         this.statistics = new Statistics(engine);
         this.views = new MaterializedViews(this);
+        this.hierarchies = Hierarchies.maintain(this);
         this.scramSecret = prepareSignIns();
     }
 
@@ -299,7 +303,8 @@ public final class HypergraphDatabase implements AutoCloseable {
     public static List<Slot<?>> extensionSlots() {
         return Stream.of(SchemaSlots.ALL, PropertySlots.ALL, List.<Slot<?>>of(Embedding.EMBEDDINGS),
                         Provenance.SLOTS, StateBindings.SLOTS, Signals.SLOTS, MaterializedViews.SLOTS, Security.SLOTS,
-                        ValiditySlots.SLOTS, SignatureSlots.SLOTS, NestingSlots.SLOTS, MemorySlots.SLOTS, TextIndex.SLOTS, VectorRecord.SLOTS)
+                        ValiditySlots.SLOTS, SignatureSlots.SLOTS, NestingSlots.SLOTS, MemorySlots.SLOTS, TextIndex.SLOTS, VectorRecord.SLOTS,
+                        HierarchySlots.SLOTS)
                 .flatMap(List::stream)
                 .toList();
     }
@@ -483,6 +488,11 @@ public final class HypergraphDatabase implements AutoCloseable {
 
     @Override
     public void close() {
+        try {
+            hierarchies.close();
+        } catch (Exception failure) {
+            LOG.log(System.Logger.Level.WARNING, "could not stop hierarchy maintenance", failure);
+        }
         views.close();
         statistics.close();
         semantic.close();

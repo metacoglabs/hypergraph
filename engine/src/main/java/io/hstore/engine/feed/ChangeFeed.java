@@ -246,6 +246,14 @@ public final class ChangeFeed implements AutoCloseable {
         return () -> holds.remove(generation);
     }
 
+    public long heldFrom() {
+        long floor = Long.MAX_VALUE;
+        for (LongSupplier hold : holds) {
+            floor = Math.min(floor, hold.getAsLong());
+        }
+        return floor;
+    }
+
     public long retain(long keepAfter) {
         long floor = keepAfter;
         for (LongSupplier hold : holds) {
