@@ -48,11 +48,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.LongConsumer;
 
 public final class StorageEngine implements AutoCloseable {
 
     private static final System.Logger LOG = System.getLogger("hstore.engine");
-    private static final String FORMAT_VERSION = "9";
+    private static final String FORMAT_VERSION = "10";
     private static final int CHANGED_COUNTS_LIMIT = 1 << 20;
 
     private static final int MAX_ATTEMPTS = 8;
@@ -76,6 +77,7 @@ public final class StorageEngine implements AutoCloseable {
     private final ReentrantLock settings = new ReentrantLock();
     private final Thread maintainer;
     private final List<Runnable> checkpointListeners = new CopyOnWriteArrayList<>();
+    private final List<LongConsumer> generationListeners = new CopyOnWriteArrayList<>();
     private long writtenAtCheckpoint;
     private volatile OptionalLong checkpointAt;
     private final AtomicBoolean wakePending = new AtomicBoolean();
@@ -151,7 +153,7 @@ public final class StorageEngine implements AutoCloseable {
             }
             if (!format.getProperty("format", "1").equals(FORMAT_VERSION)) {
                 throw HStoreException.invalid("database " + directory + " uses storage format " + format.getProperty("format", "1")
-                        + "; this build reads format " + FORMAT_VERSION + " (retrieval indexes); export and reload it");
+                        + "; this build reads format " + FORMAT_VERSION + " (memory documents); export and reload it");
             }
             int stored = Integer.parseInt(format.getProperty("page-size"));
             if (stored != options.pageSize()) {
@@ -283,6 +285,10 @@ public final class StorageEngine implements AutoCloseable {
         checkpointListeners.add(listener);
     }
 
+    public void onCheckpointed(LongConsumer listener) {
+        generationListeners.add(listener);
+    }
+
     public Checkpointer.Result checkpoint() {
         requireOpen();
         maintenance.lock();
@@ -302,6 +308,13 @@ public final class StorageEngine implements AutoCloseable {
         for (Runnable listener : checkpointListeners) {
             try {
                 listener.run();
+            } catch (RuntimeException failure) {
+                LOG.log(System.Logger.Level.WARNING, "checkpoint listener failed", failure);
+            }
+        }
+        for (LongConsumer listener : generationListeners) {
+            try {
+                listener.accept(result.generation());
             } catch (RuntimeException failure) {
                 LOG.log(System.Logger.Level.WARNING, "checkpoint listener failed", failure);
             }

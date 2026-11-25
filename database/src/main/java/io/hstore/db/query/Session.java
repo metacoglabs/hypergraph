@@ -290,6 +290,7 @@ public final class Session implements AutoCloseable {
         Transaction txn = transaction.orElseThrow(() -> HStoreException.invalid("no open transaction"));
         transaction = Optional.empty();
         txn.abort();
+        database.abandon(txn);
         return QueryResult.message("rolled back transaction " + txn.id());
     }
 
@@ -380,7 +381,10 @@ public final class Session implements AutoCloseable {
 
     private void release() {
         try {
-            transaction.ifPresent(Transaction::abort);
+            transaction.ifPresent(txn -> {
+                txn.abort();
+                database.abandon(txn);
+            });
         } finally {
             transaction = Optional.empty();
             scram.ifPresent(pending -> pending.reservation().failed());

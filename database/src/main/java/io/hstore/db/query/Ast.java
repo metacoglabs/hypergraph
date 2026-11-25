@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 
 public final class Ast {
@@ -336,6 +337,26 @@ public final class Ast {
         }
 
         record BindState(Ref atom, Value value, String schema, Validity validity) implements Statement {
+        }
+
+        record Revise(Ref document, String markdown, OptionalLong validFrom, long validTo, List<Ref> sources, String note,
+                      Optional<String> bind) implements Statement {
+        }
+
+        record Revisions(Ref document) implements Statement {
+        }
+
+        record RevisionOf(Ref document, OptionalInt number, OptionalLong validAt, OptionalLong recordedAt, Optional<String> bind)
+                implements Statement {
+        }
+
+        record SectionsOf(Ref target) implements Statement {
+        }
+
+        record ShowSection(Ref section) implements Statement {
+        }
+
+        record Purge(Ref document) implements Statement {
         }
 
         record Delete(Ref atom) implements Statement {

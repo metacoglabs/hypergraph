@@ -8,6 +8,7 @@ module io.hstore.db {
     exports io.hstore.db;
     exports io.hstore.db.evidence;
     exports io.hstore.db.hora;
+    exports io.hstore.db.memory;
     exports io.hstore.db.payload;
     exports io.hstore.db.property;
     exports io.hstore.db.query;

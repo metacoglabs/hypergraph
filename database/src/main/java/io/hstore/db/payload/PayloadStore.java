@@ -23,6 +23,7 @@ import java.util.stream.Stream;
 public final class PayloadStore implements AutoCloseable {
 
     private static final int HEADER = 8;
+    private static final int ERASED = 0x50555247;
     private static final int OFFSET_BITS = 40;
     private static final long SEGMENT_LIMIT = 1L << 30;
 
@@ -121,11 +122,48 @@ public final class PayloadStore implements AutoCloseable {
             readFully(channel, body, offset + HEADER);
             byte[] bytes = body.array();
             if (Checksums.crc32c(bytes) != crc) {
+                if (crc == ERASED) {
+                    throw HStoreException.invalid("payload " + Long.toHexString(ref) + " was purged");
+                }
                 throw HStoreException.invalid("payload " + Long.toHexString(ref) + " failed its checksum");
             }
             return bytes;
         } catch (IOException e) {
             throw HStoreException.io("payload read failed", e);
+        }
+    }
+
+    public long erase(long ref) {
+        FileChannel channel = segments.get((int) (ref >>> OFFSET_BITS));
+        long offset = ref & ((1L << OFFSET_BITS) - 1);
+        if (channel == null) {
+            return 0;
+        }
+        try {
+            if (offset + HEADER > channel.size()) {
+                return 0;
+            }
+            ByteBuffer header = ByteBuffer.allocate(HEADER);
+            readFully(channel, header, offset);
+            int length = header.flip().getInt();
+            if (length < 0 || offset + HEADER + length > channel.size()) {
+                return 0;
+            }
+            ByteBuffer zeros = ByteBuffer.allocate(Math.min(length, 1 << 16));
+            for (long written = 0; written < length; ) {
+                zeros.clear().limit((int) Math.min(zeros.capacity(), length - written));
+                while (zeros.hasRemaining()) {
+                    written += channel.write(zeros, offset + HEADER + written);
+                }
+            }
+            ByteBuffer marker = ByteBuffer.allocate(Integer.BYTES).putInt(ERASED).flip();
+            while (marker.hasRemaining()) {
+                channel.write(marker, offset + Integer.BYTES + marker.position());
+            }
+            channel.force(false);
+            return length;
+        } catch (IOException e) {
+            throw HStoreException.io("payload erase failed", e);
         }
     }
 

@@ -644,10 +644,10 @@ class EngineTest {
     }
 
     @Test
-    void format8DirectoriesAreRefused() throws IOException {
-        Files.writeString(directory.resolve("FORMAT"), "format=8\npage-size=1024\n");
+    void format9DirectoriesAreRefused() throws IOException {
+        Files.writeString(directory.resolve("FORMAT"), "format=9\npage-size=1024\n");
         HStoreException refused = assertThrows(HStoreException.class, () -> StorageEngine.open(directory, small()).close());
-        assertTrue(refused.getMessage().endsWith("uses storage format 8; this build reads format 9 (retrieval indexes); export and reload it"),
+        assertTrue(refused.getMessage().endsWith("uses storage format 9; this build reads format 10 (memory documents); export and reload it"),
                 refused.getMessage());
     }
 }

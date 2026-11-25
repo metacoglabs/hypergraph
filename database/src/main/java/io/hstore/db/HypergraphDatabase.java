@@ -10,6 +10,9 @@ import io.hstore.db.property.PropertySlots;
 import io.hstore.db.schema.Schema;
 import io.hstore.db.schema.SchemaSlots;
 import io.hstore.db.security.Principal;
+import io.hstore.db.memory.Documents;
+import io.hstore.db.memory.Erasure;
+import io.hstore.db.memory.MemorySlots;
 import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
 import io.hstore.db.security.Access;
@@ -32,7 +35,9 @@ import io.hstore.engine.HStoreException;
 import io.hstore.engine.StorageEngine;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.Slot;
+import io.hstore.engine.tree.Entry;
 import io.hstore.engine.txn.Derivation;
+import io.hstore.engine.txn.Durability;
 import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.Transaction;
 import io.hstore.engine.txn.TxnOptions;
@@ -40,9 +45,12 @@ import io.hstore.engine.txn.TxnOptions;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
@@ -71,6 +79,9 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final Map<Integer, Integer> tenantConnections = new ConcurrentHashMap<>();
     private final byte[] scramSecret;
     private final Map<String, Long> legacyWarnings = new ConcurrentHashMap<>();
+    private final Set<Transaction> purging = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+    private final Map<Transaction, List<long[]>> unsettled = Collections.synchronizedMap(new WeakHashMap<>());
+    private volatile Documents.Types memoryTypes = Documents.Types.NONE;
 
     private HypergraphDatabase(Path directory, DatabaseOptions options) {
         this.options = options;
@@ -83,9 +94,75 @@ public final class HypergraphDatabase implements AutoCloseable {
         schemaHolder.set(schema);
         this.semantic = new SemanticPlane(engine, payloads, options.encoder(), directory.resolve("semantic"));
         engine.onCheckpoint(semantic::persist);
+        this.memoryTypes = prepareMemory();
+        engine.onCheckpointed(this::finishErasures);
         this.statistics = new Statistics(engine);
         this.views = new MaterializedViews(this);
         this.scramSecret = prepareSignIns();
+    }
+
+    private Documents.Types prepareMemory() {
+        Documents.Types known = read(reader -> Documents.types(reader.engineView(), schema));
+        if (known.equals(Documents.Types.NONE)) {
+            known = write(writer -> Documents.define(writer.transaction(), schema));
+        }
+        finishErasures();
+        return known;
+    }
+
+    public Documents.Types memoryTypes() {
+        return memoryTypes;
+    }
+
+    void erasureRequested(Transaction txn) {
+        purging.add(txn);
+    }
+
+    void unsettled(Transaction txn, long payload, int tenant, long bytes) {
+        unsettled.computeIfAbsent(txn, _ -> Collections.synchronizedList(new ArrayList<>())).add(new long[]{payload, tenant, bytes});
+    }
+
+    public void abandon(Transaction txn) {
+        List<long[]> written = unsettled.remove(txn);
+        if (written == null) {
+            return;
+        }
+        for (long[] payload : written) {
+            try {
+                payloads.erase(payload[0]);
+            } catch (RuntimeException failure) {
+                LOG.log(System.Logger.Level.WARNING, "could not erase the Markdown of an abandoned revision", failure);
+            }
+        }
+    }
+
+    public void finishErasures() {
+        finishErasures(Long.MAX_VALUE);
+    }
+
+    private void finishErasures(long durableGeneration) {
+        List<Entry<Erasure>> pending;
+        try (Snapshot snapshot = durableGeneration == Long.MAX_VALUE ? engine.snapshot() : engine.snapshotAt(durableGeneration, Branch.MAIN)) {
+            pending = snapshot.scan(MemorySlots.ERASURES).stream().toList();
+        } catch (HStoreException released) {
+            LOG.log(System.Logger.Level.DEBUG, "checkpoint generation {0} is no longer retained; erasures wait for the next checkpoint", durableGeneration);
+            return;
+        }
+        if (pending.isEmpty()) {
+            return;
+        }
+        try {
+            pending.forEach(entry -> payloads.erase(entry.key()));
+        } catch (RuntimeException failure) {
+            LOG.log(System.Logger.Level.WARNING, "could not erase purged payloads; the next checkpoint or open tries again", failure);
+            return;
+        }
+        try (Transaction txn = engine.begin(options.transaction())) {
+            pending.forEach(entry -> txn.delete(MemorySlots.ERASURES, entry.key()));
+            txn.commit();
+        } catch (HStoreException.Conflict conflict) {
+            LOG.log(System.Logger.Level.DEBUG, "another commit finished the pending erasures first");
+        }
     }
 
     private byte[] prepareSignIns() {
@@ -209,7 +286,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     public static List<Slot<?>> extensionSlots() {
         return Stream.of(SchemaSlots.ALL, PropertySlots.ALL, List.<Slot<?>>of(Embedding.EMBEDDINGS),
                         Provenance.SLOTS, StateBindings.SLOTS, Signals.SLOTS, MaterializedViews.SLOTS, Security.SLOTS,
-                        ValiditySlots.SLOTS, SignatureSlots.SLOTS, NestingSlots.SLOTS)
+                        ValiditySlots.SLOTS, SignatureSlots.SLOTS, NestingSlots.SLOTS, MemorySlots.SLOTS)
                 .flatMap(List::stream)
                 .toList();
     }
@@ -348,7 +425,14 @@ public final class HypergraphDatabase implements AutoCloseable {
         principal.requireWrite();
         for (int attempt = 1; ; attempt++) {
             try (Transaction txn = engine.begin(txnOptions)) {
-                T result = work.apply(writer(txn, principal));
+                T result;
+                try {
+                    result = work.apply(writer(txn, principal));
+                } catch (RuntimeException failed) {
+                    purging.remove(txn);
+                    abandon(txn);
+                    throw failed;
+                }
                 commit(txn);
                 return result;
             } catch (HStoreException.Conflict conflict) {
@@ -362,7 +446,17 @@ public final class HypergraphDatabase implements AutoCloseable {
 
     public void commit(Transaction txn) {
         payloads.sync();
-        txn.commit();
+        try {
+            txn.commit();
+        } catch (RuntimeException failed) {
+            purging.remove(txn);
+            abandon(txn);
+            throw failed;
+        }
+        unsettled.remove(txn);
+        if (purging.remove(txn) && engine.options().durability() == Durability.SYNC) {
+            finishErasures();
+        }
     }
 
     private static void pause(int attempt) {
